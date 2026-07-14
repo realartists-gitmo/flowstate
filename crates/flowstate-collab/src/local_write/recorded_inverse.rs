@@ -127,7 +127,9 @@ enum RecordedMutation {
   /// `mark_run_styles` law (clear the four run keys, re-mark the set ones).
   /// Mark-only — never touches text identity, so replay cannot interleave
   /// with concurrent remote text. Spans are absolute body-unicode.
-  MarkRunRanges { spans: Vec<(usize, usize, flowstate_document::RunStyles)> },
+  MarkRunRanges {
+    spans: Vec<(usize, usize, flowstate_document::RunStyles)>,
+  },
 }
 
 /// One rich splice: replace `[start, start+delete_len)` with `insert` (a
@@ -301,7 +303,11 @@ fn capture_insert_text(plan: &ResolvedPlan) -> Option<PendingInverseCapture> {
 /// A single paragraph's interior can contain neither `\n` nor U+FFFC, so there
 /// are no boundaries or objects to retire — the record is a verbatim rich slice
 /// (undo re-inserts it) plus a re-delete, both O(len).
-fn capture_intra_paragraph_delete(core: &CrdtRuntime, start: &ResolvedTextPosition, end: &ResolvedTextPosition) -> Option<PendingInverseCapture> {
+fn capture_intra_paragraph_delete(
+  core: &CrdtRuntime,
+  start: &ResolvedTextPosition,
+  end: &ResolvedTextPosition,
+) -> Option<PendingInverseCapture> {
   let len = end.body_unicode.saturating_sub(start.body_unicode);
   if len == 0 {
     return None;
@@ -375,7 +381,10 @@ fn capture_replace_matches(core: &CrdtRuntime, plan: &ResolvedPlan) -> Option<Pe
 
   // Post-position q for each original start, via an ascending cumulative shift.
   let mut q_by_start: std::collections::HashMap<usize, usize> = std::collections::HashMap::with_capacity(matches.len());
-  let mut ascending: Vec<(usize, usize)> = matches.iter().map(|(start, end, _)| (start.body_unicode, end.body_unicode - start.body_unicode)).collect();
+  let mut ascending: Vec<(usize, usize)> = matches
+    .iter()
+    .map(|(start, end, _)| (start.body_unicode, end.body_unicode - start.body_unicode))
+    .collect();
   ascending.sort_by_key(|(start, _)| *start);
   let mut shift: isize = 0;
   for (start, orig_len) in &ascending {
@@ -447,7 +456,10 @@ fn capture_set_paragraph_styles(core: &CrdtRuntime, plan: &ResolvedPlan) -> Opti
   let mut undo_patches: Vec<ProjectionPatch> = Vec::with_capacity(targets.len());
   let mut boundary_ranges: Vec<(usize, usize)> = Vec::with_capacity(targets.len());
   for (paragraph, paragraph_ix, boundary) in targets {
-    let before_style = projection.paragraphs.get(*paragraph_ix).map(|paragraph| paragraph.style)?;
+    let before_style = projection
+      .paragraphs
+      .get(*paragraph_ix)
+      .map(|paragraph| paragraph.style)?;
     let before_value = paragraph_style_value(before_style);
     undo_marks.push((*boundary, before_value));
     redo_marks.push((*boundary, after_value));
@@ -631,7 +643,9 @@ fn capture_set_marks(core: &CrdtRuntime, plan: &ResolvedPlan) -> Option<PendingI
 /// mark attributes — the exact inverse of that writer (other keys, e.g.
 /// paragraph style or vert-align, are deliberately ignored: `SetMarks` never
 /// touches them, so neither may its undo).
-fn run_styles_from_mark_attrs<S: std::hash::BuildHasher>(attrs: Option<&std::collections::HashMap<String, loro::LoroValue, S>>) -> flowstate_document::RunStyles {
+fn run_styles_from_mark_attrs<S: std::hash::BuildHasher>(
+  attrs: Option<&std::collections::HashMap<String, loro::LoroValue, S>>,
+) -> flowstate_document::RunStyles {
   use flowstate_document::loro_schema::{MARK_DIRECT_UNDERLINE, MARK_HIGHLIGHT_STYLE, MARK_RUN_SEMANTIC_STYLE, MARK_STRIKETHROUGH};
   let mut styles = flowstate_document::RunStyles::default();
   let Some(attrs) = attrs else {
@@ -659,7 +673,12 @@ fn run_styles_from_mark_attrs<S: std::hash::BuildHasher>(attrs: Option<&std::col
 /// §act-twelve A12.2.2: single-paragraph `SetParagraphStyle` — the plural
 /// capture's law with one target (no minimum gate: the capture is O(1)).
 fn capture_set_paragraph_style(core: &CrdtRuntime, plan: &ResolvedPlan) -> Option<PendingInverseCapture> {
-  let ResolvedPlan::SetParagraphStyle { paragraph, paragraph_ix, style } = plan else {
+  let ResolvedPlan::SetParagraphStyle {
+    paragraph,
+    paragraph_ix,
+    style,
+  } = plan
+  else {
     return None;
   };
   let projection = core.projection_ref();
@@ -825,19 +844,33 @@ fn capture_delete_range(core: &CrdtRuntime, plan: &ResolvedPlan) -> Option<Pendi
   if first_para_text.len() < start.byte {
     return None;
   }
-  let last_para_len = projection.paragraphs.get(end.paragraph_ix).map(paragraph_text_len)?;
+  let last_para_len = projection
+    .paragraphs
+    .get(end.paragraph_ix)
+    .map(paragraph_text_len)?;
   if last_para_len < end.byte {
     return None;
   }
   let merged_len = start.byte + (last_para_len - end.byte);
   let mut undo_patches = vec![ProjectionPatch::ParagraphText {
     block_id: projection.ids.block_ids.get(first_block_ix).copied()?,
-    paragraph_id: projection.ids.paragraph_ids.get(start.paragraph_ix).copied()?,
+    paragraph_id: projection
+      .ids
+      .paragraph_ids
+      .get(start.paragraph_ix)
+      .copied()?,
     row_hint: first_block_ix,
     new: input_paragraph_from_document_range(projection, start.paragraph_ix, 0..usize::MAX),
     delta_utf8: projection_text_delta(start.byte, merged_len - start.byte, first_para_text.len() - start.byte, 0),
   }];
-  let redo_boundaries = boundaries.iter().map(|b| RestoredBoundary { unicode: b.unicode, paragraph_id: b.paragraph_id, block_id: b.block_id }).collect();
+  let redo_boundaries = boundaries
+    .iter()
+    .map(|b| RestoredBoundary {
+      unicode: b.unicode,
+      paragraph_id: b.paragraph_id,
+      block_id: b.block_id,
+    })
+    .collect();
   let prune_objects = !objects.is_empty();
   if !removed_rows.is_empty() {
     undo_patches.push(ProjectionPatch::InsertBlocks {
@@ -1043,7 +1076,11 @@ fn shift_delta_coordinates(delta: &mut RecordedDelta, by: isize) -> bool {
     RecordedMutation::CreateBoundary { at, .. } => shift(at),
     RecordedMutation::MarkRunRanges { spans } => spans.iter_mut().all(|(start, _, _)| shift(start)),
   };
-  mutation_ok && delta.invalidation_ranges.iter_mut().all(|(start, _)| shift(start))
+  mutation_ok
+    && delta
+      .invalidation_ranges
+      .iter_mut()
+      .all(|(start, _)| shift(start))
 }
 
 /// The import's shape, precomputed once for the per-entry rebase laws.
@@ -1092,7 +1129,10 @@ impl RemoteNetLaw {
       max_delete_end,
       total_delta,
       deleted_ranges: net.deleted_pre_ranges(),
-      max_changed_end_post: changed_body_ranges_post.iter().map(|(start, len)| start + len).max(),
+      max_changed_end_post: changed_body_ranges_post
+        .iter()
+        .map(|(start, len)| start + len)
+        .max(),
     }
   }
 
@@ -1114,7 +1154,9 @@ impl RemoteNetLaw {
 
   /// Whether PRE-space `position`'s char was deleted by the import.
   fn position_deleted(&self, position: usize) -> bool {
-    let ix = self.deleted_ranges.partition_point(|(start, _)| *start <= position);
+    let ix = self
+      .deleted_ranges
+      .partition_point(|(start, _)| *start <= position);
     ix > 0 && {
       let (start, len) = self.deleted_ranges[ix - 1];
       position < start + len
@@ -1162,7 +1204,12 @@ fn rebase_mark_delta(delta: &mut RecordedDelta, net: &crate::crdt_runtime::impor
 /// Rebase ONE entry through the import: `true` keeps it (coordinates now in
 /// POST space); `false` means the entry — and everything DEEPER in its stack —
 /// must be truncated.
-fn rebase_entry(entry: &mut RecordedInverse, net: &crate::crdt_runtime::import_delta::NetBodyDelta, law: &RemoteNetLaw, structure_neutral: bool) -> bool {
+fn rebase_entry(
+  entry: &mut RecordedInverse,
+  net: &crate::crdt_runtime::import_delta::NetBodyDelta,
+  law: &RemoteNetLaw,
+  structure_neutral: bool,
+) -> bool {
   let mark_only = matches!(entry.undo.mutation, RecordedMutation::MarkParagraphStyles { .. })
     && matches!(entry.redo.mutation, RecordedMutation::MarkParagraphStyles { .. });
   let keep_patches = if mark_only {
@@ -1192,7 +1239,9 @@ fn rebase_entry(entry: &mut RecordedInverse, net: &crate::crdt_runtime::import_d
     if !law.before_hull(lo) {
       return false;
     }
-    if law.total_delta != 0 && !(shift_delta_coordinates(&mut entry.undo, law.total_delta) && shift_delta_coordinates(&mut entry.redo, law.total_delta)) {
+    if law.total_delta != 0
+      && !(shift_delta_coordinates(&mut entry.undo, law.total_delta) && shift_delta_coordinates(&mut entry.redo, law.total_delta))
+    {
       return false;
     }
     structure_neutral
@@ -1281,7 +1330,10 @@ pub(crate) fn rebase_recorded_inverse_through_remote(
     }
     if debug {
       let kept = active_stack(core, kind).len();
-      eprintln!("rebase[recorded-inverse]: {kind:?} kept {kept}/{before} pre_span={:?} changed_post={changed_body_ranges_post:?}", net.pre_change_span());
+      eprintln!(
+        "rebase[recorded-inverse]: {kind:?} kept {kept}/{before} pre_span={:?} changed_post={changed_body_ranges_post:?}",
+        net.pre_change_span()
+      );
     }
   }
   any_kept
@@ -1305,7 +1357,10 @@ fn patches_survive_rebase(delta: &RecordedDelta) -> bool {
     Reproject::Patches(patches) => patches.iter().all(|patch| {
       matches!(
         patch,
-        ProjectionPatch::ParagraphStyle { .. } | ProjectionPatch::DeleteBlocks { .. } | ProjectionPatch::MoveBlock { .. } | ProjectionPatch::AssetArrived { .. }
+        ProjectionPatch::ParagraphStyle { .. }
+          | ProjectionPatch::DeleteBlocks { .. }
+          | ProjectionPatch::MoveBlock { .. }
+          | ProjectionPatch::AssetArrived { .. }
       )
     }),
   }
@@ -1375,7 +1430,10 @@ pub(crate) fn try_fast_step(core: &mut CrdtRuntime, kind: UndoOrRedo) -> Result<
 
   let from_frontier = core.doc().state_frontiers();
   let from_vv = core.doc().state_vv();
-  if !core.undo_manager_mut().external_step_begin(kind, expected_span) {
+  if !core
+    .undo_manager_mut()
+    .external_step_begin(kind, expected_span)
+  {
     return Ok(None);
   }
 
@@ -1386,7 +1444,9 @@ pub(crate) fn try_fast_step(core: &mut CrdtRuntime, kind: UndoOrRedo) -> Result<
     // I-10-style compensation.
     tracing::error!(%error, ?kind, "recorded-inverse replay failed mid-apply; compensating via revert_to");
     core.doc().set_next_commit_origin("repair");
-    core.doc().set_next_commit_message("recorded-inverse-compensation");
+    core
+      .doc()
+      .set_next_commit_message("recorded-inverse-compensation");
     if let Err(revert_error) = core.doc().revert_to(&from_frontier) {
       core.undo_manager_mut().external_step_abort(kind);
       core.clear_recorded_inverse();
@@ -1395,7 +1455,9 @@ pub(crate) fn try_fast_step(core: &mut CrdtRuntime, kind: UndoOrRedo) -> Result<
       ));
     }
     core.doc().set_next_commit_origin("repair");
-    core.doc().set_next_commit_message("recorded-inverse-compensation-inverse");
+    core
+      .doc()
+      .set_next_commit_message("recorded-inverse-compensation-inverse");
     core.doc().commit();
     core.undo_manager_mut().external_step_abort(kind);
     core.clear_recorded_inverse();
@@ -1424,7 +1486,9 @@ pub(crate) fn try_fast_step(core: &mut CrdtRuntime, kind: UndoOrRedo) -> Result<
     return Ok(None);
   }
   let inverse_span = CounterSpan::new(counter_before, counter_after);
-  core.undo_manager_mut().external_step_finish(kind, inverse_span);
+  core
+    .undo_manager_mut()
+    .external_step_finish(kind, inverse_span);
 
   // ---- projection + publish (same ladder as any local write) --------------
   let context = match kind {
@@ -1432,7 +1496,9 @@ pub(crate) fn try_fast_step(core: &mut CrdtRuntime, kind: UndoOrRedo) -> Result<
     UndoOrRedo::Redo => "recorded-inverse-redo",
   };
   let (recorded_patches, inval_ranges) = {
-    let inverse = active_stack(core, kind).last().expect("active entry survives replay");
+    let inverse = active_stack(core, kind)
+      .last()
+      .expect("active entry survives replay");
     let delta = match kind {
       UndoOrRedo::Undo => &inverse.undo,
       UndoOrRedo::Redo => &inverse.redo,
@@ -1446,8 +1512,7 @@ pub(crate) fn try_fast_step(core: &mut CrdtRuntime, kind: UndoOrRedo) -> Result<
   // Style-only and text deltas build the same range-carrying invalidation
   // (`body_style` has always delegated to `body_text`), so one multi-range
   // constructor serves both directions.
-  let mut invalidation =
-    ProjectionInvalidation::body_text_ranges(from_frontier.encode(), core.doc().state_frontiers().encode(), &inval_ranges);
+  let mut invalidation = ProjectionInvalidation::body_text_ranges(from_frontier.encode(), core.doc().state_frontiers().encode(), &inval_ranges);
   let drained = core.merge_subscription_invalidation(&mut invalidation);
   let mut events = core.events_after_local_change(from_frontier.clone(), from_vv, invalidation.clone(), false)?;
   match recorded_patches {
@@ -1486,7 +1551,9 @@ pub(crate) fn try_fast_step(core: &mut CrdtRuntime, kind: UndoOrRedo) -> Result<
   // replays. The entries BELOW it on the active stack keep their arming, so the
   // NEXT same-direction step (the Ctrl-Z mash) replays for free too.
   let new_frontier = core.doc().state_frontiers().encode();
-  let mut entry = active_stack(core, kind).pop().expect("active entry survives replay");
+  let mut entry = active_stack(core, kind)
+    .pop()
+    .expect("active entry survives replay");
   entry.direction = match kind {
     UndoOrRedo::Undo => UndoOrRedo::Redo,
     UndoOrRedo::Redo => UndoOrRedo::Undo,
@@ -1513,7 +1580,9 @@ fn apply_recorded_mutation(core: &mut CrdtRuntime, kind: UndoOrRedo) -> Result<(
   let doc = core.doc().clone();
   let body = body_text(&doc);
   // The active entry is the top of `kind`'s stack (validated by the caller).
-  let inverse = active_stack(core, kind).last().expect("caller checked the active stack");
+  let inverse = active_stack(core, kind)
+    .last()
+    .expect("caller checked the active stack");
   match &(match kind {
     UndoOrRedo::Undo => &inverse.undo,
     UndoOrRedo::Redo => &inverse.redo,
@@ -1534,14 +1603,23 @@ fn apply_recorded_mutation(core: &mut CrdtRuntime, kind: UndoOrRedo) -> Result<(
         });
       }
       delta.extend(restore_delta.iter().cloned());
-      body.apply_delta(&delta).context("applying recorded-inverse restore delta")?;
+      body
+        .apply_delta(&delta)
+        .context("applying recorded-inverse restore delta")?;
       for object in objects {
         restore_input_object_block_containers(&doc, object.unicode, object.block_id, &object.input)
           .context("restoring object block containers for recorded-inverse undo")?;
       }
       for boundary in boundaries {
-        repair_paragraph_metadata_after_stable_split(&doc, &body, boundary.unicode, boundary.paragraph_id, boundary.block_id, "recorded_inverse_undo")
-          .context("restoring paragraph records for recorded-inverse undo")?;
+        repair_paragraph_metadata_after_stable_split(
+          &doc,
+          &body,
+          boundary.unicode,
+          boundary.paragraph_id,
+          boundary.block_id,
+          "recorded_inverse_undo",
+        )
+        .context("restoring paragraph records for recorded-inverse undo")?;
       }
     },
     RecordedMutation::DeleteRange {
@@ -1550,7 +1628,9 @@ fn apply_recorded_mutation(core: &mut CrdtRuntime, kind: UndoOrRedo) -> Result<(
       prune_objects,
       boundaries,
     } => {
-      body.delete(*clamped_start, *clamped_len).context("re-deleting range for recorded-inverse redo")?;
+      body
+        .delete(*clamped_start, *clamped_len)
+        .context("re-deleting range for recorded-inverse redo")?;
       if *prune_objects {
         prune_orphaned_body_object_blocks(&doc, &body).context("pruning object blocks for recorded-inverse redo")?;
       }
@@ -1572,7 +1652,9 @@ fn apply_recorded_mutation(core: &mut CrdtRuntime, kind: UndoOrRedo) -> Result<(
       paragraph_id,
       block_id,
     } => {
-      body.insert(*at, "\n").context("re-creating paragraph boundary for recorded-inverse step")?;
+      body
+        .insert(*at, "\n")
+        .context("re-creating paragraph boundary for recorded-inverse step")?;
       body
         .mark(*at..*at + 1, MARK_PARAGRAPH_STYLE, *style_value)
         .context("marking re-created boundary's paragraph style")?;
@@ -1608,7 +1690,9 @@ fn apply_recorded_mutation(core: &mut CrdtRuntime, kind: UndoOrRedo) -> Result<(
           delta.push(TextDelta::Delete { delete: splice.delete_len });
         }
         delta.extend(splice.insert.iter().cloned());
-        body.apply_delta(&delta).context("applying recorded-inverse rich splice")?;
+        body
+          .apply_delta(&delta)
+          .context("applying recorded-inverse rich splice")?;
       }
     },
   }

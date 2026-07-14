@@ -75,7 +75,10 @@ mod tests {
 
     fn export_updates_since(&self, vv: &loro::VersionVector) -> Vec<u8> {
       let guard = self.gate.lock(GateHolder::ExportUpdates).expect("gate");
-      guard.doc().export(loro::ExportMode::updates(vv)).expect("export")
+      guard
+        .doc()
+        .export(loro::ExportMode::updates(vv))
+        .expect("export")
     }
 
     fn state_vv(&self) -> loro::VersionVector {
@@ -210,7 +213,11 @@ mod tests {
         .handle
         .set_paragraph_style(SetParagraphStyleIntent {
           paragraph,
-          style: if rng.below(2) == 0 { ParagraphStyle::Normal } else { ParagraphStyle::Custom(1) },
+          style: if rng.below(2) == 0 {
+            ParagraphStyle::Normal
+          } else {
+            ParagraphStyle::Custom(1)
+          },
         })
         .map(|_| ()),
     }
@@ -232,7 +239,11 @@ mod tests {
     let reference_text = peers[0].body_text();
     let reference = peers[0].projection();
     for (ix, peer) in peers.iter().enumerate().skip(1) {
-      assert_eq!(peer.body_text(), reference_text, "seed {seed} round {round}: peer {ix} body text diverged");
+      assert_eq!(
+        peer.body_text(),
+        reference_text,
+        "seed {seed} round {round}: peer {ix} body text diverged"
+      );
       let projection = peer.projection();
       assert_eq!(
         projection.ids.paragraph_ids, reference.ids.paragraph_ids,
@@ -250,7 +261,9 @@ mod tests {
 
   fn run_presence_soak(seed: u64, peers_n: usize, rounds: usize, ops_per_round: usize) {
     let mut rng = Rng::new(seed);
-    let mut peers: Vec<Peer> = (0..peers_n).map(|_| Peer::new("caret soak", peers_n)).collect();
+    let mut peers: Vec<Peer> = (0..peers_n)
+      .map(|_| Peer::new("caret soak", peers_n))
+      .collect();
     sync_all(&mut peers);
 
     for round in 0..rounds {
@@ -272,7 +285,10 @@ mod tests {
         }
         let paragraph_ix = rng.below(projection.paragraphs.len());
         let byte = rng.below(paragraph_text_len(&projection.paragraphs[paragraph_ix]) + 1);
-        let offset = DocumentOffset { paragraph: paragraph_ix, byte };
+        let offset = DocumentOffset {
+          paragraph: paragraph_ix,
+          byte,
+        };
         if let Some(selection) = peer.capture_presence(offset) {
           selections.push(selection);
         }

@@ -5,9 +5,9 @@ use docx_rs::{
   TableCell as DocxTableCell, TableLayoutType, TableRow as DocxTableRow, VMergeType, VertAlignType, WidthType,
 };
 use flowstate_document::{
-  Block, BlockAlignment, DocumentProjection, DocumentTheme, EquationBlock, EquationDisplay, HighlightStyle, ImageBlock, ImageSizing,
-  Paragraph, ParagraphStyle, RunSemanticStyle, RunStyles, SOFT_LINE_BREAK, TableBlock, TableCell, TableCellBlock, TableCellParagraph,
-  TableColumnWidth, VertAlign, document_text_slice,
+  Block, BlockAlignment, DocumentProjection, DocumentTheme, EquationBlock, EquationDisplay, HighlightStyle, ImageBlock, ImageSizing, Paragraph,
+  ParagraphStyle, RunSemanticStyle, RunStyles, SOFT_LINE_BREAK, TableBlock, TableCell, TableCellBlock, TableCellParagraph, TableColumnWidth,
+  VertAlign, document_text_slice,
 };
 use flowstate_fidelity::FidelityClass;
 
@@ -116,7 +116,13 @@ fn add_text_run(
       } else {
         Cow::Borrowed(segment)
       };
-      paragraph = paragraph.add_run(apply_run_style(Run::new().add_text(segment.as_ref()), styles, paragraph_style, theme, force_bold));
+      paragraph = paragraph.add_run(apply_run_style(
+        Run::new().add_text(segment.as_ref()),
+        styles,
+        paragraph_style,
+        theme,
+        force_bold,
+      ));
     }
   }
   paragraph
@@ -154,8 +160,18 @@ fn apply_run_style(run: Run, styles: RunStyles, paragraph_style: ParagraphStyle,
   // partial move off `run` and is negligible on the export path.
   match styles.vert_align {
     VertAlign::Baseline => {},
-    VertAlign::Superscript => run.run_property = run.run_property.clone().vert_align(VertAlignType::SuperScript),
-    VertAlign::Subscript => run.run_property = run.run_property.clone().vert_align(VertAlignType::SubScript),
+    VertAlign::Superscript => {
+      run.run_property = run
+        .run_property
+        .clone()
+        .vert_align(VertAlignType::SuperScript)
+    },
+    VertAlign::Subscript => {
+      run.run_property = run
+        .run_property
+        .clone()
+        .vert_align(VertAlignType::SubScript)
+    },
   }
   if let Some(highlight) = styles.highlight {
     run = run.shading(
@@ -190,7 +206,11 @@ fn export_table(table: &TableBlock, theme: &DocumentTheme, context: &SectionCont
     || "table has header_row set but no rows; w:tblHeader marker not emitted".to_string(),
   );
   let content_width = context.content_width_twips.max(1);
-  let column_widths: Vec<TableColumnWidth> = table.columns.iter().map(|column| column.width.clone()).collect();
+  let column_widths: Vec<TableColumnWidth> = table
+    .columns
+    .iter()
+    .map(|column| column.width.clone())
+    .collect();
   let mut grid = compute_grid_twips(&column_widths, content_width);
   if grid.is_empty() {
     // No canonical column widths: derive an equal-width grid from the widest row
@@ -285,7 +305,11 @@ fn export_row_cells(
     } else {
       // Row declared fewer cells than the grid; pad so column topology stays valid.
       let width = grid_slice_width(grid, column, 1);
-      cells.push(DocxTableCell::new().add_paragraph(empty_cell_paragraph()).width(width, WidthType::Dxa));
+      cells.push(
+        DocxTableCell::new()
+          .add_paragraph(empty_cell_paragraph())
+          .width(width, WidthType::Dxa),
+      );
       column += 1;
     }
   }
@@ -307,14 +331,23 @@ fn export_row_cells(
 fn derived_column_count(rows: &[flowstate_document::TableRow]) -> usize {
   rows
     .iter()
-    .map(|row| row.cells.iter().map(|cell| usize::from(cell.col_span.max(1))).sum::<usize>())
+    .map(|row| {
+      row
+        .cells
+        .iter()
+        .map(|cell| usize::from(cell.col_span.max(1)))
+        .sum::<usize>()
+    })
     .max()
     .unwrap_or(0)
 }
 
 fn grid_slice_width(grid: &[i64], start: usize, span: usize) -> usize {
   let end = (start + span).min(grid.len());
-  let sum: i64 = grid.get(start..end).map(|slice| slice.iter().sum()).unwrap_or(0);
+  let sum: i64 = grid
+    .get(start..end)
+    .map(|slice| slice.iter().sum())
+    .unwrap_or(0);
   sum.max(1) as usize
 }
 
@@ -400,12 +433,9 @@ fn export_image(
 ) -> DocxParagraph {
   // FS-127 fidelity: an image caption has no OOXML representation in this
   // exporter, so a present caption is silently dropped on export.
-  flowstate_fidelity::check(
-    image.caption.is_none(),
-    FidelityClass::ImportExport,
-    "export-dropped-caption",
-    || format!("image asset {:?} caption is not written to docx export", image.asset_id),
-  );
+  flowstate_fidelity::check(image.caption.is_none(), FidelityClass::ImportExport, "export-dropped-caption", || {
+    format!("image asset {:?} caption is not written to docx export", image.asset_id)
+  });
   if let Some(asset) = document.assets.assets.get(&image.asset_id)
     && !asset.is_loading_placeholder()
   {
@@ -440,8 +470,7 @@ fn export_image(
       // unknown-size default.
       ImageSizing::Intrinsic | ImageSizing::FitWidth => (640, 480),
     };
-    let (width_emu, height_emu) =
-      fit_width_emu(image, context, width_px, height_px).unwrap_or((px_to_emu(width_px), px_to_emu(height_px)));
+    let (width_emu, height_emu) = fit_width_emu(image, context, width_px, height_px).unwrap_or((px_to_emu(width_px), px_to_emu(height_px)));
     let alt = image_alt_text(document, image);
     let sentinel = side.push_linked_image(url, alt.as_deref(), width_emu, height_emu);
     return aligned_paragraph(image.alignment).add_run(Run::new().add_text(sentinel));
@@ -452,7 +481,10 @@ fn export_image(
   if flowstate_fidelity::enabled() {
     let has_alt = image_alt_text(document, image).is_some();
     flowstate_fidelity::check(!has_alt, FidelityClass::ImportExport, "export-dropped-alt", || {
-      format!("image asset {:?} with alt text fell back to text; docPr descr not emitted", image.asset_id)
+      format!(
+        "image asset {:?} with alt text fell back to text; docPr descr not emitted",
+        image.asset_id
+      )
     });
   }
   image_text_fallback(document, image, theme)
@@ -569,9 +601,7 @@ pub(crate) fn is_metafile(bytes: &[u8]) -> Option<&'static str> {
   if bytes.len() >= 44 && bytes[0..4] == [0x01, 0x00, 0x00, 0x00] && bytes[40..44] == *b" EMF" {
     return Some("emf");
   }
-  if bytes.starts_with(&[0xD7, 0xCD, 0xC6, 0x9A])
-    || bytes.starts_with(&[0x01, 0x00, 0x09, 0x00])
-    || bytes.starts_with(&[0x02, 0x00, 0x09, 0x00])
+  if bytes.starts_with(&[0xD7, 0xCD, 0xC6, 0x9A]) || bytes.starts_with(&[0x01, 0x00, 0x09, 0x00]) || bytes.starts_with(&[0x02, 0x00, 0x09, 0x00])
   {
     return Some("wmf");
   }
@@ -650,7 +680,12 @@ fn image_text_fallback(document: &DocumentProjection, image: &ImageBlock, theme:
   if text.trim().is_empty() {
     text = "Image".to_string();
   }
-  aligned_paragraph(image.alignment).add_run(Run::new().fonts(docx_fonts(theme)).italic().add_text(format!("[{text}]")))
+  aligned_paragraph(image.alignment).add_run(
+    Run::new()
+      .fonts(docx_fonts(theme))
+      .italic()
+      .add_text(format!("[{text}]")),
+  )
 }
 
 // -- Equations (FS-125 OMML) -------------------------------------------------
@@ -681,7 +716,10 @@ fn omml_paragraph_for_equation(equation: &EquationBlock, theme: &DocumentTheme, 
       format!("equation emitted neither OMML nor a text fallback: {:?}", equation.source)
     });
   }
-  DocxParagraph::new()
-    .align(AlignmentType::Center)
-    .add_run(Run::new().fonts(docx_fonts(theme)).italic().add_text(fallback))
+  DocxParagraph::new().align(AlignmentType::Center).add_run(
+    Run::new()
+      .fonts(docx_fonts(theme))
+      .italic()
+      .add_text(fallback),
+  )
 }

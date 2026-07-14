@@ -5,8 +5,8 @@
 //! Run: `cargo run --release --bin contention_bench -- <FILE.docx> [KEYSTROKES]`.
 //! (No profiler feature — plain wall-clock; contention is a scheduling effect.)
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use flowstate_collab::crdt_runtime::CrdtRuntime;
@@ -15,7 +15,10 @@ use gpui_flowtext::{InsertTextIntent, TextAnchor};
 
 fn main() {
   let mut args = std::env::args().skip(1);
-  let Some(path) = args.next().or_else(|| std::env::var("FLOWSTATE_BENCH_FIXTURE").ok()) else {
+  let Some(path) = args
+    .next()
+    .or_else(|| std::env::var("FLOWSTATE_BENCH_FIXTURE").ok())
+  else {
     eprintln!("usage: contention_bench <FILE.docx> [KEYSTROKES]");
     std::process::exit(2);
   };
@@ -36,7 +39,11 @@ fn main() {
 
   let keystroke = |handle: &LocalDocHandle| {
     handle
-      .insert_text(InsertTextIntent { at: TextAnchor::new(first, 0), text: "z".to_string(), style_override: None })
+      .insert_text(InsertTextIntent {
+        at: TextAnchor::new(first, 0),
+        text: "z".to_string(),
+        style_override: None,
+      })
       .expect("insert_text");
   };
 
@@ -57,7 +64,9 @@ fn main() {
       while !stop.load(Ordering::Relaxed) {
         body.insert(1, "r").expect("peer insert");
         doc_b.commit();
-        let update = doc_b.export(loro::ExportMode::updates(&vv)).expect("export");
+        let update = doc_b
+          .export(loro::ExportMode::updates(&vv))
+          .expect("export");
         vv = doc_b.state_vv();
         if let Ok(mut guard) = gate.lock(GateHolder::ImportChunk) {
           let _ = guard.import_remote_update(&update);
@@ -88,7 +97,9 @@ fn main() {
     let from_vv = guard.doc().state_vv();
     drop(guard);
     let body = flowstate_document::loro_schema::body_text(&doc_b2);
-    body.insert(1, &"mass restyle payload ".repeat(3_000)).expect("mass insert");
+    body
+      .insert(1, &"mass restyle payload ".repeat(3_000))
+      .expect("mass insert");
     doc_b2.commit();
     let peer = doc_b2.peer_id();
     let start = from_vv.get(&peer).copied().unwrap_or(0);
@@ -178,5 +189,8 @@ fn measure_latencies(count: usize, mut op: impl FnMut()) -> Lat {
 }
 
 fn report_lat(name: &str, lat: &Lat) {
-  println!("{name:<24} median {:6.2} ms   p95 {:6.2} ms   max {:6.2} ms", lat.median, lat.p95, lat.max);
+  println!(
+    "{name:<24} median {:6.2} ms   p95 {:6.2} ms   max {:6.2} ms",
+    lat.median, lat.p95, lat.max
+  );
 }

@@ -20,14 +20,16 @@ fn next_and_previous_tab_cycle_through_documents(cx: &mut TestAppContext) {
   for _ in 0..3 {
     h.new_document(cx);
   }
-  let order: Vec<_> = h.read(cx, |ws| {
-    ws.document_panels.iter().map(|p| p.entity_id()).collect()
-  });
+  let order: Vec<_> = h.read(cx, |ws| ws.document_panels.iter().map(|p| p.entity_id()).collect());
   assert_eq!(order.len(), 3);
 
-  let start = h.read(cx, |ws| ws.active_document_id).expect("active document");
+  let start = h
+    .read(cx, |ws| ws.active_document_id)
+    .expect("active document");
   assert!(command(&h, cx, CommandId::NextTab));
-  let next = h.read(cx, |ws| ws.active_document_id).expect("active document");
+  let next = h
+    .read(cx, |ws| ws.active_document_id)
+    .expect("active document");
   assert_ne!(start, next, "NextTab must move activation");
   assert!(command(&h, cx, CommandId::PreviousTab));
   assert_eq!(h.read(cx, |ws| ws.active_document_id), Some(start), "PreviousTab must move back");
@@ -52,7 +54,9 @@ fn switch_to_tab_shortcuts_activate_by_index(cx: &mut TestAppContext) {
 fn toggle_pin_tab_round_trips(cx: &mut TestAppContext) {
   let h = support::open_workspace(cx);
   h.new_document(cx);
-  let id = h.read(cx, |ws| ws.active_document_id).expect("active document");
+  let id = h
+    .read(cx, |ws| ws.active_document_id)
+    .expect("active document");
   assert!(command(&h, cx, CommandId::TogglePinTab));
   assert!(h.read(cx, |ws| ws.pinned_document_ids.contains(&id)));
   assert!(command(&h, cx, CommandId::TogglePinTab));
@@ -73,7 +77,9 @@ fn toggle_ribbon_flips_and_renders(cx: &mut TestAppContext) {
 fn speech_document_toggle_marks_and_clears(cx: &mut TestAppContext) {
   let h = support::open_workspace(cx);
   h.new_document(cx);
-  let id = h.read(cx, |ws| ws.active_document_id).expect("active document");
+  let id = h
+    .read(cx, |ws| ws.active_document_id)
+    .expect("active document");
   assert!(command(&h, cx, CommandId::ToggleSpeechDocument));
   assert_eq!(h.read(cx, |ws| ws.speech_document_id), Some(id));
   assert!(command(&h, cx, CommandId::ToggleSpeechDocument));

@@ -30,19 +30,30 @@ fn drip_pair(edits: usize) -> Result<(String, Vec<Vec<u8>>, ReceiverGate)> {
       .expect("init export")
   };
   {
-    let mut guard = receiver_gate.lock(GateHolder::ImportChunk).expect("gate healthy");
+    let mut guard = receiver_gate
+      .lock(GateHolder::ImportChunk)
+      .expect("gate healthy");
     guard.import_remote_update(&full_export(&source_gate))?
   };
   {
-    let mut guard = source_gate.lock(GateHolder::ImportChunk).expect("gate healthy");
+    let mut guard = source_gate
+      .lock(GateHolder::ImportChunk)
+      .expect("gate healthy");
     guard.import_remote_update(&full_export(&receiver_gate))?
   };
 
-  let paragraph = *source_handle.projection()?.ids.paragraph_ids.last().expect("source paragraph");
+  let paragraph = *source_handle
+    .projection()?
+    .ids
+    .paragraph_ids
+    .last()
+    .expect("source paragraph");
   let mut blobs = Vec::with_capacity(edits);
   for edit_ix in 0..edits {
     let vv_before = {
-      let guard = source_gate.lock(GateHolder::ExportUpdates).expect("gate healthy");
+      let guard = source_gate
+        .lock(GateHolder::ExportUpdates)
+        .expect("gate healthy");
       guard.doc().state_vv()
     };
     source_handle
@@ -53,13 +64,20 @@ fn drip_pair(edits: usize) -> Result<(String, Vec<Vec<u8>>, ReceiverGate)> {
       })
       .map_err(|error| anyhow::anyhow!("drip edit {edit_ix} rejected: {error:?}"))?;
     let blob = {
-      let guard = source_gate.lock(GateHolder::ExportUpdates).expect("gate healthy");
-      guard.doc().export(loro::ExportMode::updates(&vv_before)).expect("delta export")
+      let guard = source_gate
+        .lock(GateHolder::ExportUpdates)
+        .expect("gate healthy");
+      guard
+        .doc()
+        .export(loro::ExportMode::updates(&vv_before))
+        .expect("delta export")
     };
     blobs.push(blob);
   }
   let final_text = {
-    let guard = source_gate.lock(GateHolder::ExportUpdates).expect("gate healthy");
+    let guard = source_gate
+      .lock(GateHolder::ExportUpdates)
+      .expect("gate healthy");
     flowstate_document::loro_schema::body_text(guard.doc()).to_string()
   };
   Ok((final_text, blobs, receiver_gate))
@@ -91,7 +109,9 @@ mod tests {
     let batches_before = import_batches(&gate);
     // Hold the gate so the io thread blocks on its FIRST import; every blob
     // sent meanwhile queues behind it and must fold into few batches.
-    let hold = gate.lock(GateHolder::DocumentService).expect("gate healthy");
+    let hold = gate
+      .lock(GateHolder::DocumentService)
+      .expect("gate healthy");
     // One OS thread per blob: async fns are LAZY, so sequentially awaiting
     // them would send each request only after the previous replied (zero queue
     // depth, zero coalescing). Independent blocked threads enqueue all 40
@@ -111,7 +131,10 @@ mod tests {
     // Give every sender time to enqueue behind the held gate, then release.
     std::thread::sleep(std::time::Duration::from_millis(200));
     drop(hold);
-    let replies: Vec<_> = senders.into_iter().map(|sender| sender.join().expect("sender join")).collect();
+    let replies: Vec<_> = senders
+      .into_iter()
+      .map(|sender| sender.join().expect("sender join"))
+      .collect();
 
     assert_eq!(replies.len(), EDITS);
     for (blob_ix, reply) in replies.iter().enumerate() {
@@ -155,7 +178,11 @@ mod tests {
     for (delivery_ix, reply) in replies.iter().enumerate() {
       assert!(reply.is_ok(), "delivery {delivery_ix} reply failed: {reply:?}");
     }
-    assert_eq!(body_text(&gate), source_text, "receiver did not converge under duplicated reversed delivery");
+    assert_eq!(
+      body_text(&gate),
+      source_text,
+      "receiver did not converge under duplicated reversed delivery"
+    );
     Ok(())
   }
 
@@ -167,7 +194,9 @@ mod tests {
     let (source_text, blobs, gate) = drip_pair(EDITS)?;
     let io = DocIoHandle::spawn(Arc::clone(&gate)).expect("io service");
 
-    let hold = gate.lock(GateHolder::DocumentService).expect("gate healthy");
+    let hold = gate
+      .lock(GateHolder::DocumentService)
+      .expect("gate healthy");
     let io_imports = io.clone();
     let import_thread = std::thread::spawn(move || {
       pollster::block_on(async move {
@@ -214,7 +243,10 @@ mod tests {
     let first = pollster::block_on(io.pump_publish())?;
     assert!(!first.is_empty(), "first pump must return the committed LocalUpdate events");
     let second = pollster::block_on(io.pump_publish())?;
-    assert!(second.is_empty(), "second pump must be empty — events were already drained (double-publish hazard)");
+    assert!(
+      second.is_empty(),
+      "second pump must be empty — events were already drained (double-publish hazard)"
+    );
     Ok(())
   }
 

@@ -12,14 +12,17 @@
 //! T2/T4 paths) and `blocks.len() != paragraphs.len()`.
 
 use flowstate_document::{
-  AssetId, DocumentProjection, DocumentTheme, InputBlock, InputBlockAlignment, InputEquationBlock, InputEquationDisplay,
-  InputEquationSyntax, InputImageBlock, InputImageSizing, InputParagraph, InputRun, ParagraphStyle, RunStyles,
-  document_from_input_blocks,
+  AssetId, DocumentProjection, DocumentTheme, InputBlock, InputBlockAlignment, InputEquationBlock, InputEquationDisplay, InputEquationSyntax,
+  InputImageBlock, InputImageSizing, InputParagraph, InputRun, ParagraphStyle, RunStyles, document_from_input_blocks,
 };
 
 fn paragraph(ix: usize) -> InputBlock {
   InputBlock::Paragraph(InputParagraph {
-    style: if ix.is_multiple_of(40) { ParagraphStyle::Custom(2) } else { ParagraphStyle::Normal },
+    style: if ix.is_multiple_of(40) {
+      ParagraphStyle::Custom(2)
+    } else {
+      ParagraphStyle::Normal
+    },
     runs: vec![InputRun {
       text: format!("Paragraph {ix}: carded evidence body with enough words to shape and reflow across the column."),
       styles: RunStyles::default(),
@@ -88,7 +91,10 @@ pub fn from_selector(selector: &str) -> Option<(DocumentProjection, usize)> {
   let spec = selector.strip_prefix("synthetic:")?;
   let mut parts = spec.split(':');
   let kind = parts.next().unwrap_or("equations");
-  let paragraphs: usize = parts.next().and_then(|value| value.parse().ok()).unwrap_or(4000);
+  let paragraphs: usize = parts
+    .next()
+    .and_then(|value| value.parse().ok())
+    .unwrap_or(4000);
   let projection = match kind {
     "mixed" => synthetic_mixed_object_document(paragraphs),
     "text" => synthetic_equation_document(paragraphs, 0),
@@ -105,7 +111,11 @@ mod tests {
   use flowstate_document::{Block, document_from_loro_with_defects};
 
   fn equation_block_count(projection: &DocumentProjection) -> usize {
-    projection.blocks.iter().filter(|block| matches!(block, Block::Equation(_))).count()
+    projection
+      .blocks
+      .iter()
+      .filter(|block| matches!(block, Block::Equation(_)))
+      .count()
   }
 
   /// §perf-heaven T7 fidelity lock: the synthetic equation fixture must survive
@@ -130,7 +140,10 @@ mod tests {
     assert!(expected_equations > 0, "fixture must contain equation blocks");
 
     let core = CrdtRuntime::from_document_projection(&projection, "eqn-fixture").expect("runtime");
-    let snapshot = core.doc().export(loro::ExportMode::Snapshot).expect("snapshot");
+    let snapshot = core
+      .doc()
+      .export(loro::ExportMode::Snapshot)
+      .expect("snapshot");
     let cold = loro::LoroDoc::new();
     cold.import(&snapshot).expect("reimport");
     let (reprojected, defects) = document_from_loro_with_defects(&cold).expect("cold project");
@@ -139,7 +152,10 @@ mod tests {
       .iter()
       .filter(|defect| !matches!(defect.class(), "missing_paragraph_metadata" | "missing_paragraph_block"))
       .collect();
-    assert!(non_repairable.is_empty(), "equation cold projection lost/corrupted content: {non_repairable:?}");
+    assert!(
+      non_repairable.is_empty(),
+      "equation cold projection lost/corrupted content: {non_repairable:?}"
+    );
     assert_eq!(
       equation_block_count(&reprojected),
       expected_equations,
@@ -160,13 +176,20 @@ mod tests {
     let expected_text = projection.text.to_string();
 
     let core = CrdtRuntime::from_document_projection(&projection, "text-fixture").expect("runtime");
-    let snapshot = core.doc().export(loro::ExportMode::Snapshot).expect("snapshot");
+    let snapshot = core
+      .doc()
+      .export(loro::ExportMode::Snapshot)
+      .expect("snapshot");
     let cold = loro::LoroDoc::new();
     cold.import(&snapshot).expect("reimport");
     let (reprojection, defects) = document_from_loro_with_defects(&cold).expect("cold project");
 
     assert!(defects.is_empty(), "object-free cold projection reported defects: {defects:?}");
-    assert_eq!(reprojection.text.to_string(), expected_text, "cold projection text differs from the source");
+    assert_eq!(
+      reprojection.text.to_string(),
+      expected_text,
+      "cold projection text differs from the source"
+    );
   }
 
   /// §perf-heaven T7.21 NET: an equation exports as its OWN `<w:p>` (`m:oMath`),

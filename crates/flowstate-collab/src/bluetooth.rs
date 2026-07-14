@@ -967,9 +967,8 @@ mod macos_backend {
     // dedicated queue — on the main queue they would deadlock against a busy
     // (or GPUI-owned) main thread.
     let queue = DispatchQueue::new("dev.flowstate.bluetooth.central", None);
-    let manager = unsafe {
-      CBCentralManager::initWithDelegate_queue(CBCentralManager::alloc(), Some(ProtocolObject::from_ref(&*delegate)), Some(&queue))
-    };
+    let manager =
+      unsafe { CBCentralManager::initWithDelegate_queue(CBCentralManager::alloc(), Some(ProtocolObject::from_ref(&*delegate)), Some(&queue)) };
     wait_for_power(&state, "macOS Bluetooth central manager")?;
     let services = NSArray::from_retained_slice(&[service_uuid()]);
     unsafe { manager.scanForPeripheralsWithServices_options(Some(&*services), None) };

@@ -90,8 +90,7 @@ pub(super) fn interpret_structured(
   // Escape hatch: FLOWSTATE_DOCX_TYPED_WALK=0 forces the old tree walk (parity
   // debugging + field fallback while the typed walk hardens).
   static TYPED_WALK_DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-  let typed_disabled =
-    *TYPED_WALK_DISABLED.get_or_init(|| std::env::var_os("FLOWSTATE_DOCX_TYPED_WALK").is_some_and(|value| value == "0"));
+  let typed_disabled = *TYPED_WALK_DISABLED.get_or_init(|| std::env::var_os("FLOWSTATE_DOCX_TYPED_WALK").is_some_and(|value| value == "0"));
   if typed_disabled || typed_walk_diverges(document, doc_xml, paragraphs.len()) {
     return interpret_structured_via_tree(cleaned, doc_xml, paragraphs);
   }
@@ -190,7 +189,9 @@ impl<'ctx> ImageAssets<'ctx> {
   /// failing the import (same behavior as the eager open it replaces).
   fn resolve_image(&mut self, relationship_id: &str) -> Option<AssetId> {
     let cleaned = self.cleaned;
-    let opened = self.opened.get_or_insert_with(|| open_package_main_part(cleaned));
+    let opened = self
+      .opened
+      .get_or_insert_with(|| open_package_main_part(cleaned));
     let (package, main_part) = opened.as_ref()?;
     let relationship = package
       .get_part_rels(main_part)?
@@ -221,7 +222,9 @@ impl<'ctx> ImageAssets<'ctx> {
   /// `None` — the embedded path is never affected.
   fn resolve_external_image(&mut self, relationship_id: &str) -> Option<(AssetId, String)> {
     let cleaned = self.cleaned;
-    let opened = self.opened.get_or_insert_with(|| open_package_main_part(cleaned));
+    let opened = self
+      .opened
+      .get_or_insert_with(|| open_package_main_part(cleaned));
     let (package, main_part) = opened.as_ref()?;
     let relationship = package
       .get_part_rels(main_part)?
@@ -326,9 +329,12 @@ fn vml_style_extent_px(node: &quick_xml::events::BytesStart<'_>) -> Option<(u32,
     .find(|attribute| local_name(attribute.key.as_ref()) == "style")?;
   let style = String::from_utf8_lossy(&style.value).into_owned();
   let dimension_px = |key: &str| -> Option<u32> {
-    let value = style
-      .split(';')
-      .find_map(|entry| entry.trim().strip_prefix(key).and_then(|rest| rest.trim_start().strip_prefix(':')))?;
+    let value = style.split(';').find_map(|entry| {
+      entry
+        .trim()
+        .strip_prefix(key)
+        .and_then(|rest| rest.trim_start().strip_prefix(':'))
+    })?;
     let points: f64 = value.trim().trim_end_matches("pt").parse().ok()?;
     let px = (points * 96.0 / 72.0).round();
     (px >= 1.0).then_some(px as u32)
@@ -697,7 +703,11 @@ fn cell_vertical_merge_typed(cell_node: &CT_Tc) -> VerticalMerge {
   // `<w:vMerge/>` and `w:val="continue"` continue the merge above; only an
   // explicit `restart` opens a new vertical span (the typed parser already
   // folds every non-`restart` value to `Continue`).
-  match cell_node.properties.as_ref().and_then(|properties| properties.v_merge) {
+  match cell_node
+    .properties
+    .as_ref()
+    .and_then(|properties| properties.v_merge)
+  {
     None => VerticalMerge::None,
     Some(VMerge::Restart) => VerticalMerge::Restart,
     Some(VMerge::Continue) => VerticalMerge::Continue,
@@ -1033,7 +1043,12 @@ fn drawing_raw_xml(drawing: &CT_Drawing) -> &[u8] {
     .inline
     .as_ref()
     .and_then(|inline| inline.raw_xml.as_deref())
-    .or_else(|| drawing.anchor.as_ref().and_then(|anchor| anchor.raw_xml.as_deref()))
+    .or_else(|| {
+      drawing
+        .anchor
+        .as_ref()
+        .and_then(|anchor| anchor.raw_xml.as_deref())
+    })
     .unwrap_or_default()
 }
 
@@ -1356,7 +1371,10 @@ fn build_table_columns(column_widths: &[InputTableColumnWidth], grid_width: usiz
   (0..column_count)
     .map(|index| InputTableColumn {
       id: ColumnId(index as u128 + 1),
-      width: column_widths.get(index).cloned().unwrap_or(InputTableColumnWidth::Auto),
+      width: column_widths
+        .get(index)
+        .cloned()
+        .unwrap_or(InputTableColumnWidth::Auto),
     })
     .collect()
 }
@@ -1374,21 +1392,27 @@ fn build_table_columns(column_widths: &[InputTableColumnWidth], grid_width: usiz
 fn fill_full_grid(rows: &mut [InputTableRow], columns: &[InputTableColumn]) {
   for row in rows {
     let row_id = row.id;
-    let mut present: FxHashMap<u128, InputTableCell> = row.cells.drain(..).map(|cell| (cell.column_id.0, cell)).collect();
+    let mut present: FxHashMap<u128, InputTableCell> = row
+      .cells
+      .drain(..)
+      .map(|cell| (cell.column_id.0, cell))
+      .collect();
     row.cells = columns
       .iter()
       .map(|column| {
-        present.remove(&column.id.0).unwrap_or_else(|| InputTableCell {
-          id: CellId::from_coordinate(row_id, column.id),
-          row_id,
-          column_id: column.id,
-          blocks: vec![InputTableCellBlock::Paragraph(InputParagraph {
-            style: ParagraphStyle::Normal,
-            runs: Vec::new(),
-          })],
-          row_span: 1,
-          col_span: 1,
-        })
+        present
+          .remove(&column.id.0)
+          .unwrap_or_else(|| InputTableCell {
+            id: CellId::from_coordinate(row_id, column.id),
+            row_id,
+            column_id: column.id,
+            blocks: vec![InputTableCellBlock::Paragraph(InputParagraph {
+              style: ParagraphStyle::Normal,
+              runs: Vec::new(),
+            })],
+            row_span: 1,
+            col_span: 1,
+          })
       })
       .collect();
   }
@@ -1718,7 +1742,7 @@ fn parse_tree(xml: &[u8]) -> Option<XmlNode> {
       },
       Ok(Event::Text(event)) => {
         if let Some(top) = stack.last_mut()
-          && let Ok(text) = event.unescape()
+          && let Ok(text) = event.xml10_content()
         {
           top.text.push_str(&text);
         }
@@ -1865,7 +1889,11 @@ mod tests {
   #[test]
   fn typed_walk_matches_fallback_walk_on_representative_bodies() {
     let fixtures: &[(&str, &str, &[&str])] = &[
-      ("plain paragraphs", r"<w:p><w:r><w:t>alpha</w:t></w:r></w:p><w:p><w:r><w:t>beta</w:t></w:r></w:p>", &["alpha", "beta"]),
+      (
+        "plain paragraphs",
+        r"<w:p><w:r><w:t>alpha</w:t></w:r></w:p><w:p><w:r><w:t>beta</w:t></w:r></w:p>",
+        &["alpha", "beta"],
+      ),
       (
         "self-closed empty paragraph between text",
         r"<w:p><w:r><w:t>alpha</w:t></w:r></w:p><w:p/><w:p><w:r><w:t>beta</w:t></w:r></w:p>",

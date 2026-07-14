@@ -65,7 +65,7 @@ fn main() {
     Err(message) => {
       eprintln!("{message}");
       std::process::exit(2);
-    }
+    },
   };
 
   if let Err(error) = run(&config) {
@@ -91,12 +91,20 @@ fn parse_config() -> Result<Config, String> {
       "--recheck" => recheck = true,
       "--watch" => watch = true,
       "--jobs" => {
-        jobs = Some(args.next().and_then(|v| v.parse().ok()).ok_or("--jobs needs a number")?);
-      }
+        jobs = Some(
+          args
+            .next()
+            .and_then(|v| v.parse().ok())
+            .ok_or("--jobs needs a number")?,
+        );
+      },
       "--interval" => {
-        let secs: u64 = args.next().and_then(|v| v.parse().ok()).ok_or("--interval needs seconds")?;
+        let secs: u64 = args
+          .next()
+          .and_then(|v| v.parse().ok())
+          .ok_or("--interval needs seconds")?;
         watch_interval = Duration::from_secs(secs.max(1));
-      }
+      },
       "--ledger" => ledger_path = Some(PathBuf::from(args.next().ok_or("--ledger needs a path")?)),
       "--report" => report_path = Some(PathBuf::from(args.next().ok_or("--report needs a path")?)),
       "-h" | "--help" => return Err(usage()),
@@ -165,7 +173,10 @@ fn run(config: &Config) -> anyhow::Result<()> {
   sweep_once(config, &mut ledger)?;
 
   if config.watch {
-    eprintln!("--watch: rescanning every {}s for new/changed files (Ctrl-C to stop)", config.watch_interval.as_secs());
+    eprintln!(
+      "--watch: rescanning every {}s for new/changed files (Ctrl-C to stop)",
+      config.watch_interval.as_secs()
+    );
     loop {
       std::thread::sleep(config.watch_interval);
       sweep_once(config, &mut ledger)?;
@@ -223,14 +234,21 @@ fn discover_docx(dir: &Path) -> Vec<Discovered> {
     }) {
       continue;
     }
-    let is_docx = path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("docx"));
+    let is_docx = path
+      .extension()
+      .and_then(|ext| ext.to_str())
+      .is_some_and(|ext| ext.eq_ignore_ascii_case("docx"));
     if !is_docx {
       continue;
     }
     // Skip non-documents that only *look* like `.docx`: Word lock/temp files
     // (`~$name.docx`) and macOS AppleDouble resource-fork sidecars (`._name.docx`,
     // which are not zip archives). These are expected import failures, not bugs.
-    if path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("~$") || n.starts_with("._")) {
+    if path
+      .file_name()
+      .and_then(|n| n.to_str())
+      .is_some_and(|n| n.starts_with("~$") || n.starts_with("._"))
+    {
       continue;
     }
     let Ok(meta) = entry.metadata() else { continue };
@@ -260,7 +278,9 @@ fn discover_docx(dir: &Path) -> Vec<Discovered> {
 
 /// A file needs checking if we've never seen it, or its size/mtime changed since.
 fn is_stale(ledger: &Ledger, file: &Discovered) -> bool {
-  ledger.get(&file.key).is_none_or(|record| record.size != file.size || record.mtime_ns != file.mtime_ns)
+  ledger
+    .get(&file.key)
+    .is_none_or(|record| record.size != file.size || record.mtime_ns != file.mtime_ns)
 }
 
 /// §perf-heaven T8.20: a memory-BUDGET gate so `jobs` workers can't each hold a
@@ -279,7 +299,11 @@ struct MemGate {
 
 impl MemGate {
   fn new(total: u64) -> Self {
-    Self { available: Mutex::new(total), cond: Condvar::new(), total }
+    Self {
+      available: Mutex::new(total),
+      cond: Condvar::new(),
+      total,
+    }
   }
 
   /// Block until `want` (clamped to the whole budget) permits are free, take them.
@@ -302,14 +326,20 @@ impl MemGate {
 /// The in-flight memory budget: `FLOWSTATE_CORPUS_MEM_BUDGET_MB`, else ~55% of
 /// system RAM (from /proc/meminfo), else a conservative 6 GiB fallback.
 fn mem_budget_bytes() -> u64 {
-  if let Some(mb) = std::env::var("FLOWSTATE_CORPUS_MEM_BUDGET_MB").ok().and_then(|value| value.parse::<u64>().ok()) {
+  if let Some(mb) = std::env::var("FLOWSTATE_CORPUS_MEM_BUDGET_MB")
+    .ok()
+    .and_then(|value| value.parse::<u64>().ok())
+  {
     return mb.saturating_mul(1024 * 1024).max(256 * 1024 * 1024);
   }
   let system = std::fs::read_to_string("/proc/meminfo")
     .ok()
     .and_then(|meminfo| {
       meminfo.lines().find_map(|line| {
-        line.strip_prefix("MemTotal:").and_then(|rest| rest.trim().strip_suffix(" kB")).and_then(|kb| kb.trim().parse::<u64>().ok())
+        line
+          .strip_prefix("MemTotal:")
+          .and_then(|rest| rest.trim().strip_suffix(" kB"))
+          .and_then(|kb| kb.trim().parse::<u64>().ok())
       })
     })
     .map(|kb| kb.saturating_mul(1024));
@@ -335,44 +365,49 @@ fn check_all(files: &[Discovered], config: &Config, shared: &Mutex<Ledger>) {
 
   std::thread::scope(|scope| {
     for _ in 0..config.jobs.max(1) {
-      scope.spawn(|| loop {
-        let index = next.fetch_add(1, Ordering::Relaxed);
-        if index >= total {
-          break;
-        }
-        let file = &files[index];
-        let file_started = Instant::now();
-        // Reserve this file's estimated peak memory before importing; release it
-        // as soon as the check returns (RAII-free: explicit release below).
-        let held = gate.acquire(estimated_peak_bytes(file.size));
-        let outcome = check_one(&file.path, config.roundtrip);
-        gate.release(held);
-        let elapsed = file_started.elapsed();
-        // Surface pathologically slow files (near-hangs) so they are diagnosable.
-        if elapsed > Duration::from_secs(10) {
-          eprintln!("  SLOW {:.1}s: {}", elapsed.as_secs_f64(), file.path.display());
-        }
-        let record = Record {
-          size: file.size,
-          mtime_ns: file.mtime_ns,
-          ok: outcome.is_ok(),
-          detail: outcome.err().unwrap_or_default(),
-          checked_at_unix: unix_now(),
-          #[allow(clippy::cast_possible_truncation, reason = "a single-file import is far under u64::MAX milliseconds")]
-          check_ms: elapsed.as_millis() as u64,
-        };
-        // Insert under the lock (guard drops at the `;`), then bump the counter —
-        // the atomic does not need the ledger lock held.
-        shared.lock().expect("ledger mutex").insert(file.key.clone(), record);
-        let count = done.fetch_add(1, Ordering::Relaxed) + 1;
-        if count.is_multiple_of(250) {
-          let rate = count as f64 / started.elapsed().as_secs_f64().max(0.001);
-          eprintln!("  ... {count}/{total} ({rate:.0}/s)");
-        }
-        if count.is_multiple_of(FLUSH_EVERY) {
-          // Serialize+write under the lock (brief, ~ms); resumability over speed.
-          let ledger = shared.lock().expect("ledger mutex");
-          save_ledger(&config.ledger_path, &ledger).ok();
+      scope.spawn(|| {
+        loop {
+          let index = next.fetch_add(1, Ordering::Relaxed);
+          if index >= total {
+            break;
+          }
+          let file = &files[index];
+          let file_started = Instant::now();
+          // Reserve this file's estimated peak memory before importing; release it
+          // as soon as the check returns (RAII-free: explicit release below).
+          let held = gate.acquire(estimated_peak_bytes(file.size));
+          let outcome = check_one(&file.path, config.roundtrip);
+          gate.release(held);
+          let elapsed = file_started.elapsed();
+          // Surface pathologically slow files (near-hangs) so they are diagnosable.
+          if elapsed > Duration::from_secs(10) {
+            eprintln!("  SLOW {:.1}s: {}", elapsed.as_secs_f64(), file.path.display());
+          }
+          let record = Record {
+            size: file.size,
+            mtime_ns: file.mtime_ns,
+            ok: outcome.is_ok(),
+            detail: outcome.err().unwrap_or_default(),
+            checked_at_unix: unix_now(),
+            #[allow(clippy::cast_possible_truncation, reason = "a single-file import is far under u64::MAX milliseconds")]
+            check_ms: elapsed.as_millis() as u64,
+          };
+          // Insert under the lock (guard drops at the `;`), then bump the counter —
+          // the atomic does not need the ledger lock held.
+          shared
+            .lock()
+            .expect("ledger mutex")
+            .insert(file.key.clone(), record);
+          let count = done.fetch_add(1, Ordering::Relaxed) + 1;
+          if count.is_multiple_of(250) {
+            let rate = count as f64 / started.elapsed().as_secs_f64().max(0.001);
+            eprintln!("  ... {count}/{total} ({rate:.0}/s)");
+          }
+          if count.is_multiple_of(FLUSH_EVERY) {
+            // Serialize+write under the lock (brief, ~ms); resumability over speed.
+            let ledger = shared.lock().expect("ledger mutex");
+            save_ledger(&config.ledger_path, &ledger).ok();
+          }
         }
       });
     }
@@ -389,10 +424,8 @@ fn check_one(path: &Path, roundtrip: bool) -> Result<(), String> {
 }
 
 fn check_bytes(bytes: &[u8], roundtrip: bool) -> Result<(), String> {
-  let (imported, report) =
-    flowstate_docx::import_docx_bytes_to_loro(bytes, "corpus-sweep").map_err(|error| format!("import: {error}"))?;
-  let (projection, defects) =
-    flowstate_document::document_from_loro_with_defects(&imported.doc).map_err(|error| format!("project: {error}"))?;
+  let (imported, report) = flowstate_docx::import_docx_bytes_to_loro(bytes, "corpus-sweep").map_err(|error| format!("import: {error}"))?;
+  let (projection, defects) = flowstate_document::document_from_loro_with_defects(&imported.doc).map_err(|error| format!("project: {error}"))?;
   if !defects.is_empty() {
     return Err(format!(
       "{} projection defect(s) (paragraphs_imported={}); sample: {:?}",
@@ -422,7 +455,9 @@ fn check_bytes(bytes: &[u8], roundtrip: bool) -> Result<(), String> {
       .export(loro::ExportMode::Snapshot)
       .map_err(|error| format!("snapshot export: {error}"))?;
     let cold = loro::LoroDoc::new();
-    cold.import(&snapshot).map_err(|error| format!("snapshot reimport: {error}"))?;
+    cold
+      .import(&snapshot)
+      .map_err(|error| format!("snapshot reimport: {error}"))?;
     let (reprojection, snap_defects) =
       flowstate_document::document_from_loro_with_defects(&cold).map_err(|error| format!("cold project: {error}"))?;
     // §perf-heaven T7.26: the cold (`LazyLoad::Src`) reprojection must equal the
@@ -480,7 +515,10 @@ fn check_roundtrip(
   // Diagnostic: keep the exported bytes for inspection instead of deleting.
   if let Some(dir) = std::env::var_os("FLOWSTATE_ROUNDTRIP_DUMP") {
     let _ = std::fs::create_dir_all(&dir);
-    let name = tmp.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "export.docx".into());
+    let name = tmp
+      .file_name()
+      .map(|n| n.to_string_lossy().into_owned())
+      .unwrap_or_else(|| "export.docx".into());
     if let Ok(bytes) = &bytes {
       let _ = std::fs::write(std::path::Path::new(&dir).join(name), bytes);
     }
@@ -546,7 +584,10 @@ fn check_roundtrip(
       let ctx = |s: &str, at: usize| {
         let start = at.saturating_sub(160);
         let end = (at + 160).min(s.len());
-        s.get(start..end).unwrap_or("").replace('\n', "\\n").replace('\u{2028}', "\\u2028")
+        s.get(start..end)
+          .unwrap_or("")
+          .replace('\n', "\\n")
+          .replace('\u{2028}', "\\u2028")
       };
       eprintln!(
         "ROUNDTRIP-DIFF len {} -> {} (first diff @ char {}):\n  BEFORE: …{}…\n  AFTER:  …{}…",
@@ -593,7 +634,7 @@ fn report(config: &Config, ledger: &Ledger, discovered: &[Discovered], checked_n
     match ledger.get(&file.key) {
       Some(record) if record.ok => ok += 1,
       Some(record) => failures.push((file.key.as_str(), record.detail.as_str())),
-      None => {}
+      None => {},
     }
   }
   failures.sort_unstable();
@@ -643,5 +684,7 @@ fn save_ledger(path: &Path, ledger: &Ledger) -> anyhow::Result<()> {
 }
 
 fn unix_now() -> u64 {
-  SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
+  SystemTime::now()
+    .duration_since(UNIX_EPOCH)
+    .map_or(0, |d| d.as_secs())
 }

@@ -50,13 +50,21 @@ pub(crate) fn synthesize_patches(core: &CrdtRuntime, intent: &LocalIntent, plan:
       let Some(row) = flowstate_document::block_ix_for_paragraph(projection, at.paragraph_ix) else {
         return rebuild("insert-text-block-missing");
       };
-      let old_len = projection.paragraphs.get(at.paragraph_ix).map(paragraph_text_len).unwrap_or(0);
+      let old_len = projection
+        .paragraphs
+        .get(at.paragraph_ix)
+        .map(paragraph_text_len)
+        .unwrap_or(0);
       let Some((paragraph_start, old_chars)) = resolved_paragraph_span(projection, at) else {
         return rebuild("insert-text-position-misaligned");
       };
       let end = paragraph_start + old_chars + text.chars().count();
-      let Some(new) = body_input_paragraph_at(doc, paragraph_start.saturating_sub(1), end, paragraph_style_at(projection, at.paragraph_ix))
-      else {
+      let Some(new) = body_input_paragraph_at(
+        doc,
+        paragraph_start.saturating_sub(1),
+        end,
+        paragraph_style_at(projection, at.paragraph_ix),
+      ) else {
         return rebuild("insert-text-readback-missing");
       };
       Some((
@@ -102,7 +110,11 @@ pub(crate) fn synthesize_patches(core: &CrdtRuntime, intent: &LocalIntent, plan:
       ) else {
         return rebuild("delete-range-readback-missing");
       };
-      let old_first_len = projection.paragraphs.get(start.paragraph_ix).map(paragraph_text_len).unwrap_or(0);
+      let old_first_len = projection
+        .paragraphs
+        .get(start.paragraph_ix)
+        .map(paragraph_text_len)
+        .unwrap_or(0);
       let mut patches = Vec::new();
       if start.paragraph_ix == end.paragraph_ix {
         patches.push(ProjectionPatch::ParagraphText {
@@ -159,7 +171,11 @@ pub(crate) fn synthesize_patches(core: &CrdtRuntime, intent: &LocalIntent, plan:
       let Some(source_block_ix) = flowstate_document::block_ix_for_paragraph(projection, at.paragraph_ix) else {
         return rebuild("split-source-block-missing");
       };
-      let old_len = projection.paragraphs.get(at.paragraph_ix).map(paragraph_text_len).unwrap_or(0);
+      let old_len = projection
+        .paragraphs
+        .get(at.paragraph_ix)
+        .map(paragraph_text_len)
+        .unwrap_or(0);
       let Some((paragraph_start, old_chars)) = resolved_paragraph_span(projection, at) else {
         return rebuild("split-position-misaligned");
       };
@@ -212,14 +228,24 @@ pub(crate) fn synthesize_patches(core: &CrdtRuntime, intent: &LocalIntent, plan:
       // placeholders that sat between the two blocks (folded out of paragraph
       // text by the readback), then the second paragraph's text.
       let sentinel = paragraph_boundary_loro_unicode_index(doc, projection, *first_ix);
-      let first_chars = flowstate_document::paragraph_text(projection, *first_ix).chars().count();
-      let second_chars = flowstate_document::paragraph_text(projection, first_ix + 1).chars().count();
-      let objects_between = second_block_ix.saturating_sub(first_block_ix).saturating_sub(1);
+      let first_chars = flowstate_document::paragraph_text(projection, *first_ix)
+        .chars()
+        .count();
+      let second_chars = flowstate_document::paragraph_text(projection, first_ix + 1)
+        .chars()
+        .count();
+      let objects_between = second_block_ix
+        .saturating_sub(first_block_ix)
+        .saturating_sub(1);
       let merged_end = sentinel + 1 + first_chars + objects_between + second_chars;
       let Some(merged) = body_input_paragraph_at(doc, sentinel, merged_end, paragraph_style_at(projection, *first_ix)) else {
         return rebuild("join-readback-missing");
       };
-      let old_len = projection.paragraphs.get(*first_ix).map(paragraph_text_len).unwrap_or(0);
+      let old_len = projection
+        .paragraphs
+        .get(*first_ix)
+        .map(paragraph_text_len)
+        .unwrap_or(0);
       let merged_len = input_paragraph_text_len(&merged);
       let second_block = projection.ids.block_ids.get(second_block_ix).copied();
       let mut patches = vec![ProjectionPatch::ParagraphText {
@@ -256,7 +282,9 @@ pub(crate) fn synthesize_patches(core: &CrdtRuntime, intent: &LocalIntent, plan:
         let Some(&row) = rows.get(paragraph_ix) else {
           return rebuild("set-marks-block-missing");
         };
-        let chars = flowstate_document::paragraph_text(projection, paragraph_ix).chars().count();
+        let chars = flowstate_document::paragraph_text(projection, paragraph_ix)
+          .chars()
+          .count();
         let Some(new) = body_input_paragraph_at(
           doc,
           paragraph_start.saturating_sub(1),
@@ -290,7 +318,11 @@ pub(crate) fn synthesize_patches(core: &CrdtRuntime, intent: &LocalIntent, plan:
         body_invalidation(start.body_unicode, end.body_unicode.saturating_sub(start.body_unicode)),
       ))
     },
-    ResolvedPlan::SetParagraphStyle { paragraph, paragraph_ix, style } => {
+    ResolvedPlan::SetParagraphStyle {
+      paragraph,
+      paragraph_ix,
+      style,
+    } => {
       let Some(row) = flowstate_document::block_ix_for_paragraph(projection, *paragraph_ix) else {
         return rebuild("set-paragraph-style-block-missing");
       };
@@ -324,7 +356,11 @@ pub(crate) fn synthesize_patches(core: &CrdtRuntime, intent: &LocalIntent, plan:
       Some((patches, body_invalidation(0, 0)))
     },
     ResolvedPlan::InsertObject {
-      at, block_ix, new_block, block, ..
+      at,
+      block_ix,
+      new_block,
+      block,
+      ..
     } => {
       // Whitelist: the exact patch is only valid for the ONE shape where no
       // identity re-derives — a placeholder landing AFTER a non-empty
@@ -336,7 +372,11 @@ pub(crate) fn synthesize_patches(core: &CrdtRuntime, intent: &LocalIntent, plan:
       // inserts grow a trailing fabricated row, and object-cluster inserts
       // shift interstitial anchors. Loud rebuild for all of those (rare,
       // explicit UI ops; found by the object-fuzz undo arm).
-      let text_len = projection.paragraphs.get(at.paragraph_ix).map(paragraph_text_len).unwrap_or(0);
+      let text_len = projection
+        .paragraphs
+        .get(at.paragraph_ix)
+        .map(paragraph_text_len)
+        .unwrap_or(0);
       let followed_by_paragraph = flowstate_document::block_ix_for_paragraph(projection, at.paragraph_ix)
         .and_then(|row| projection.blocks.get(row + 1))
         .is_some_and(|next| matches!(next, flowstate_document::Block::Paragraph(_)));
@@ -356,9 +396,9 @@ pub(crate) fn synthesize_patches(core: &CrdtRuntime, intent: &LocalIntent, plan:
         ProjectionInvalidation::body_object(frontier_before.clone(), frontier_after.clone(), at.body_unicode, block_kind(block)),
       ))
     },
-    ResolvedPlan::ReplaceObject { block_ix, after, .. } => object_replacement_patch(projection, *block_ix, after.clone())
-      .map(|patches| (patches, body_invalidation(0, 0)))
-      ,
+    ResolvedPlan::ReplaceObject { block_ix, after, .. } => {
+      object_replacement_patch(projection, *block_ix, after.clone()).map(|patches| (patches, body_invalidation(0, 0)))
+    },
     ResolvedPlan::DeleteBlocks { .. } => {
       // Removing a block row changes the boundary geometry around it: a
       // paragraph that was interstitial (boundary-less, after an object)
@@ -404,9 +444,7 @@ pub(crate) fn synthesize_patches(core: &CrdtRuntime, intent: &LocalIntent, plan:
       input.alignment = *alignment;
     })
     .map(|patches| (patches, body_invalidation(0, 0))),
-    ResolvedPlan::Table { table, table_ix, op } => {
-      table_patch(core, *table, *table_ix, op).map(|patches| (patches, body_invalidation(0, 0)))
-    },
+    ResolvedPlan::Table { table, table_ix, op } => table_patch(core, *table, *table_ix, op).map(|patches| (patches, body_invalidation(0, 0))),
     ResolvedPlan::ReplaceMatches { matches, replacement } => {
       // Matches are same-paragraph and sorted descending (resolution
       // contract); group per paragraph and read each affected paragraph back
@@ -421,7 +459,10 @@ pub(crate) fn synthesize_patches(core: &CrdtRuntime, intent: &LocalIntent, plan:
       let mut ix = 0;
       while ix < matches.len() {
         let paragraph_ix = matches[ix].0.paragraph_ix;
-        let group_len = matches[ix..].iter().take_while(|(start, ..)| start.paragraph_ix == paragraph_ix).count();
+        let group_len = matches[ix..]
+          .iter()
+          .take_while(|(start, ..)| start.paragraph_ix == paragraph_ix)
+          .count();
         groups.push(&matches[ix..ix + group_len]);
         ix += group_len;
       }
@@ -441,7 +482,10 @@ pub(crate) fn synthesize_patches(core: &CrdtRuntime, intent: &LocalIntent, plan:
         let Some((paragraph_start, old_chars)) = resolved_paragraph_span(projection, &group[0].0) else {
           return rebuild("replace-matches-position-misaligned");
         };
-        let removed: usize = group.iter().map(|(start, end, _)| end.body_unicode - start.body_unicode).sum();
+        let removed: usize = group
+          .iter()
+          .map(|(start, end, _)| end.body_unicode - start.body_unicode)
+          .sum();
         let added = replacement_chars * group.len();
         let Some(new_chars) = (old_chars + added).checked_sub(removed) else {
           return rebuild("replace-matches-length-misaligned");
@@ -528,7 +572,11 @@ fn image_patch(
 ) -> Option<Vec<ProjectionPatch>> {
   let projection = core.projection_ref();
   let block_ix = core.projection_index_ref().block_index(image)?;
-  let InputBlock::Image(mut image_input) = projection.blocks.get(block_ix).map(input_block_from_block)? else {
+  let InputBlock::Image(mut image_input) = projection
+    .blocks
+    .get(block_ix)
+    .map(input_block_from_block)?
+  else {
     return None;
   };
   mutate(&mut image_input);
@@ -552,4 +600,3 @@ fn table_patch(core: &CrdtRuntime, table: flowstate_document::BlockId, table_ix:
   }
   object_replacement_patch(projection, block_ix, InputBlock::Table(table_input))
 }
-

@@ -19,11 +19,7 @@ fn sandbox_root() -> &'static PathBuf {
     std::fs::create_dir_all(&data).expect("create sandbox data dir");
     // Discovery stays paused so no test ever reaches a real transport
     // (BLE/Dropbox). BLE is opt-in-default-off anyway; the pause covers all.
-    std::fs::write(
-      config.join("flowstate/settings.toml"),
-      "collaboration_discovery_paused = true\n",
-    )
-    .expect("write sandbox settings");
+    std::fs::write(config.join("flowstate/settings.toml"), "collaboration_discovery_paused = true\n").expect("write sandbox settings");
     // SAFETY: single writer inside OnceLock init; every test enters through
     // this function before any env read of these keys, and concurrent
     // first-callers are parked on the OnceLock until it returns.
@@ -46,11 +42,7 @@ pub struct WorkspaceHarness {
 impl WorkspaceHarness {
   /// Run `f` against the workspace with the window available — the same shape
   /// as a real event handler (workspace lease held, window borrowed).
-  pub fn update<R>(
-    &self,
-    cx: &mut TestAppContext,
-    f: impl FnOnce(&mut Workspace, &mut Window, &mut gpui::Context<Workspace>) -> R,
-  ) -> R {
+  pub fn update<R>(&self, cx: &mut TestAppContext, f: impl FnOnce(&mut Workspace, &mut Window, &mut gpui::Context<Workspace>) -> R) -> R {
     let workspace = self.workspace.clone();
     self
       .window
@@ -99,7 +91,9 @@ pub fn open_workspace(cx: &mut TestAppContext) -> WorkspaceHarness {
   });
   let workspace = cx.update(|cx| open_workspace_window(None, cx));
   cx.run_until_parked();
-  let workspace = workspace.upgrade().expect("workspace entity alive after window open");
+  let workspace = workspace
+    .upgrade()
+    .expect("workspace entity alive after window open");
   let window = *cx.windows().first().expect("workspace window exists");
   WorkspaceHarness { window, workspace }
 }

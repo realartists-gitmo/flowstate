@@ -28,7 +28,20 @@ unmaintained = "workspace"
 yanked = "warn"
 # Add RUSTSEC IDs here to acknowledge/skip a specific advisory, e.g.:
 # ignore = ["RUSTSEC-0000-0000"]
-ignore = []
+#
+# quick-xml < 0.41 DoS advisories (quadratic duplicate-attribute check /
+# unbounded namespace allocation). Our OWN untrusted-input parse paths
+# (flowstate-docx interpreter + fragment parse) are on quick-xml 0.41; the
+# remaining old copies are pinned by the LATEST releases of third-party
+# crates and cannot be bumped without vendoring them:
+#   0.30 xcb (build-time X11 protocol defs, trusted input)
+#   0.36 docx-rs 0.4.20        (latest; pins ^0.36)
+#   0.37 rdocx-opc/rdocx-oxml 0.1.2 (latest; pin ^0.37) + our matching
+#        `quick-xml-oxml` rename in flowstate-docx (Reader types must unify)
+#   0.38 citationberg (even 0.7.0 pins ^0.38; via typst-library/hayagriva)
+#   0.39 wayland-scanner (proc-macro, build-time trusted input)
+# Re-check on dependency upgrades and drop these when upstreams move.
+ignore = ["RUSTSEC-2026-0194", "RUSTSEC-2026-0195"]
 
 # ---------------------------------------------------------------------------
 # License policy. Unlisted licenses are denied under version 2.
@@ -53,6 +66,12 @@ allow = [
   "0BSD",
   "bzip2-1.0.6",
   "NCSA",
+  # Public-domain-equivalent; pulled in by the iroh/collab websocket stack
+  # (async_io_stream, pharos, ws_stream_wasm).
+  "Unlicense",
+  # Community Data License Agreement (permissive) — the standard license for
+  # the Mozilla CA-bundle data crates (webpki-roots, webpki-root-certs).
+  "CDLA-Permissive-2.0",
 ]
 exceptions = []
 

@@ -78,7 +78,10 @@ fn resolution_failure_rejects_before_mutation() {
     text: "x".into(),
     style_override: None,
   });
-  assert!(matches!(result, Err(WriteRejected::UnresolvedParagraph(_))), "unknown identity must reject");
+  assert!(
+    matches!(result, Err(WriteRejected::UnresolvedParagraph(_))),
+    "unknown identity must reject"
+  );
   assert_eq!(frontier(&gate), before, "rejection must not mutate the doc");
   assert_eq!(body_string(&gate), "\n");
 }
@@ -178,7 +181,10 @@ fn compound_intent_failure_compensates_atomically() {
     })
     .expect("seed");
   // Drain the seed's publish traffic so the compensation payload is isolated.
-  let _ = gate.lock(GateHolder::Test).expect("gate healthy").take_pending_publish();
+  let _ = gate
+    .lock(GateHolder::Test)
+    .expect("gate healthy")
+    .take_pending_publish();
   let text_before = body_string(&gate);
   let paragraphs_before = handle.projection().expect("projection").paragraphs.len();
 
@@ -205,7 +211,10 @@ fn compound_intent_failure_compensates_atomically() {
   INJECT_FRAGMENT_FAULT.with(|fault| fault.set(false));
 
   // (a) rejected as compensated; doc state export-equivalent to pre-intent.
-  assert!(matches!(result, Err(WriteRejected::CompensatedFailure { .. })), "fault must surface as compensated failure: {result:?}");
+  assert!(
+    matches!(result, Err(WriteRejected::CompensatedFailure { .. })),
+    "fault must surface as compensated failure: {result:?}"
+  );
   assert_eq!(body_string(&gate), text_before, "doc must converge back to pre-intent state");
   let projection_after = handle.projection().expect("projection");
   assert_eq!(projection_after.paragraphs.len(), paragraphs_before);
@@ -213,7 +222,10 @@ fn compound_intent_failure_compensates_atomically() {
 
   // (b)/(c): the compensation left exactly one atomic publish payload whose
   // import converges a fresh peer to the same (pre-intent-equivalent) state.
-  let events = gate.lock(GateHolder::Test).expect("gate healthy").take_pending_publish();
+  let events = gate
+    .lock(GateHolder::Test)
+    .expect("gate healthy")
+    .take_pending_publish();
   let payload_count = events
     .iter()
     .filter(|event| matches!(event, RuntimeEvent::LocalUpdate { .. }))
@@ -232,18 +244,25 @@ fn compound_intent_failure_compensates_atomically() {
       .export(loro::ExportMode::updates(&loro::VersionVector::default()))
       .expect("export full updates")
   };
-  peer.import_remote_update(&full_history).expect("peer imports");
+  peer
+    .import_remote_update(&full_history)
+    .expect("peer imports");
   let peer_history = peer
     .doc()
     .export(loro::ExportMode::updates(&loro::VersionVector::default()))
     .expect("peer export");
   let mut guard = gate.lock(GateHolder::ImportChunk).expect("gate healthy");
-  guard.import_remote_update(&peer_history).expect("local imports peer seed");
+  guard
+    .import_remote_update(&peer_history)
+    .expect("local imports peer seed");
   drop(guard);
   let peer_text = flowstate_document::loro_schema::body_text(peer.doc()).to_string();
   let local_text = body_string(&gate);
   assert_eq!(peer_text, local_text, "replicas must converge after full exchange");
-  assert!(!peer_text.contains("partial"), "no replica may ever observe the compensated partial content");
+  assert!(
+    !peer_text.contains("partial"),
+    "no replica may ever observe the compensated partial content"
+  );
   assert!(!peer_text.contains("never"), "the never-applied second block must not exist anywhere");
   assert!(peer_text.contains("base"), "the pre-intent content survives");
 }
@@ -268,22 +287,31 @@ fn concurrent_imports_never_interleave_inside_an_intent() {
       .export(loro::ExportMode::updates(&loro::VersionVector::default()))
       .expect("export")
   };
-  peer.import_remote_update(&local_seed).expect("peer imports seed");
+  peer
+    .import_remote_update(&local_seed)
+    .expect("peer imports seed");
   let peer_seed = peer
     .doc()
     .export(loro::ExportMode::updates(&loro::VersionVector::default()))
     .expect("peer export");
   let mut guard = gate.lock(GateHolder::ImportChunk).expect("gate healthy");
-  guard.import_remote_update(&peer_seed).expect("local imports peer seed");
+  guard
+    .import_remote_update(&peer_seed)
+    .expect("local imports peer seed");
   drop(guard);
   let peer_paragraph = peer.projection_ref().ids.paragraph_ids[0];
-  assert_eq!(paragraph, peer_paragraph, "mergeable seed must give both replicas the same initial paragraph identity");
+  assert_eq!(
+    paragraph, peer_paragraph,
+    "mergeable seed must give both replicas the same initial paragraph identity"
+  );
 
   let gate_for_imports = Arc::clone(&gate);
   let (updates_tx, updates_rx) = std::sync::mpsc::channel::<Vec<u8>>();
   let importer = std::thread::spawn(move || {
     for update in updates_rx {
-      let mut guard = gate_for_imports.lock(GateHolder::ImportChunk).expect("gate healthy");
+      let mut guard = gate_for_imports
+        .lock(GateHolder::ImportChunk)
+        .expect("gate healthy");
       guard.import_remote_update(&update).expect("import applies");
     }
   });
@@ -295,7 +323,10 @@ fn concurrent_imports_never_interleave_inside_an_intent() {
     let peer_body = flowstate_document::loro_schema::body_text(peer.doc());
     peer_body.insert(1, "R").expect("peer insert");
     peer.doc().commit();
-    let update = peer.doc().export(loro::ExportMode::updates(&peer_vv)).expect("peer export");
+    let update = peer
+      .doc()
+      .export(loro::ExportMode::updates(&peer_vv))
+      .expect("peer export");
     peer_vv = peer.doc().state_vv();
     updates_tx.send(update).expect("send update");
 
@@ -322,15 +353,22 @@ fn concurrent_imports_never_interleave_inside_an_intent() {
       .export(loro::ExportMode::updates(&loro::VersionVector::default()))
       .expect("export")
   };
-  peer.import_remote_update(&local_update).expect("peer imports local history");
+  peer
+    .import_remote_update(&local_update)
+    .expect("peer imports local history");
   let local_text = body_string(&gate);
   let peer_text = flowstate_document::loro_schema::body_text(peer.doc()).to_string();
   assert_eq!(local_text, peer_text, "replicas must converge");
 
   // The local keystrokes were appends resolved by identity inside the gate:
   // they must appear in order, uninterleaved by the remote prepends.
-  let expected: String = (0..LOCAL_CHARS).map(|i| char::from(b'a' + (i % 26) as u8)).collect();
-  let locals: String = local_text.chars().filter(|c| c.is_ascii_lowercase()).collect();
+  let expected: String = (0..LOCAL_CHARS)
+    .map(|i| char::from(b'a' + (i % 26) as u8))
+    .collect();
+  let locals: String = local_text
+    .chars()
+    .filter(|c| c.is_ascii_lowercase())
+    .collect();
   assert_eq!(locals, expected, "local appends must retain their intended order and placement");
   assert_eq!(local_text.chars().filter(|c| *c == 'R').count(), LOCAL_CHARS);
 }
@@ -379,13 +417,17 @@ fn remote_import_mid_group_closes_the_group() {
       .export(loro::ExportMode::updates(&loro::VersionVector::default()))
       .expect("export")
   };
-  peer.import_remote_update(&local_seed).expect("peer imports seed");
+  peer
+    .import_remote_update(&local_seed)
+    .expect("peer imports seed");
   let peer_seed = peer
     .doc()
     .export(loro::ExportMode::updates(&loro::VersionVector::default()))
     .expect("peer export");
   let mut guard = gate.lock(GateHolder::ImportChunk).expect("gate");
-  guard.import_remote_update(&peer_seed).expect("local imports peer seed");
+  guard
+    .import_remote_update(&peer_seed)
+    .expect("local imports peer seed");
   drop(guard);
   let peer_vv = peer.doc().state_vv();
 
@@ -411,7 +453,10 @@ fn remote_import_mid_group_closes_the_group() {
   let peer_body = flowstate_document::loro_schema::body_text(peer.doc());
   peer_body.insert(1, "R").expect("peer insert");
   peer.doc().commit();
-  let update = peer.doc().export(loro::ExportMode::updates(&peer_vv)).expect("export");
+  let update = peer
+    .doc()
+    .export(loro::ExportMode::updates(&peer_vv))
+    .expect("export");
   let mut guard = gate.lock(GateHolder::ImportChunk).expect("gate");
   guard.import_remote_update(&update).expect("import applies");
   drop(guard);
@@ -438,13 +483,19 @@ fn remote_import_mid_group_closes_the_group() {
   // not swallow it.
   handle.apply_undo().expect("undo runs");
   let after_first_undo = body_string(&gate);
-  assert!(after_first_undo.contains("onetwo") && !after_first_undo.contains("three"), "post-import commit undoes alone: {after_first_undo:?}");
+  assert!(
+    after_first_undo.contains("onetwo") && !after_first_undo.contains("three"),
+    "post-import commit undoes alone: {after_first_undo:?}"
+  );
   assert!(after_first_undo.contains('R'), "remote content is never undone locally");
 
   // Second undo removes the grouped pre-import commits as one unit.
   handle.apply_undo().expect("undo runs");
   let after_second_undo = body_string(&gate);
-  assert!(!after_second_undo.contains("one") && !after_second_undo.contains("two"), "the pre-import group undoes as one unit: {after_second_undo:?}");
+  assert!(
+    !after_second_undo.contains("one") && !after_second_undo.contains("two"),
+    "the pre-import group undoes as one unit: {after_second_undo:?}"
+  );
   assert!(after_second_undo.contains('R'), "remote content survives all local undo");
 }
 
@@ -470,7 +521,13 @@ fn replace_matches_commits_canonically_and_undoes_as_one_unit() {
       inherited_style: ParagraphStyle::Normal,
     })
     .expect("seed split");
-  let second = *handle.projection().expect("projection").ids.paragraph_ids.last().expect("second paragraph");
+  let second = *handle
+    .projection()
+    .expect("projection")
+    .ids
+    .paragraph_ids
+    .last()
+    .expect("second paragraph");
   handle
     .insert_text(InsertTextIntent {
       at: TextAnchor::new(second, 0),
@@ -655,7 +712,13 @@ fn recorded_inverse_stack_chains_consecutive_fast_undos() {
   // so excluding it keeps the convergence assertion a clean P3-deep signal.
   let ids: Vec<ParagraphId> = paragraph_ids(&handle).into_iter().skip(1).collect();
   let styles_of = |handle: &LocalDocHandle| -> Vec<ParagraphStyle> {
-    handle.projection().expect("projection").paragraphs.iter().map(|paragraph| paragraph.style).collect()
+    handle
+      .projection()
+      .expect("projection")
+      .paragraphs
+      .iter()
+      .map(|paragraph| paragraph.style)
+      .collect()
   };
   let original = styles_of(&handle);
 
@@ -669,21 +732,35 @@ fn recorded_inverse_stack_chains_consecutive_fast_undos() {
       .expect("restyle commits");
   }
   let after_three = styles_of(&handle);
-  assert!(after_three.iter().skip(1).all(|style| *style == ParagraphStyle::Custom(3)), "third restyle wins for all restyled paragraphs");
+  assert!(
+    after_three
+      .iter()
+      .skip(1)
+      .all(|style| *style == ParagraphStyle::Custom(3)),
+    "third restyle wins for all restyled paragraphs"
+  );
   assert_eq!(stack_depths(&gate), (3, 0), "three forward edits stack three undoable inverses");
 
   // THREE undos — EACH must use the fast path (all three move undo→redo).
   for _ in 0..3 {
     assert!(handle.apply_undo().expect("undo runs").applied);
   }
-  assert_eq!(stack_depths(&gate), (0, 3), "P3-deep: all three consecutive undos replayed via the fast path");
+  assert_eq!(
+    stack_depths(&gate),
+    (0, 3),
+    "P3-deep: all three consecutive undos replayed via the fast path"
+  );
   assert_eq!(styles_of(&handle), original, "chained undo restores the original styles");
 
   // THREE redos — each fast, back to the third restyle.
   for _ in 0..3 {
     assert!(handle.apply_redo().expect("redo runs").applied);
   }
-  assert_eq!(stack_depths(&gate), (3, 0), "P3-deep: all three consecutive redos replayed via the fast path");
+  assert_eq!(
+    stack_depths(&gate),
+    (3, 0),
+    "P3-deep: all three consecutive redos replayed via the fast path"
+  );
   assert_eq!(styles_of(&handle), after_three, "chained redo re-applies every restyle");
 
   // The fast-path chain must produce the SAME canonical Loro state the slow path
@@ -691,7 +768,12 @@ fn recorded_inverse_stack_chains_consecutive_fast_undos() {
   // committed doc (P3-deep changes only WHICH replay path runs, not the ops).
   let local_canonical: Vec<ParagraphStyle> = {
     let guard = gate.lock(GateHolder::Test).expect("gate healthy");
-    flowstate_document::document_from_loro(guard.doc()).expect("materializes").paragraphs.iter().map(|paragraph| paragraph.style).collect()
+    flowstate_document::document_from_loro(guard.doc())
+      .expect("materializes")
+      .paragraphs
+      .iter()
+      .map(|paragraph| paragraph.style)
+      .collect()
   };
   assert_eq!(styles_of(&handle), local_canonical, "the fast-path chain leaves live == canonical");
 }
@@ -708,7 +790,13 @@ fn recorded_inverse_survives_inert_checkpoint_commits() {
   seed_mass_fragment(&handle, 12, None);
   let ids: Vec<ParagraphId> = paragraph_ids(&handle).into_iter().skip(1).collect();
   let styles_of = |handle: &LocalDocHandle| -> Vec<ParagraphStyle> {
-    handle.projection().expect("projection").paragraphs.iter().map(|paragraph| paragraph.style).collect()
+    handle
+      .projection()
+      .expect("projection")
+      .paragraphs
+      .iter()
+      .map(|paragraph| paragraph.style)
+      .collect()
   };
   let original = styles_of(&handle);
   handle
@@ -725,7 +813,9 @@ fn recorded_inverse_survives_inert_checkpoint_commits() {
   let path = dir.join("autosave.db8");
   {
     let mut guard = gate.lock(GateHolder::Test).expect("gate healthy");
-    guard.checkpoint_package("Autosave", Some(path.clone())).expect("checkpoint runs")
+    guard
+      .checkpoint_package("Autosave", Some(path.clone()))
+      .expect("checkpoint runs")
   };
 
   // Undo AFTER the autosave must still take the fast path.
@@ -736,7 +826,9 @@ fn recorded_inverse_survives_inert_checkpoint_commits() {
   // And redo across ANOTHER autosave.
   {
     let mut guard = gate.lock(GateHolder::Test).expect("gate healthy");
-    guard.checkpoint_package("Autosave", Some(path)).expect("second checkpoint runs")
+    guard
+      .checkpoint_package("Autosave", Some(path))
+      .expect("second checkpoint runs")
   };
   assert!(handle.apply_redo().expect("redo runs").applied);
   assert_eq!(stack_depths(&gate), (1, 0), "redo stayed FAST across the inert autosave commit");
@@ -784,7 +876,9 @@ fn recorded_inverse_survives_noop_pending_import() {
     .expect("peer edit 2");
   let second_only = {
     let guard = peer_gate.lock(GateHolder::Test).expect("gate healthy");
-    let export = guard.export_updates_for(&vv_after_first).expect("delta export");
+    let export = guard
+      .export_updates_for(&vv_after_first)
+      .expect("delta export");
     drop(guard);
     export
   };
@@ -792,7 +886,9 @@ fn recorded_inverse_survives_noop_pending_import() {
   // Import the dependency-less blob: fully pending, frontier unchanged.
   let mut guard = gate.lock(GateHolder::Test).expect("gate healthy");
   let frontier_before = guard.doc().state_frontiers();
-  guard.import_remote_update(&second_only).expect("pending import is accepted");
+  guard
+    .import_remote_update(&second_only)
+    .expect("pending import is accepted");
   let frontier_after = guard.doc().state_frontiers();
   drop(guard);
   assert_eq!(frontier_after, frontier_before, "fully-pending import applied nothing");
@@ -818,22 +914,34 @@ fn recorded_inverse_rebases_across_hull_disjoint_remote_import() {
   let (peer, peer_gate) = new_handle("rebase-disjoint-peer");
   let local_history = {
     let g = gate.lock(GateHolder::Test).expect("gate");
-    g.doc().export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("export")
+    g.doc()
+      .export(loro::ExportMode::updates(&loro::VersionVector::default()))
+      .expect("export")
   };
   {
     let mut g = peer_gate.lock(GateHolder::ImportChunk).expect("peer gate");
-    g.import_remote_update(&local_history).expect("peer imports local history")
+    g.import_remote_update(&local_history)
+      .expect("peer imports local history")
   };
   let peer_history = {
     let g = peer_gate.lock(GateHolder::Test).expect("peer gate");
-    g.doc().export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("peer export")
+    g.doc()
+      .export(loro::ExportMode::updates(&loro::VersionVector::default()))
+      .expect("peer export")
   };
   {
     let mut g = gate.lock(GateHolder::ImportChunk).expect("gate");
-    g.import_remote_update(&peer_history).expect("local imports peer seed")
+    g.import_remote_update(&peer_history)
+      .expect("local imports peer seed")
   };
   let styles_of = |handle: &LocalDocHandle| -> Vec<ParagraphStyle> {
-    handle.projection().expect("projection").paragraphs.iter().map(|paragraph| paragraph.style).collect()
+    handle
+      .projection()
+      .expect("projection")
+      .paragraphs
+      .iter()
+      .map(|paragraph| paragraph.style)
+      .collect()
   };
   let original = styles_of(&handle);
 
@@ -862,26 +970,40 @@ fn recorded_inverse_rebases_across_hull_disjoint_remote_import() {
     .expect("peer chatter above the hull");
   let chatter = {
     let g = peer_gate.lock(GateHolder::Test).expect("peer gate");
-    g.export_updates_for(&vv_before_chatter).expect("delta export")
+    g.export_updates_for(&vv_before_chatter)
+      .expect("delta export")
   };
   {
     let mut g = gate.lock(GateHolder::ImportChunk).expect("gate");
     g.import_remote_update(&chatter).expect("chatter imports")
   };
-  assert_eq!(stack_depths(&gate), (1, 0), "hull-disjoint remote import REBASED the recorded inverse instead of clearing it");
+  assert_eq!(
+    stack_depths(&gate),
+    (1, 0),
+    "hull-disjoint remote import REBASED the recorded inverse instead of clearing it"
+  );
 
   // Undo/redo AFTER the remote chatter must both stay on the fast path AND be
   // content-correct (the coordinates were shifted through the net delta).
   assert!(handle.apply_undo().expect("undo runs").applied);
   assert_eq!(stack_depths(&gate), (0, 1), "undo stayed FAST across the rebased remote import");
-  assert_eq!(styles_of(&handle), original, "undo restored the pre-restyle styles at the shifted positions");
+  assert_eq!(
+    styles_of(&handle),
+    original,
+    "undo restored the pre-restyle styles at the shifted positions"
+  );
   assert!(handle.apply_redo().expect("redo runs").applied);
   assert_eq!(stack_depths(&gate), (1, 0), "redo stayed FAST across the rebased remote import");
 
   // The fast-path replay must leave live == canonical (same bar as P3-deep).
   let canonical: Vec<ParagraphStyle> = {
     let guard = gate.lock(GateHolder::Test).expect("gate healthy");
-    flowstate_document::document_from_loro(guard.doc()).expect("materializes").paragraphs.iter().map(|paragraph| paragraph.style).collect()
+    flowstate_document::document_from_loro(guard.doc())
+      .expect("materializes")
+      .paragraphs
+      .iter()
+      .map(|paragraph| paragraph.style)
+      .collect()
   };
   assert_eq!(styles_of(&handle), canonical, "rebased fast-path replay leaves live == canonical");
 
@@ -904,19 +1026,34 @@ fn recorded_inverse_rebases_across_hull_disjoint_remote_import() {
     .expect("peer chatter inside the hull");
   let inside = {
     let g = peer_gate.lock(GateHolder::Test).expect("peer gate");
-    g.export_updates_for(&vv_before_inside).expect("delta export")
+    g.export_updates_for(&vv_before_inside)
+      .expect("delta export")
   };
   {
     let mut g = gate.lock(GateHolder::ImportChunk).expect("gate");
-    g.import_remote_update(&inside).expect("in-hull chatter imports")
+    g.import_remote_update(&inside)
+      .expect("in-hull chatter imports")
   };
-  assert_eq!(stack_depths(&gate), (1, 0), "in-hull chatter REBASES a mark-only entry per-coordinate (v2)");
+  assert_eq!(
+    stack_depths(&gate),
+    (1, 0),
+    "in-hull chatter REBASES a mark-only entry per-coordinate (v2)"
+  );
   assert!(handle.apply_undo().expect("undo runs").applied);
   assert_eq!(stack_depths(&gate), (0, 1), "undo stayed FAST across the in-hull rebase");
-  assert_eq!(styles_of(&handle), original, "fast undo after the in-hull rebase still restores the styles");
+  assert_eq!(
+    styles_of(&handle),
+    original,
+    "fast undo after the in-hull rebase still restores the styles"
+  );
   let canonical_after: Vec<ParagraphStyle> = {
     let guard = gate.lock(GateHolder::Test).expect("gate healthy");
-    flowstate_document::document_from_loro(guard.doc()).expect("materializes").paragraphs.iter().map(|paragraph| paragraph.style).collect()
+    flowstate_document::document_from_loro(guard.doc())
+      .expect("materializes")
+      .paragraphs
+      .iter()
+      .map(|paragraph| paragraph.style)
+      .collect()
   };
   assert_eq!(styles_of(&handle), canonical_after, "in-hull rebased replay leaves live == canonical");
 }
@@ -935,7 +1072,17 @@ fn recorded_inverse_captures_keystrokes_and_backspace() {
   let original = body_string(&gate);
 
   // Three keystrokes, one styled — three armed inverses.
-  for (ch, style) in [("a", None), ("b", None), ("c", Some(flowstate_document::RunStyles { direct_underline: true, ..Default::default() }))] {
+  for (ch, style) in [
+    ("a", None),
+    ("b", None),
+    (
+      "c",
+      Some(flowstate_document::RunStyles {
+        direct_underline: true,
+        ..Default::default()
+      }),
+    ),
+  ] {
     handle
       .insert_text(InsertTextIntent {
         at: TextAnchor::new(target, 0),
@@ -973,14 +1120,18 @@ fn recorded_inverse_captures_keystrokes_and_backspace() {
   // Live projection == canonical materialization (the same bar as P3-deep).
   let live = {
     let projection = handle.projection().expect("projection");
-    (0..projection.paragraphs.len()).map(|ix| paragraph_text(&projection, ix)).collect::<Vec<_>>()
+    (0..projection.paragraphs.len())
+      .map(|ix| paragraph_text(&projection, ix))
+      .collect::<Vec<_>>()
   };
   let canonical = {
     let document = {
       let guard = gate.lock(GateHolder::Test).expect("gate healthy");
       flowstate_document::document_from_loro(guard.doc()).expect("materializes")
     };
-    (0..document.paragraphs.len()).map(|ix| paragraph_text(&document, ix)).collect::<Vec<_>>()
+    (0..document.paragraphs.len())
+      .map(|ix| paragraph_text(&document, ix))
+      .collect::<Vec<_>>()
   };
   assert_eq!(live, canonical, "keystroke fast-path replay leaves live == canonical");
 }
@@ -996,19 +1147,25 @@ fn recorded_inverse_keystroke_survives_hull_disjoint_chatter() {
   let (peer, peer_gate) = new_handle("keystroke-rebase-peer");
   let local_history = {
     let g = gate.lock(GateHolder::Test).expect("gate");
-    g.doc().export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("export")
+    g.doc()
+      .export(loro::ExportMode::updates(&loro::VersionVector::default()))
+      .expect("export")
   };
   {
     let mut g = peer_gate.lock(GateHolder::ImportChunk).expect("peer gate");
-    g.import_remote_update(&local_history).expect("peer imports local history")
+    g.import_remote_update(&local_history)
+      .expect("peer imports local history")
   };
   let peer_history = {
     let g = peer_gate.lock(GateHolder::Test).expect("peer gate");
-    g.doc().export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("peer export")
+    g.doc()
+      .export(loro::ExportMode::updates(&loro::VersionVector::default()))
+      .expect("peer export")
   };
   {
     let mut g = gate.lock(GateHolder::ImportChunk).expect("gate");
-    g.import_remote_update(&peer_history).expect("local imports peer seed")
+    g.import_remote_update(&peer_history)
+      .expect("local imports peer seed")
   };
 
   // A types DEEP in the document — the recorded hull sits far above position 0.
@@ -1023,7 +1180,9 @@ fn recorded_inverse_keystroke_survives_hull_disjoint_chatter() {
   assert_eq!(stack_depths(&gate), (1, 0), "the keystroke armed a recorded inverse");
   let after_keystroke_projection = {
     let projection = handle.projection().expect("projection");
-    (0..projection.paragraphs.len()).map(|ix| paragraph_text(&projection, ix)).collect::<Vec<_>>()
+    (0..projection.paragraphs.len())
+      .map(|ix| paragraph_text(&projection, ix))
+      .collect::<Vec<_>>()
   };
 
   // B types near the TOP — strictly before the hull.
@@ -1041,13 +1200,18 @@ fn recorded_inverse_keystroke_survives_hull_disjoint_chatter() {
     .expect("peer chatter above the hull");
   let chatter = {
     let g = peer_gate.lock(GateHolder::Test).expect("peer gate");
-    g.export_updates_for(&vv_before_chatter).expect("delta export")
+    g.export_updates_for(&vv_before_chatter)
+      .expect("delta export")
   };
   {
     let mut g = gate.lock(GateHolder::ImportChunk).expect("gate");
     g.import_remote_update(&chatter).expect("chatter imports")
   };
-  assert_eq!(stack_depths(&gate), (1, 0), "hull-disjoint chatter REBASED the keystroke inverse instead of clearing it");
+  assert_eq!(
+    stack_depths(&gate),
+    (1, 0),
+    "hull-disjoint chatter REBASED the keystroke inverse instead of clearing it"
+  );
 
   // Ctrl-Z after the partner's edit: fast, and the deep 'X' is gone while the
   // partner's text survives.
@@ -1055,25 +1219,39 @@ fn recorded_inverse_keystroke_survives_hull_disjoint_chatter() {
   assert_eq!(stack_depths(&gate), (0, 1), "keystroke undo stayed FAST across the rebased remote import");
   let live = {
     let projection = handle.projection().expect("projection");
-    (0..projection.paragraphs.len()).map(|ix| paragraph_text(&projection, ix)).collect::<Vec<_>>()
+    (0..projection.paragraphs.len())
+      .map(|ix| paragraph_text(&projection, ix))
+      .collect::<Vec<_>>()
   };
-  assert!(live.iter().any(|text| text.contains("partner typed above ")), "the partner's chatter survives the undo");
+  assert!(
+    live
+      .iter()
+      .any(|text| text.contains("partner typed above ")),
+    "the partner's chatter survives the undo"
+  );
   assert!(!live.iter().any(|text| text.contains('X')), "the undone keystroke is gone");
   let canonical = {
     let document = {
       let guard = gate.lock(GateHolder::Test).expect("gate healthy");
       flowstate_document::document_from_loro(guard.doc()).expect("materializes")
     };
-    (0..document.paragraphs.len()).map(|ix| paragraph_text(&document, ix)).collect::<Vec<_>>()
+    (0..document.paragraphs.len())
+      .map(|ix| paragraph_text(&document, ix))
+      .collect::<Vec<_>>()
   };
   assert_eq!(live, canonical, "rebased keystroke undo leaves live == canonical");
   assert!(handle.apply_redo().expect("redo runs").applied);
   assert_eq!(stack_depths(&gate), (1, 0), "keystroke redo stayed FAST too");
   let live_after_redo = {
     let projection = handle.projection().expect("projection");
-    (0..projection.paragraphs.len()).map(|ix| paragraph_text(&projection, ix)).collect::<Vec<_>>()
+    (0..projection.paragraphs.len())
+      .map(|ix| paragraph_text(&projection, ix))
+      .collect::<Vec<_>>()
   };
-  assert!(live_after_redo.iter().any(|text| text.contains('X')), "redo re-applied the keystroke at the shifted position");
+  assert!(
+    live_after_redo.iter().any(|text| text.contains('X')),
+    "redo re-applied the keystroke at the shifted position"
+  );
   // The projection must equal the pre-chatter shape plus the chatter.
   assert_ne!(live_after_redo, after_keystroke_projection, "the chatter is part of the final projection");
 }
@@ -1092,19 +1270,25 @@ fn rebase_downgrades_content_patches_when_remote_edits_first_patched_paragraph()
   let (peer, peer_gate) = new_handle("rebase-patch-content-peer");
   let local_history = {
     let g = gate.lock(GateHolder::Test).expect("gate");
-    g.doc().export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("export")
+    g.doc()
+      .export(loro::ExportMode::updates(&loro::VersionVector::default()))
+      .expect("export")
   };
   {
     let mut g = peer_gate.lock(GateHolder::ImportChunk).expect("peer gate");
-    g.import_remote_update(&local_history).expect("peer imports local history")
+    g.import_remote_update(&local_history)
+      .expect("peer imports local history")
   };
   let peer_history = {
     let g = peer_gate.lock(GateHolder::Test).expect("peer gate");
-    g.doc().export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("peer export")
+    g.doc()
+      .export(loro::ExportMode::updates(&loro::VersionVector::default()))
+      .expect("peer export")
   };
   {
     let mut g = gate.lock(GateHolder::ImportChunk).expect("gate");
-    g.import_remote_update(&peer_history).expect("local imports peer seed")
+    g.import_remote_update(&peer_history)
+      .expect("local imports peer seed")
   };
 
   // A mass-deletes paragraphs 12..38 starting MID-paragraph-12: the first
@@ -1146,17 +1330,27 @@ fn rebase_downgrades_content_patches_when_remote_edits_first_patched_paragraph()
   assert!(handle.apply_undo().expect("undo runs").applied);
   let live = {
     let projection = handle.projection().expect("projection");
-    (0..projection.paragraphs.len()).map(|ix| paragraph_text(&projection, ix)).collect::<Vec<_>>()
+    (0..projection.paragraphs.len())
+      .map(|ix| paragraph_text(&projection, ix))
+      .collect::<Vec<_>>()
   };
   let canonical = {
     let document = {
       let guard = gate.lock(GateHolder::Test).expect("gate healthy");
       flowstate_document::document_from_loro(guard.doc()).expect("materializes")
     };
-    (0..document.paragraphs.len()).map(|ix| paragraph_text(&document, ix)).collect::<Vec<_>>()
+    (0..document.paragraphs.len())
+      .map(|ix| paragraph_text(&document, ix))
+      .collect::<Vec<_>>()
   };
-  assert_eq!(live, canonical, "post-rebase undo leaves live == canonical (stale content patches must downgrade to derive)");
-  assert!(live.iter().any(|text| text.contains("REMOTE")), "the remote prefix edit survives the undo replay");
+  assert_eq!(
+    live, canonical,
+    "post-rebase undo leaves live == canonical (stale content patches must downgrade to derive)"
+  );
+  assert!(
+    live.iter().any(|text| text.contains("REMOTE")),
+    "the remote prefix edit survives the undo replay"
+  );
 }
 
 /// Bidirectionally seed `peer_gate` with `gate`'s history (both end holding
@@ -1164,19 +1358,25 @@ fn rebase_downgrades_content_patches_when_remote_edits_first_patched_paragraph()
 fn exchange_full_histories(gate: &Arc<WriteGate<CrdtRuntime>>, peer_gate: &Arc<WriteGate<CrdtRuntime>>) {
   let local_history = {
     let g = gate.lock(GateHolder::Test).expect("gate");
-    g.doc().export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("export")
+    g.doc()
+      .export(loro::ExportMode::updates(&loro::VersionVector::default()))
+      .expect("export")
   };
   {
     let mut g = peer_gate.lock(GateHolder::ImportChunk).expect("peer gate");
-    g.import_remote_update(&local_history).expect("peer imports local history")
+    g.import_remote_update(&local_history)
+      .expect("peer imports local history")
   };
   let peer_history = {
     let g = peer_gate.lock(GateHolder::Test).expect("peer gate");
-    g.doc().export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("peer export")
+    g.doc()
+      .export(loro::ExportMode::updates(&loro::VersionVector::default()))
+      .expect("peer export")
   };
   {
     let mut g = gate.lock(GateHolder::ImportChunk).expect("gate");
-    g.import_remote_update(&peer_history).expect("local imports peer seed")
+    g.import_remote_update(&peer_history)
+      .expect("local imports peer seed")
   };
 }
 
@@ -1201,8 +1401,14 @@ fn assert_live_equals_canonical(handle: &LocalDocHandle, gate: &Arc<WriteGate<Cr
   let (live_text, live_styles) = {
     let projection = handle.projection().expect("projection");
     (
-      (0..projection.paragraphs.len()).map(|ix| paragraph_text(&projection, ix)).collect::<Vec<_>>(),
-      projection.paragraphs.iter().map(|p| p.style).collect::<Vec<_>>(),
+      (0..projection.paragraphs.len())
+        .map(|ix| paragraph_text(&projection, ix))
+        .collect::<Vec<_>>(),
+      projection
+        .paragraphs
+        .iter()
+        .map(|p| p.style)
+        .collect::<Vec<_>>(),
     )
   };
   let (canonical_text, canonical_styles) = {
@@ -1211,8 +1417,14 @@ fn assert_live_equals_canonical(handle: &LocalDocHandle, gate: &Arc<WriteGate<Cr
       flowstate_document::document_from_loro(guard.doc()).expect("materializes")
     };
     (
-      (0..document.paragraphs.len()).map(|ix| paragraph_text(&document, ix)).collect::<Vec<_>>(),
-      document.paragraphs.iter().map(|p| p.style).collect::<Vec<_>>(),
+      (0..document.paragraphs.len())
+        .map(|ix| paragraph_text(&document, ix))
+        .collect::<Vec<_>>(),
+      document
+        .paragraphs
+        .iter()
+        .map(|p| p.style)
+        .collect::<Vec<_>>(),
     )
   };
   assert_eq!(live_text, canonical_text, "{context}: live text == canonical");
@@ -1233,7 +1445,13 @@ fn select_all_restyle_rebases_per_coordinate_through_remote_chatter() {
   let (peer, peer_gate) = new_handle("select-all-rebase-peer");
   exchange_full_histories(&gate, &peer_gate);
 
-  let styles_before: Vec<ParagraphStyle> = handle.projection().expect("projection").paragraphs.iter().map(|p| p.style).collect();
+  let styles_before: Vec<ParagraphStyle> = handle
+    .projection()
+    .expect("projection")
+    .paragraphs
+    .iter()
+    .map(|p| p.style)
+    .collect();
   handle
     .set_paragraph_styles(SetParagraphStylesIntent {
       paragraphs: paragraph_ids(&handle),
@@ -1252,15 +1470,24 @@ fn select_all_restyle_rebases_per_coordinate_through_remote_chatter() {
     })
     .expect("peer chatter inside the span");
   sync_delta(&peer_gate, &gate, &vv);
-  assert_eq!(stack_depths(&gate), (1, 0), "chatter inside the restyled span REBASED the mark entry per-coordinate");
+  assert_eq!(
+    stack_depths(&gate),
+    (1, 0),
+    "chatter inside the restyled span REBASED the mark entry per-coordinate"
+  );
 
   assert!(handle.apply_undo().expect("undo runs").applied);
   assert_eq!(stack_depths(&gate), (0, 1), "select-all undo stayed FAST across the rebased import");
   let after_undo = handle.projection().expect("projection");
   let styles: Vec<ParagraphStyle> = after_undo.paragraphs.iter().map(|p| p.style).collect();
   assert_eq!(styles, styles_before, "undo restored every paragraph's prior style");
-  let text = (0..after_undo.paragraphs.len()).map(|ix| paragraph_text(&after_undo, ix)).collect::<Vec<_>>();
-  assert!(text.iter().any(|t| t.contains("partner typed inside ")), "the partner's chatter survives the undo");
+  let text = (0..after_undo.paragraphs.len())
+    .map(|ix| paragraph_text(&after_undo, ix))
+    .collect::<Vec<_>>();
+  assert!(
+    text.iter().any(|t| t.contains("partner typed inside ")),
+    "the partner's chatter survives the undo"
+  );
   assert_live_equals_canonical(&handle, &gate, "select-all undo after mid-span chatter");
 
   // Another chatter burst while the entry sits on the REDO stack.
@@ -1278,7 +1505,10 @@ fn select_all_restyle_rebases_per_coordinate_through_remote_chatter() {
   assert_eq!(stack_depths(&gate), (1, 0), "select-all redo stayed FAST");
   let after_redo = handle.projection().expect("projection");
   assert!(
-    after_redo.paragraphs.iter().all(|p| p.style == ParagraphStyle::Custom(4)),
+    after_redo
+      .paragraphs
+      .iter()
+      .all(|p| p.style == ParagraphStyle::Custom(4)),
     "redo re-applied the restyle to every paragraph"
   );
   assert_live_equals_canonical(&handle, &gate, "select-all redo after second chatter");
@@ -1312,13 +1542,20 @@ fn select_all_rebase_drops_targets_whose_boundary_the_remote_deleted() {
     })
     .expect("peer merges two paragraphs");
   sync_delta(&peer_gate, &gate, &vv);
-  assert_eq!(stack_depths(&gate), (1, 0), "the mark entry survived with the dead boundary's target dropped");
+  assert_eq!(
+    stack_depths(&gate),
+    (1, 0),
+    "the mark entry survived with the dead boundary's target dropped"
+  );
 
   assert!(handle.apply_undo().expect("undo runs").applied);
   assert_eq!(stack_depths(&gate), (0, 1), "undo stayed FAST despite the dropped target");
   let after_undo = handle.projection().expect("projection");
   assert!(
-    after_undo.paragraphs.iter().all(|p| p.style == ParagraphStyle::Normal),
+    after_undo
+      .paragraphs
+      .iter()
+      .all(|p| p.style == ParagraphStyle::Normal),
     "undo reverted every surviving paragraph (the merged one rides its surviving boundary)"
   );
   assert_live_equals_canonical(&handle, &gate, "select-all undo after remote boundary delete");
@@ -1327,7 +1564,10 @@ fn select_all_rebase_drops_targets_whose_boundary_the_remote_deleted() {
   assert_eq!(stack_depths(&gate), (1, 0), "redo stayed FAST");
   let after_redo = handle.projection().expect("projection");
   assert!(
-    after_redo.paragraphs.iter().all(|p| p.style == ParagraphStyle::Custom(4)),
+    after_redo
+      .paragraphs
+      .iter()
+      .all(|p| p.style == ParagraphStyle::Custom(4)),
     "redo re-restyled every surviving paragraph"
   );
   assert_live_equals_canonical(&handle, &gate, "select-all redo after remote boundary delete");
@@ -1383,16 +1623,29 @@ fn mark_top_survives_while_deeper_keystroke_truncates_then_slow_path_converges()
   // Undo #1: the mark entry, fast.
   assert!(handle.apply_undo().expect("undo #1 runs").applied);
   let after_first_undo = handle.projection().expect("projection");
-  assert!(after_first_undo.paragraphs.iter().all(|p| p.style == ParagraphStyle::Normal), "undo #1 reverted the restyle");
+  assert!(
+    after_first_undo
+      .paragraphs
+      .iter()
+      .all(|p| p.style == ParagraphStyle::Normal),
+    "undo #1 reverted the restyle"
+  );
   // Undo #2: recorded stack dry — the native slow path pops the keystroke item
   // and must land exactly on the keystroke (partner text intact).
   assert!(handle.apply_undo().expect("undo #2 runs").applied);
   let live = {
     let projection = handle.projection().expect("projection");
-    (0..projection.paragraphs.len()).map(|ix| paragraph_text(&projection, ix)).collect::<Vec<_>>()
+    (0..projection.paragraphs.len())
+      .map(|ix| paragraph_text(&projection, ix))
+      .collect::<Vec<_>>()
   };
   assert!(!live.iter().any(|text| text.contains('X')), "the slow-path undo removed the keystroke");
-  assert!(live.iter().any(|text| text.contains("partner deep chatter ")), "the partner's chatter survives both undos");
+  assert!(
+    live
+      .iter()
+      .any(|text| text.contains("partner deep chatter ")),
+    "the partner's chatter survives both undos"
+  );
   assert_live_equals_canonical(&handle, &gate, "fast mark undo then slow keystroke undo");
 }
 
@@ -1426,21 +1679,36 @@ fn keystroke_rebase_survives_remote_structural_insert_before_hull() {
     })
     .expect("peer splits a paragraph above the hull");
   sync_delta(&peer_gate, &gate, &vv);
-  assert_eq!(stack_depths(&gate), (1, 0), "structural chatter above the hull REBASED the keystroke entry (derive), not cleared");
+  assert_eq!(
+    stack_depths(&gate),
+    (1, 0),
+    "structural chatter above the hull REBASED the keystroke entry (derive), not cleared"
+  );
 
   assert!(handle.apply_undo().expect("undo runs").applied);
   assert_eq!(stack_depths(&gate), (0, 1), "keystroke undo stayed FAST across the structural rebase");
   let after_undo = handle.projection().expect("projection");
-  assert_eq!(after_undo.paragraphs.len(), paragraph_count_before + 1, "the remote split survives the undo");
-  let undo_text = (0..after_undo.paragraphs.len()).map(|ix| paragraph_text(&after_undo, ix)).collect::<Vec<_>>();
+  assert_eq!(
+    after_undo.paragraphs.len(),
+    paragraph_count_before + 1,
+    "the remote split survives the undo"
+  );
+  let undo_text = (0..after_undo.paragraphs.len())
+    .map(|ix| paragraph_text(&after_undo, ix))
+    .collect::<Vec<_>>();
   assert!(!undo_text.iter().any(|t| t.contains('X')), "the undone keystroke is gone");
   assert_live_equals_canonical(&handle, &gate, "keystroke undo after remote structural insert");
 
   assert!(handle.apply_redo().expect("redo runs").applied);
   assert_eq!(stack_depths(&gate), (1, 0), "keystroke redo stayed FAST");
   let after_redo = handle.projection().expect("projection");
-  let redo_text = (0..after_redo.paragraphs.len()).map(|ix| paragraph_text(&after_redo, ix)).collect::<Vec<_>>();
-  assert!(redo_text.iter().any(|t| t.contains('X')), "redo re-applied the keystroke at the shifted position");
+  let redo_text = (0..after_redo.paragraphs.len())
+    .map(|ix| paragraph_text(&after_redo, ix))
+    .collect::<Vec<_>>();
+  assert!(
+    redo_text.iter().any(|t| t.contains('X')),
+    "redo re-applied the keystroke at the shifted position"
+  );
   assert_live_equals_canonical(&handle, &gate, "keystroke redo after remote structural insert");
 }
 
@@ -1477,13 +1745,19 @@ fn remote_insert_at_recorded_coordinate_clears_instead_of_rebasing() {
     })
     .expect("peer types at the recorded coordinate");
   sync_delta(&peer_gate, &gate, &vv);
-  assert_eq!(stack_depths(&gate), (0, 0), "an insert AT the recorded coordinate cleared the entry (ambiguous parking spot)");
+  assert_eq!(
+    stack_depths(&gate),
+    (0, 0),
+    "an insert AT the recorded coordinate cleared the entry (ambiguous parking spot)"
+  );
 
   // The slow path still serves the undo, removing exactly the local 'X'.
   assert!(handle.apply_undo().expect("undo runs").applied);
   let live = {
     let projection = handle.projection().expect("projection");
-    (0..projection.paragraphs.len()).map(|ix| paragraph_text(&projection, ix)).collect::<Vec<_>>()
+    (0..projection.paragraphs.len())
+      .map(|ix| paragraph_text(&projection, ix))
+      .collect::<Vec<_>>()
   };
   assert!(!live.iter().any(|text| text.contains('X')), "the undone keystroke is gone");
   assert!(live.iter().any(|text| text.contains('Y')), "the partner's at-coordinate char survives");
@@ -1502,7 +1776,12 @@ fn recorded_inverse_stack_restyle_undo_redo_converges_bidirectionally() {
   seed_mass_fragment(&handle, 12, None);
   let ids: Vec<ParagraphId> = paragraph_ids(&handle).into_iter().skip(1).collect();
   for slot in [1_u8, 2, 3] {
-    handle.set_paragraph_styles(SetParagraphStylesIntent { paragraphs: ids.clone(), style: ParagraphStyle::Custom(slot) }).expect("restyle");
+    handle
+      .set_paragraph_styles(SetParagraphStylesIntent {
+        paragraphs: ids.clone(),
+        style: ParagraphStyle::Custom(slot),
+      })
+      .expect("restyle");
   }
   for _ in 0..3 {
     handle.apply_undo().expect("undo");
@@ -1511,26 +1790,43 @@ fn recorded_inverse_stack_restyle_undo_redo_converges_bidirectionally() {
     handle.apply_redo().expect("redo");
   }
   let styles = |doc: &loro::LoroDoc| -> Vec<ParagraphStyle> {
-    flowstate_document::document_from_loro(doc).expect("mat").paragraphs.iter().map(|p| p.style).collect()
+    flowstate_document::document_from_loro(doc)
+      .expect("mat")
+      .paragraphs
+      .iter()
+      .map(|p| p.style)
+      .collect()
   };
   // Bidirectional exchange: peer takes local's whole history, local takes the
   // peer's seed back — now both hold both sentinels and must converge.
   let local_history = {
     let g = gate.lock(GateHolder::Test).expect("gate");
-    g.doc().export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("export")
+    g.doc()
+      .export(loro::ExportMode::updates(&loro::VersionVector::default()))
+      .expect("export")
   };
   let mut peer = CrdtRuntime::new_empty("chain-peer").expect("peer");
-  peer.import_remote_update(&local_history).expect("peer imports local");
-  let peer_seed = peer.doc().export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("peer export");
+  peer
+    .import_remote_update(&local_history)
+    .expect("peer imports local");
+  let peer_seed = peer
+    .doc()
+    .export(loro::ExportMode::updates(&loro::VersionVector::default()))
+    .expect("peer export");
   {
     let mut g = gate.lock(GateHolder::ImportChunk).expect("gate");
-    g.import_remote_update(&peer_seed).expect("local imports peer seed")
+    g.import_remote_update(&peer_seed)
+      .expect("local imports peer seed")
   };
   let local_after = {
     let g = gate.lock(GateHolder::Test).expect("gate");
     styles(g.doc())
   };
-  assert_eq!(styles(peer.doc()), local_after, "restyle→undo→redo converges after a bidirectional exchange");
+  assert_eq!(
+    styles(peer.doc()),
+    local_after,
+    "restyle→undo→redo converges after a bidirectional exchange"
+  );
 }
 
 /// §act-five P1.B: a peer importing a LONG run of sequential remote updates
@@ -1543,27 +1839,40 @@ fn retained_import_calculator_converges_over_many_sequential_imports() {
   let (handle_a, gate_a) = new_handle("p1b-a");
   let a_init = {
     let g = gate_a.lock(GateHolder::Test).expect("gate");
-    g.doc().export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("export A init")
+    g.doc()
+      .export(loro::ExportMode::updates(&loro::VersionVector::default()))
+      .expect("export A init")
   };
   let mut peer = CrdtRuntime::new_empty("p1b-b").expect("peer B");
-  peer.import_remote_update(&a_init).expect("B imports A init");
+  peer
+    .import_remote_update(&a_init)
+    .expect("B imports A init");
 
   let first = first_paragraph(&handle_a.projection().expect("projection"));
   for i in 0..24 {
     handle_a
-      .insert_text(InsertTextIntent { at: TextAnchor::new(first, 0), text: format!("x{i} "), style_override: None })
+      .insert_text(InsertTextIntent {
+        at: TextAnchor::new(first, 0),
+        text: format!("x{i} "),
+        style_override: None,
+      })
       .expect("A edit commits");
     // B imports A's whole history each round; only the new op applies, exercising
     // the retained calculator once more (idempotent for already-present ops).
     let full = {
       let g = gate_a.lock(GateHolder::Test).expect("gate");
-      g.doc().export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("export A")
+      g.doc()
+        .export(loro::ExportMode::updates(&loro::VersionVector::default()))
+        .expect("export A")
     };
     peer.import_remote_update(&full).expect("B imports A");
   }
   // Bidirectional close: A takes B's seed back so both hold both sentinels; then
   // the two canonical bodies must be identical (the real convergence bar).
-  let b_seed = peer.doc().export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("export B");
+  let b_seed = peer
+    .doc()
+    .export(loro::ExportMode::updates(&loro::VersionVector::default()))
+    .expect("export B");
   {
     let mut g = gate_a.lock(GateHolder::ImportChunk).expect("gate");
     g.import_remote_update(&b_seed).expect("A imports B seed")
@@ -1590,7 +1899,9 @@ fn meet_clamped_import_feed_converges_with_interleaved_local_edits() {
   let (handle_b, gate_b) = new_handle("p21-clamp-b");
   let a_init = {
     let g = gate_a.lock(GateHolder::Test).expect("gate");
-    g.doc().export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("export A init")
+    g.doc()
+      .export(loro::ExportMode::updates(&loro::VersionVector::default()))
+      .expect("export A init")
   };
   {
     let mut g = gate_b.lock(GateHolder::ImportChunk).expect("B gate");
@@ -1598,7 +1909,9 @@ fn meet_clamped_import_feed_converges_with_interleaved_local_edits() {
   };
   let b_init = {
     let g = gate_b.lock(GateHolder::Test).expect("B gate");
-    g.doc().export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("export B init")
+    g.doc()
+      .export(loro::ExportMode::updates(&loro::VersionVector::default()))
+      .expect("export B init")
   };
   {
     let mut g = gate_a.lock(GateHolder::ImportChunk).expect("gate");
@@ -1615,16 +1928,26 @@ fn meet_clamped_import_feed_converges_with_interleaved_local_edits() {
     // (the deep-dominator shape).
     let b_target = paragraph_ids(&handle_b)[1];
     handle_b
-      .insert_text(InsertTextIntent { at: TextAnchor::new(b_target, 0), text: format!("b{i} "), style_override: None })
+      .insert_text(InsertTextIntent {
+        at: TextAnchor::new(b_target, 0),
+        text: format!("b{i} "),
+        style_override: None,
+      })
       .expect("B edit commits");
     // A makes a LOCAL edit — the retained import calculator's coverage gap.
     let a_target = paragraph_ids(&handle_a)[3];
     handle_a
-      .insert_text(InsertTextIntent { at: TextAnchor::new(a_target, 0), text: format!("a{i} "), style_override: None })
+      .insert_text(InsertTextIntent {
+        at: TextAnchor::new(a_target, 0),
+        text: format!("a{i} "),
+        style_override: None,
+      })
       .expect("A edit commits");
     let delta = {
       let g = gate_b.lock(GateHolder::Test).expect("B gate");
-      let delta = g.export_updates_for(&b_exported_vv).expect("B delta export");
+      let delta = g
+        .export_updates_for(&b_exported_vv)
+        .expect("B delta export");
       b_exported_vv = g.doc().state_vv();
       delta
     };
@@ -1635,7 +1958,9 @@ fn meet_clamped_import_feed_converges_with_interleaved_local_edits() {
   // Close the loop: B takes A's full history; both canonical bodies must match.
   let a_full = {
     let g = gate_a.lock(GateHolder::Test).expect("gate");
-    g.doc().export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("export A full")
+    g.doc()
+      .export(loro::ExportMode::updates(&loro::VersionVector::default()))
+      .expect("export A full")
   };
   {
     let mut g = gate_b.lock(GateHolder::ImportChunk).expect("B gate");
@@ -1649,19 +1974,26 @@ fn meet_clamped_import_feed_converges_with_interleaved_local_edits() {
     let g = gate_b.lock(GateHolder::Test).expect("B gate");
     flowstate_document::loro_schema::body_text(g.doc()).to_string()
   };
-  assert_eq!(b_body, a_body, "interleaved local edits + one-way sequential imports converge (gap re-feed is complete)");
+  assert_eq!(
+    b_body, a_body,
+    "interleaved local edits + one-way sequential imports converge (gap re-feed is complete)"
+  );
   // And A's LIVE projection must equal its canonical materialization — a
   // clamped-away tracker hole shows up as a projection/doc offset mismatch.
   let live = {
     let projection = handle_a.projection().expect("projection");
-    (0..projection.paragraphs.len()).map(|ix| paragraph_text(&projection, ix)).collect::<Vec<_>>()
+    (0..projection.paragraphs.len())
+      .map(|ix| paragraph_text(&projection, ix))
+      .collect::<Vec<_>>()
   };
   let canonical = {
     let document = {
       let guard = gate_a.lock(GateHolder::Test).expect("gate healthy");
       flowstate_document::document_from_loro(guard.doc()).expect("materializes")
     };
-    (0..document.paragraphs.len()).map(|ix| paragraph_text(&document, ix)).collect::<Vec<_>>()
+    (0..document.paragraphs.len())
+      .map(|ix| paragraph_text(&document, ix))
+      .collect::<Vec<_>>()
   };
   assert_eq!(live, canonical, "A's live projection == canonical after clamped imports");
 }
@@ -1680,11 +2012,21 @@ fn slot_direction(gate: &Arc<WriteGate<CrdtRuntime>>) -> Option<loro::UndoOrRedo
 }
 
 fn paragraph_ids(handle: &LocalDocHandle) -> Vec<ParagraphId> {
-  handle.projection().expect("projection").ids.paragraph_ids.to_vec()
+  handle
+    .projection()
+    .expect("projection")
+    .ids
+    .paragraph_ids
+    .to_vec()
 }
 
 fn block_ids(handle: &LocalDocHandle) -> Vec<flowstate_document::BlockId> {
-  handle.projection().expect("projection").ids.block_ids.to_vec()
+  handle
+    .projection()
+    .expect("projection")
+    .ids
+    .block_ids
+    .to_vec()
 }
 
 /// The core round trip: a qualifying mass delete arms the slot; undo replays
@@ -1711,15 +2053,30 @@ fn recorded_inverse_fast_undo_round_trips_mass_delete() {
     })
     .expect("mass delete commits");
   let body_deleted = body_string(&gate);
-  assert!(body_deleted.len() + 2048 < body_before.len(), "delete must remove a qualifying mass range");
-  assert_eq!(slot_direction(&gate), Some(loro::UndoOrRedo::Undo), "mass delete must arm the recorded inverse");
+  assert!(
+    body_deleted.len() + 2048 < body_before.len(),
+    "delete must remove a qualifying mass range"
+  );
+  assert_eq!(
+    slot_direction(&gate),
+    Some(loro::UndoOrRedo::Undo),
+    "mass delete must arm the recorded inverse"
+  );
 
   // Undo: fast path (flips the slot; the slow path never touches it).
   let outcome = handle.apply_undo().expect("undo runs");
   assert!(outcome.applied);
   assert_eq!(body_string(&gate), body_before, "undo must restore the exact body text + boundaries");
-  assert_eq!(slot_direction(&gate), Some(loro::UndoOrRedo::Redo), "fast undo must flip the slot to redo");
-  assert_eq!(paragraph_ids(&handle), paragraph_ids_before, "undo must restore ORIGINAL paragraph identities");
+  assert_eq!(
+    slot_direction(&gate),
+    Some(loro::UndoOrRedo::Redo),
+    "fast undo must flip the slot to redo"
+  );
+  assert_eq!(
+    paragraph_ids(&handle),
+    paragraph_ids_before,
+    "undo must restore ORIGINAL paragraph identities"
+  );
   assert_eq!(block_ids(&handle), block_ids_before, "undo must restore ORIGINAL block identities");
 
   // Redo: fast replay of the recorded delete.
@@ -1744,14 +2101,18 @@ fn recorded_inverse_fast_undo_round_trips_mass_delete() {
       .export(loro::ExportMode::updates(&loro::VersionVector::default()))
       .expect("export full updates")
   };
-  peer.import_remote_update(&full_history).expect("peer imports");
+  peer
+    .import_remote_update(&full_history)
+    .expect("peer imports");
   let peer_text = flowstate_document::loro_schema::body_text(peer.doc()).to_string();
   let peer_history = peer
     .doc()
     .export(loro::ExportMode::updates(&loro::VersionVector::default()))
     .expect("peer export");
   let mut guard = gate.lock(GateHolder::ImportChunk).expect("gate healthy");
-  guard.import_remote_update(&peer_history).expect("local imports peer seed");
+  guard
+    .import_remote_update(&peer_history)
+    .expect("local imports peer seed");
   drop(guard);
   assert_eq!(body_string(&gate), peer_text, "replicas must converge on the fast-path history");
 }
@@ -1817,7 +2178,9 @@ fn recorded_inverse_declines_after_remote_import() {
     .export(loro::ExportMode::updates(&loro::VersionVector::default()))
     .expect("peer export");
   let mut guard = gate.lock(GateHolder::ImportChunk).expect("gate healthy");
-  guard.import_remote_update(&peer_seed).expect("local imports peer seed");
+  guard
+    .import_remote_update(&peer_seed)
+    .expect("local imports peer seed");
   drop(guard);
   let peer_vv = peer.doc().state_vv();
 
@@ -1835,13 +2198,18 @@ fn recorded_inverse_declines_after_remote_import() {
   let peer_body = flowstate_document::loro_schema::body_text(peer.doc());
   peer_body.insert(500, "REMOTE").expect("peer insert");
   peer.doc().commit();
-  let update = peer.doc().export(loro::ExportMode::updates(&peer_vv)).expect("export");
+  let update = peer
+    .doc()
+    .export(loro::ExportMode::updates(&peer_vv))
+    .expect("export");
   let mut guard = gate.lock(GateHolder::ImportChunk).expect("gate healthy");
   guard.import_remote_update(&update).expect("import applies");
   drop(guard);
   assert_eq!(slot_direction(&gate), None, "an in-hull import must clear the recorded inverse");
 
-  let outcome = handle.apply_undo().expect("undo still runs via the slow path");
+  let outcome = handle
+    .apply_undo()
+    .expect("undo still runs via the slow path");
   assert!(outcome.applied);
   let body = body_string(&gate);
   assert!(body.contains("REMOTE"), "slow-path undo must keep the remote edit");
@@ -1930,7 +2298,13 @@ fn slow_undo_drops_object_placeholder_pre_existing() {
   let (handle, gate) = new_handle("slow-undo-object");
   seed_mass_fragment(&handle, 4, Some(2));
   let ids = paragraph_ids(&handle);
-  assert_eq!(body_string(&gate).chars().filter(|ch| *ch == '\u{FFFC}').count(), 1);
+  assert_eq!(
+    body_string(&gate)
+      .chars()
+      .filter(|ch| *ch == '\u{FFFC}')
+      .count(),
+    1
+  );
 
   handle
     .delete_range(DeleteRangeIntent {
@@ -1939,13 +2313,22 @@ fn slow_undo_drops_object_placeholder_pre_existing() {
     })
     .expect("small delete across the equation commits");
   assert_eq!(slot_direction(&gate), None, "sub-threshold: no recorded-inverse capture");
-  assert_eq!(body_string(&gate).chars().filter(|ch| *ch == '\u{FFFC}').count(), 0);
+  assert_eq!(
+    body_string(&gate)
+      .chars()
+      .filter(|ch| *ch == '\u{FFFC}')
+      .count(),
+    0
+  );
 
   let outcome = handle.apply_undo().expect("slow undo runs");
   assert!(outcome.applied);
   // Pre-existing: the placeholder is NOT restored by the checkout-based undo.
   assert_eq!(
-    body_string(&gate).chars().filter(|ch| *ch == '\u{FFFC}').count(),
+    body_string(&gate)
+      .chars()
+      .filter(|ch| *ch == '\u{FFFC}')
+      .count(),
     0,
     "documents the pre-existing slow-path object-placeholder drop (see doc comment)"
   );
@@ -1961,10 +2344,19 @@ fn recorded_inverse_fast_undo_round_trips_mass_restyle() {
   let ids = paragraph_ids(&handle);
 
   let styles_of = |handle: &LocalDocHandle| -> Vec<ParagraphStyle> {
-    handle.projection().expect("projection").paragraphs.iter().map(|paragraph| paragraph.style).collect()
+    handle
+      .projection()
+      .expect("projection")
+      .paragraphs
+      .iter()
+      .map(|paragraph| paragraph.style)
+      .collect()
   };
   let before = styles_of(&handle);
-  assert!(before.iter().all(|style| *style == ParagraphStyle::Normal), "seed paragraphs start Normal");
+  assert!(
+    before.iter().all(|style| *style == ParagraphStyle::Normal),
+    "seed paragraphs start Normal"
+  );
 
   // Select-all restyle to a custom style.
   handle
@@ -1974,8 +2366,17 @@ fn recorded_inverse_fast_undo_round_trips_mass_restyle() {
     })
     .expect("mass restyle commits");
   let after = styles_of(&handle);
-  assert!(after.iter().all(|style| *style == ParagraphStyle::Custom(3)), "restyle sets every paragraph");
-  assert_eq!(slot_direction(&gate), Some(loro::UndoOrRedo::Undo), "mass restyle must arm the recorded inverse");
+  assert!(
+    after
+      .iter()
+      .all(|style| *style == ParagraphStyle::Custom(3)),
+    "restyle sets every paragraph"
+  );
+  assert_eq!(
+    slot_direction(&gate),
+    Some(loro::UndoOrRedo::Undo),
+    "mass restyle must arm the recorded inverse"
+  );
 
   // Undo: fast path reverts every style.
   let outcome = handle.apply_undo().expect("undo runs");
@@ -1999,21 +2400,46 @@ fn recorded_inverse_fast_undo_round_trips_mass_restyle() {
   let mut peer = CrdtRuntime::new_empty("recorded-inverse-restyle").expect("peer");
   let full_history = {
     let guard = gate.lock(GateHolder::Test).expect("gate healthy");
-    guard.doc().export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("export")
+    guard
+      .doc()
+      .export(loro::ExportMode::updates(&loro::VersionVector::default()))
+      .expect("export")
   };
-  peer.import_remote_update(&full_history).expect("peer imports local history");
-  let peer_history = peer.doc().export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("peer export");
+  peer
+    .import_remote_update(&full_history)
+    .expect("peer imports local history");
+  let peer_history = peer
+    .doc()
+    .export(loro::ExportMode::updates(&loro::VersionVector::default()))
+    .expect("peer export");
   let mut guard = gate.lock(GateHolder::ImportChunk).expect("gate healthy");
-  guard.import_remote_update(&peer_history).expect("local imports peer seed");
+  guard
+    .import_remote_update(&peer_history)
+    .expect("local imports peer seed");
   drop(guard);
-  let styles = |doc: &DocumentProjection| -> Vec<ParagraphStyle> { doc.paragraphs.iter().map(|paragraph| paragraph.style).collect() };
+  let styles = |doc: &DocumentProjection| -> Vec<ParagraphStyle> {
+    doc
+      .paragraphs
+      .iter()
+      .map(|paragraph| paragraph.style)
+      .collect()
+  };
   let local_fresh = {
     let guard = gate.lock(GateHolder::Test).expect("gate healthy");
     flowstate_document::document_from_loro(guard.doc()).expect("local materializes")
   };
   let peer_fresh = flowstate_document::document_from_loro(peer.doc()).expect("peer materializes");
-  assert_eq!(styles(&peer_fresh), styles(&local_fresh), "replicas converge on the same styles after the fast-path history");
-  assert!(styles(&local_fresh).iter().all(|style| *style == ParagraphStyle::Normal), "converged on the undone (Normal) styles");
+  assert_eq!(
+    styles(&peer_fresh),
+    styles(&local_fresh),
+    "replicas converge on the same styles after the fast-path history"
+  );
+  assert!(
+    styles(&local_fresh)
+      .iter()
+      .all(|style| *style == ParagraphStyle::Normal),
+    "converged on the undone (Normal) styles"
+  );
 }
 
 /// §fidelity (field bug 2026-07-08, two-peer hotpath): a LOCAL undo must revert
@@ -2034,10 +2460,15 @@ fn local_undo_of_highlight_preserves_concurrent_remote_paragraph_style() {
   // concurrently (neither peer has seen the other's edit).
   let a_initial = {
     let guard = gate_a.lock(GateHolder::Test).expect("gate healthy");
-    guard.doc().export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("export A initial")
+    guard
+      .doc()
+      .export(loro::ExportMode::updates(&loro::VersionVector::default()))
+      .expect("export A initial")
   };
   let mut core_b = CrdtRuntime::new_empty("undo-isolation-b").expect("peer B runtime");
-  core_b.import_remote_update(&a_initial).expect("B imports A initial state");
+  core_b
+    .import_remote_update(&a_initial)
+    .expect("B imports A initial state");
   let (handle_b, gate_b) = LocalDocHandle::new(core_b, LocalWriteConfig::default());
 
   let ids = paragraph_ids(&handle_a);
@@ -2054,7 +2485,11 @@ fn local_undo_of_highlight_preserves_concurrent_remote_paragraph_style() {
   // Peer A: highlight the whole body (LOCAL to A) — a run-style mark.
   let projection_a = handle_a.projection().expect("projection A");
   let first = projection_a.ids.paragraph_ids[0];
-  let last = *projection_a.ids.paragraph_ids.last().expect("last paragraph id");
+  let last = *projection_a
+    .ids
+    .paragraph_ids
+    .last()
+    .expect("last paragraph id");
   let last_len = paragraph_text(&projection_a, projection_a.paragraphs.len() - 1).len();
   let highlight = flowstate_document::RunStyles {
     highlight: Some(flowstate_document::HighlightStyle::Custom(3)),
@@ -2071,19 +2506,33 @@ fn local_undo_of_highlight_preserves_concurrent_remote_paragraph_style() {
   // A imports B's concurrent tag (origin "remote" ⇒ excluded from A's undo stack).
   let b_update = {
     let guard = gate_b.lock(GateHolder::Test).expect("gate healthy");
-    guard.doc().export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("export B")
+    guard
+      .doc()
+      .export(loro::ExportMode::updates(&loro::VersionVector::default()))
+      .expect("export B")
   };
   {
     let mut guard = gate_a.lock(GateHolder::ImportChunk).expect("gate healthy");
-    guard.import_remote_updates(&[&b_update]).expect("A imports B's tag")
+    guard
+      .import_remote_updates(&[&b_update])
+      .expect("A imports B's tag")
   };
 
   // Read (styles, any-highlight) from the LIVE projection and from a fresh
   // canonical materialization — divergence between them localizes the fault.
   let live = |handle: &LocalDocHandle| {
     let doc = handle.projection().expect("live projection");
-    let styles: Vec<ParagraphStyle> = doc.paragraphs.iter().map(|paragraph| paragraph.style).collect();
-    let any_highlight = doc.paragraphs.iter().any(|paragraph| paragraph.runs.iter().any(|run| run.styles.highlight.is_some()));
+    let styles: Vec<ParagraphStyle> = doc
+      .paragraphs
+      .iter()
+      .map(|paragraph| paragraph.style)
+      .collect();
+    let any_highlight = doc.paragraphs.iter().any(|paragraph| {
+      paragraph
+        .runs
+        .iter()
+        .any(|run| run.styles.highlight.is_some())
+    });
     (styles, any_highlight)
   };
   let canonical = |gate: &Arc<WriteGate<CrdtRuntime>>| {
@@ -2091,8 +2540,17 @@ fn local_undo_of_highlight_preserves_concurrent_remote_paragraph_style() {
       let guard = gate.lock(GateHolder::Test).expect("gate healthy");
       flowstate_document::document_from_loro(guard.doc()).expect("materialize canonical")
     };
-    let styles: Vec<ParagraphStyle> = doc.paragraphs.iter().map(|paragraph| paragraph.style).collect();
-    let any_highlight = doc.paragraphs.iter().any(|paragraph| paragraph.runs.iter().any(|run| run.styles.highlight.is_some()));
+    let styles: Vec<ParagraphStyle> = doc
+      .paragraphs
+      .iter()
+      .map(|paragraph| paragraph.style)
+      .collect();
+    let any_highlight = doc.paragraphs.iter().any(|paragraph| {
+      paragraph
+        .runs
+        .iter()
+        .any(|run| run.styles.highlight.is_some())
+    });
     (styles, any_highlight)
   };
 
@@ -2100,7 +2558,10 @@ fn local_undo_of_highlight_preserves_concurrent_remote_paragraph_style() {
   // touches only its run-style highlight, so paragraph styles must be identical
   // to B's tag result before undo, after undo, and after convergence.
   let expected_styles = canonical(&gate_b).0;
-  assert!(expected_styles.contains(&tag), "B's tag must land on the durable paragraphs: {expected_styles:?}");
+  assert!(
+    expected_styles.contains(&tag),
+    "B's tag must land on the durable paragraphs: {expected_styles:?}"
+  );
 
   // Before undo A already reflects BOTH edits.
   let (styles_before, hl_before) = live(&handle_a);
@@ -2127,11 +2588,16 @@ fn local_undo_of_highlight_preserves_concurrent_remote_paragraph_style() {
   // Convergence: B receives A's post-undo history; both replicas agree, tag intact.
   let a_after = {
     let guard = gate_a.lock(GateHolder::Test).expect("gate healthy");
-    guard.doc().export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("export A after undo")
+    guard
+      .doc()
+      .export(loro::ExportMode::updates(&loro::VersionVector::default()))
+      .expect("export A after undo")
   };
   {
     let mut guard = gate_b.lock(GateHolder::ImportChunk).expect("gate healthy");
-    guard.import_remote_updates(&[&a_after]).expect("B imports A's post-undo history")
+    guard
+      .import_remote_updates(&[&a_after])
+      .expect("B imports A's post-undo history")
   };
   let (styles_b, hl_b) = canonical(&gate_b);
   assert!(!hl_b, "peer B converges on highlight-removed");
@@ -2170,7 +2636,11 @@ fn recorded_inverse_fast_undo_round_trips_mass_replace() {
   let body_replaced = body_string(&gate);
   assert!(!body_replaced.contains("row"), "replace removed every 'row'");
   assert!(body_replaced.contains("COLUMN"), "replace inserted 'COLUMN'");
-  assert_eq!(slot_direction(&gate), Some(loro::UndoOrRedo::Undo), "mass replace must arm the recorded inverse");
+  assert_eq!(
+    slot_direction(&gate),
+    Some(loro::UndoOrRedo::Undo),
+    "mass replace must arm the recorded inverse"
+  );
 
   // Undo: fast path restores the originals.
   let outcome = handle.apply_undo().expect("undo runs");
@@ -2190,12 +2660,22 @@ fn recorded_inverse_fast_undo_round_trips_mass_replace() {
   let mut peer = CrdtRuntime::new_empty("recorded-inverse-replace").expect("peer");
   let full_history = {
     let guard = gate.lock(GateHolder::Test).expect("gate healthy");
-    guard.doc().export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("export")
+    guard
+      .doc()
+      .export(loro::ExportMode::updates(&loro::VersionVector::default()))
+      .expect("export")
   };
-  peer.import_remote_update(&full_history).expect("peer imports local history");
-  let peer_history = peer.doc().export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("peer export");
+  peer
+    .import_remote_update(&full_history)
+    .expect("peer imports local history");
+  let peer_history = peer
+    .doc()
+    .export(loro::ExportMode::updates(&loro::VersionVector::default()))
+    .expect("peer export");
   let mut guard = gate.lock(GateHolder::ImportChunk).expect("gate healthy");
-  guard.import_remote_update(&peer_history).expect("local imports peer seed");
+  guard
+    .import_remote_update(&peer_history)
+    .expect("local imports peer seed");
   drop(guard);
   let local_text = body_string(&gate);
   let peer_text = flowstate_document::loro_schema::body_text(peer.doc()).to_string();
@@ -2222,7 +2702,12 @@ fn recorded_inverse_captures_split_paragraph() {
     .expect("split commits");
   let _ = outcome;
   assert_eq!(stack_depths(&gate), (1, 0), "the split armed a recorded inverse");
-  let split_ids: Vec<ParagraphId> = handle.projection().expect("projection").ids.paragraph_ids.to_vec();
+  let split_ids: Vec<ParagraphId> = handle
+    .projection()
+    .expect("projection")
+    .ids
+    .paragraph_ids
+    .to_vec();
   assert_eq!(split_ids.len(), count_before + 1);
 
   assert!(handle.apply_undo().expect("undo runs").applied);
@@ -2249,12 +2734,22 @@ fn recorded_inverse_captures_split_paragraph() {
 fn recorded_inverse_captures_join_paragraphs() {
   let (handle, gate) = new_handle("join-capture");
   seed_mass_fragment(&handle, 8, None);
-  let ids_before: Vec<ParagraphId> = handle.projection().expect("projection").ids.paragraph_ids.to_vec();
+  let ids_before: Vec<ParagraphId> = handle
+    .projection()
+    .expect("projection")
+    .ids
+    .paragraph_ids
+    .to_vec();
   let (first, second) = (ids_before[3], ids_before[4]);
   // Give the second paragraph a distinct style so undo must restore it.
   handle
     .set_paragraph_styles(SetParagraphStylesIntent {
-      paragraphs: handle.projection().expect("projection").ids.paragraph_ids.to_vec(),
+      paragraphs: handle
+        .projection()
+        .expect("projection")
+        .ids
+        .paragraph_ids
+        .to_vec(),
       style: ParagraphStyle::Custom(2),
     })
     .expect("restyle commits");
@@ -2267,9 +2762,22 @@ fn recorded_inverse_captures_join_paragraphs() {
   assert!(handle.apply_undo().expect("undo runs").applied);
   assert_eq!(stack_depths(&gate), (1, 1), "join undo stayed FAST");
   let after_undo = handle.projection().expect("projection");
-  assert_eq!(after_undo.ids.paragraph_ids.to_vec(), ids_before, "undo restored the second paragraph's ORIGINAL id");
-  let second_ix = after_undo.ids.paragraph_ids.iter().position(|id| *id == second).expect("second restored");
-  assert_eq!(after_undo.paragraphs[second_ix].style, ParagraphStyle::Custom(2), "undo restored the second paragraph's prior style");
+  assert_eq!(
+    after_undo.ids.paragraph_ids.to_vec(),
+    ids_before,
+    "undo restored the second paragraph's ORIGINAL id"
+  );
+  let second_ix = after_undo
+    .ids
+    .paragraph_ids
+    .iter()
+    .position(|id| *id == second)
+    .expect("second restored");
+  assert_eq!(
+    after_undo.paragraphs[second_ix].style,
+    ParagraphStyle::Custom(2),
+    "undo restored the second paragraph's prior style"
+  );
   assert_live_equals_canonical(&handle, &gate, "join undo");
 
   assert!(handle.apply_redo().expect("redo runs").applied);
@@ -2335,24 +2843,39 @@ fn recorded_inverse_chains_full_typing_session() {
   let target = paragraph_ids(&handle)[2];
   let original_text = {
     let projection = handle.projection().expect("projection");
-    (0..projection.paragraphs.len()).map(|ix| paragraph_text(&projection, ix)).collect::<Vec<_>>()
+    (0..projection.paragraphs.len())
+      .map(|ix| paragraph_text(&projection, ix))
+      .collect::<Vec<_>>()
   };
 
   handle
-    .insert_text(InsertTextIntent { at: TextAnchor::new(target, 0), text: "abc".into(), style_override: None })
+    .insert_text(InsertTextIntent {
+      at: TextAnchor::new(target, 0),
+      text: "abc".into(),
+      style_override: None,
+    })
     .expect("keystrokes");
   handle
-    .split_paragraph(SplitParagraphIntent { at: TextAnchor::new(target, 3), inherited_style: ParagraphStyle::Normal })
+    .split_paragraph(SplitParagraphIntent {
+      at: TextAnchor::new(target, 3),
+      inherited_style: ParagraphStyle::Normal,
+    })
     .expect("enter");
   handle
     .set_marks(SetMarksIntent {
       start: TextAnchor::new(target, 0),
       end: TextAnchor::new(target, 3),
-      styles: flowstate_document::RunStyles { direct_underline: true, ..Default::default() },
+      styles: flowstate_document::RunStyles {
+        direct_underline: true,
+        ..Default::default()
+      },
     })
     .expect("bold-ish");
   handle
-    .set_paragraph_style(crate::local_write::SetParagraphStyleIntent { paragraph: target, style: ParagraphStyle::Custom(3) })
+    .set_paragraph_style(crate::local_write::SetParagraphStyleIntent {
+      paragraph: target,
+      style: ParagraphStyle::Custom(3),
+    })
     .expect("restyle one");
   assert_eq!(stack_depths(&gate), (4, 0), "all four ops recorded");
 
@@ -2362,7 +2885,9 @@ fn recorded_inverse_chains_full_typing_session() {
   assert_eq!(stack_depths(&gate), (0, 4), "ALL undos stayed on the fast path");
   let live = {
     let projection = handle.projection().expect("projection");
-    (0..projection.paragraphs.len()).map(|ix| paragraph_text(&projection, ix)).collect::<Vec<_>>()
+    (0..projection.paragraphs.len())
+      .map(|ix| paragraph_text(&projection, ix))
+      .collect::<Vec<_>>()
   };
   assert_eq!(live, original_text, "the session fully unwound");
   assert_live_equals_canonical(&handle, &gate, "session unwind");
@@ -2373,4 +2898,3 @@ fn recorded_inverse_chains_full_typing_session() {
   assert_eq!(stack_depths(&gate), (4, 0), "ALL redos stayed on the fast path");
   assert_live_equals_canonical(&handle, &gate, "session replay");
 }
-

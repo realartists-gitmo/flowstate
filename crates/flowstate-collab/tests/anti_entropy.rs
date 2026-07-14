@@ -95,7 +95,10 @@ mod tests {
 
     assert_eq!(
       state.consider_digest(peer_a, session, VersionVectorRelation::SenderHasMissingOps, vec![1], now),
-      GapAction::Pull { from: peer_a, our_vv: vec![1] }
+      GapAction::Pull {
+        from: peer_a,
+        our_vv: vec![1]
+      }
     );
     // A second gap for A while its pull is outstanding is deduplicated...
     assert_eq!(
@@ -105,7 +108,10 @@ mod tests {
     // ...but a gap with a different peer B is served concurrently.
     assert_eq!(
       state.consider_digest(peer_b, session, VersionVectorRelation::SenderHasMissingOps, vec![3], now),
-      GapAction::Pull { from: peer_b, our_vv: vec![3] }
+      GapAction::Pull {
+        from: peer_b,
+        our_vv: vec![3]
+      }
     );
     // Finishing A's pull only frees A's dedup slot.
     state.finish_pull(peer_a);
@@ -115,7 +121,10 @@ mod tests {
     );
     assert_eq!(
       state.consider_digest(peer_a, session, VersionVectorRelation::SenderHasMissingOps, vec![5], now),
-      GapAction::Pull { from: peer_a, our_vv: vec![5] }
+      GapAction::Pull {
+        from: peer_a,
+        our_vv: vec![5]
+      }
     );
   }
 
@@ -130,7 +139,10 @@ mod tests {
     // A pull to A starts and then wedges: `finish_pull` is never called.
     assert_eq!(
       state.consider_digest(peer_a, session, VersionVectorRelation::SenderHasMissingOps, vec![1], start),
-      GapAction::Pull { from: peer_a, our_vv: vec![1] }
+      GapAction::Pull {
+        from: peer_a,
+        our_vv: vec![1]
+      }
     );
     // Before the deadline, A stays deduplicated while B is unaffected.
     let soon = start + Duration::from_secs(1);
@@ -140,14 +152,20 @@ mod tests {
     );
     assert_eq!(
       state.consider_digest(peer_b, session, VersionVectorRelation::SenderHasMissingOps, vec![3], soon),
-      GapAction::Pull { from: peer_b, our_vv: vec![3] }
+      GapAction::Pull {
+        from: peer_b,
+        our_vv: vec![3]
+      }
     );
     // Past the deadline, A's wedged pull is force-expired and A is retried even
     // though its original pull was never finished.
     let past_deadline = start + Duration::from_secs(120);
     assert_eq!(
       state.consider_digest(peer_a, session, VersionVectorRelation::SenderHasMissingOps, vec![4], past_deadline),
-      GapAction::Pull { from: peer_a, our_vv: vec![4] }
+      GapAction::Pull {
+        from: peer_a,
+        our_vv: vec![4]
+      }
     );
   }
 

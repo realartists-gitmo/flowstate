@@ -42,7 +42,9 @@ fn temp_path(extension: &str) -> PathBuf {
 fn read_zip_entry(path: &std::path::Path, name: &str) -> String {
   let file = std::fs::File::open(path).expect("open exported docx");
   let mut archive = zip::ZipArchive::new(file).expect("read docx zip");
-  let mut entry = archive.by_name(name).unwrap_or_else(|_| panic!("missing zip entry {name}"));
+  let mut entry = archive
+    .by_name(name)
+    .unwrap_or_else(|_| panic!("missing zip entry {name}"));
   let mut text = String::new();
   entry.read_to_string(&mut text).expect("read zip entry");
   text
@@ -52,7 +54,12 @@ fn zip_entry_names(path: &std::path::Path) -> Vec<String> {
   let file = std::fs::File::open(path).expect("open exported docx");
   let mut archive = zip::ZipArchive::new(file).expect("read docx zip");
   (0..archive.len())
-    .filter_map(|index| archive.by_index(index).ok().map(|entry| entry.name().to_string()))
+    .filter_map(|index| {
+      archive
+        .by_index(index)
+        .ok()
+        .map(|entry| entry.name().to_string())
+    })
     .collect()
 }
 
@@ -160,7 +167,10 @@ fn headerless_dib_asset_exports_as_an_image_not_bracket_text() {
     .count();
   assert_eq!(images, 1, "the DIB image must survive as an IMAGE block");
   assert!(
-    !projection.text.to_string().contains("[https://pixel.example/track]"),
+    !projection
+      .text
+      .to_string()
+      .contains("[https://pixel.example/track]"),
     "the bracketed alt-text fallback fired — the DIB shim regressed"
   );
 }
@@ -219,7 +229,14 @@ fn external_url_image_roundtrips_as_linked_drawing() {
     })
     .collect();
   assert_eq!(images.len(), 1, "the linked image must survive as ONE image block");
-  assert_eq!(images[0].external_url.as_ref().map(|url| -> &str { url.as_ref() }), Some(url), "external URL must roundtrip unchanged");
+  assert_eq!(
+    images[0]
+      .external_url
+      .as_ref()
+      .map(|url| -> &str { url.as_ref() }),
+    Some(url),
+    "external URL must roundtrip unchanged"
+  );
   assert_eq!(images[0].alt_text, "linked alt", "alt text must roundtrip via the injected docPr descr");
   assert_eq!(
     images[0].sizing,
@@ -306,7 +323,9 @@ fn image_alt_text_and_png_part_are_emitted() {
   assert!(xml.contains("descr=\"A red test image\""), "docPr descr missing: {xml}");
   assert!(xml.contains("<wp:extent"), "drawing extent missing");
   assert!(
-    names.iter().any(|name| name.starts_with("word/media/") && name.ends_with(".png")),
+    names
+      .iter()
+      .any(|name| name.starts_with("word/media/") && name.ends_with(".png")),
     "embedded PNG media part missing: {names:?}"
   );
 }
@@ -334,7 +353,9 @@ fn non_png_image_is_transcoded_and_embedded() {
 
   assert!(warnings.is_empty(), "unexpected export warnings: {warnings:?}");
   assert!(
-    names.iter().any(|name| name.starts_with("word/media/") && name.ends_with(".png")),
+    names
+      .iter()
+      .any(|name| name.starts_with("word/media/") && name.ends_with(".png")),
     "transcoded PNG media part missing: {names:?}"
   );
   assert!(!xml.contains("[Animated source]"), "GIF fell back to text instead of embedding");
@@ -470,10 +491,7 @@ fn multiple_sections_emit_boundary_sect_pr() {
 #[test]
 fn pdf_smoke_test_produces_pdf() {
   // FS-130: the shared write_pdf path must still produce a PDF.
-  let document = document_from_input_blocks(
-    flowstate_document_theme(),
-    vec![paragraph_block("PDF smoke test paragraph.")],
-  );
+  let document = document_from_input_blocks(flowstate_document_theme(), vec![paragraph_block("PDF smoke test paragraph.")]);
   let path = temp_path("pdf");
   write_pdf(&path, &document).expect("write pdf");
   let bytes = std::fs::read(&path).expect("read pdf");

@@ -142,7 +142,11 @@ pub fn violation(class: FidelityClass, kind: &str, detail: impl FnOnce() -> Stri
   // Record for `take_violations` before the (potentially verbose) dump. This is
   // strictly additive diagnostics: it never changes control flow and only runs
   // on the already-cold violation path while enabled.
-  VIOLATIONS.with(|sink| sink.borrow_mut().push(format!("[{class}] {kind}: {detail}")));
+  VIOLATIONS.with(|sink| {
+    sink
+      .borrow_mut()
+      .push(format!("[{class}] {kind}: {detail}"))
+  });
   tracing::error!(
     target: "fidelity.violation",
     %class,
@@ -219,7 +223,9 @@ mod tests {
   static TEST_LOCK: Mutex<()> = Mutex::new(());
 
   fn guard() -> std::sync::MutexGuard<'static, ()> {
-    TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    TEST_LOCK
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
   }
 
   fn clear_ring() {

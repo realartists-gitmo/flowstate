@@ -107,10 +107,18 @@ impl Default for LayoutPolicy {
 
 #[derive(Clone, Debug)]
 pub enum EditorEvent {
-  Changed { edit_generation: u64 },
-  SelectionChanged { selection: EditorSelection },
-  CommandDispatched { command: RichTextEditorCommand },
-  Exported { format: DocumentExportFormat },
+  Changed {
+    edit_generation: u64,
+  },
+  SelectionChanged {
+    selection: EditorSelection,
+  },
+  CommandDispatched {
+    command: RichTextEditorCommand,
+  },
+  Exported {
+    format: DocumentExportFormat,
+  },
   /// The editor could not reconcile optimistic local state with the canonical
   /// projection and recovered by discarding or rebuilding. Hosts must surface
   /// this (telemetry at minimum); it indicates replay/projection divergence.

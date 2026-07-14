@@ -299,7 +299,9 @@ fn interpret_cleaned_docx(cleaned: &CleanedDocx) -> io::Result<InterpretedDocx> 
         // §act-twelve A12.3.1-full: fragment-parallel typed parse (equal tree,
         // corpus-netted; falls back to the sequential parse on any anomaly).
         let document = crate::fragment_parse::ct_document_from_xml(doc_xml).map_err(rdocx_oxml_error);
-        let borders = borders.join().unwrap_or_else(|_| Err(io::Error::other("docx run-border parse thread panicked")));
+        let borders = borders
+          .join()
+          .unwrap_or_else(|_| Err(io::Error::other("docx run-border parse thread panicked")));
         (document, borders)
       });
       let probe_parse = probe_t0.elapsed();
@@ -320,7 +322,12 @@ fn interpret_cleaned_docx(cleaned: &CleanedDocx) -> io::Result<InterpretedDocx> 
           None => direct_properties_by_paragraph_package(&cleaned.bytes),
         });
         let docx = RDocxDocument::from_bytes(&cleaned.bytes).map_err(rdocx_error);
-        (docx, direct_properties.join().expect("direct-properties parse thread panicked"))
+        (
+          docx,
+          direct_properties
+            .join()
+            .expect("direct-properties parse thread panicked"),
+        )
       });
       let docx = docx?;
       let (document, direct_properties) = direct_properties?;
@@ -509,9 +516,17 @@ fn interpret_cleaned_docx(cleaned: &CleanedDocx) -> io::Result<InterpretedDocx> 
     .unwrap_or_else(|| docx.into_typed_document());
   static PARSE_PROBE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
   if *PARSE_PROBE.get_or_init(|| std::env::var_os("FLOWSTATE_PARSE_PROBE").is_some()) {
-    eprintln!("[flowstate-parse-probe] conversion_walk={:?} paragraphs={}", probe_walk_t0.elapsed(), paragraphs.len());
+    eprintln!(
+      "[flowstate-parse-probe] conversion_walk={:?} paragraphs={}",
+      probe_walk_t0.elapsed(),
+      paragraphs.len()
+    );
   }
-  Ok(InterpretedDocx { paragraphs, document, report })
+  Ok(InterpretedDocx {
+    paragraphs,
+    document,
+    report,
+  })
 }
 #[derive(Clone, Debug)]
 struct RunFact {
@@ -584,7 +599,9 @@ fn direct_properties_by_paragraph_xml(doc_xml: &[u8]) -> io::Result<(CT_Document
   let (document, run_borders_by_paragraph) = std::thread::scope(|scope| {
     let borders = scope.spawn(|| direct_run_borders_by_paragraph_xml(doc_xml));
     let document = crate::fragment_parse::ct_document_from_xml(doc_xml).map_err(rdocx_oxml_error);
-    let borders = borders.join().unwrap_or_else(|_| Err(io::Error::other("docx run-border parse thread panicked")));
+    let borders = borders
+      .join()
+      .unwrap_or_else(|_| Err(io::Error::other("docx run-border parse thread panicked")));
     (document, borders)
   });
   let document = document?;

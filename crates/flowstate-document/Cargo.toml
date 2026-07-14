@@ -24,11 +24,15 @@ serde.workspace = true
 serde_bytes = "0.11"
 uuid.workspace = true
 tempfile.workspace = true
-zstd.workspace = true
 atomicwrites = "0.4.4"
 flowstate-fidelity.workspace = true
 hotpath.workspace = true
 loro-internal = "1.13.1"
+
+[package.metadata.cargo-machete]
+# serde_bytes is used via `#[serde(with = "serde_bytes")]` attributes in
+# package.rs (§A13.1), which cargo-machete's source scan cannot see.
+ignored = ["serde_bytes"]
 
 [features]
 hotpath = ["hotpath/hotpath", "gpui-flowtext/hotpath"]

@@ -101,8 +101,12 @@ impl GateMetrics {
     if record.contended {
       self.contended_acquisitions.fetch_add(1, Ordering::Relaxed);
     }
-    self.total_wait_micros.fetch_add(record.wait_micros, Ordering::Relaxed);
-    self.total_hold_micros.fetch_add(record.hold_micros, Ordering::Relaxed);
+    self
+      .total_wait_micros
+      .fetch_add(record.wait_micros, Ordering::Relaxed);
+    self
+      .total_hold_micros
+      .fetch_add(record.hold_micros, Ordering::Relaxed);
     let max_hold = match record.holder {
       GateHolder::LocalIntent | GateHolder::UndoRedo => &self.max_hold_micros_local_intent,
       GateHolder::ImportChunk => &self.max_hold_micros_import_chunk,
@@ -110,7 +114,9 @@ impl GateMetrics {
     };
     max_hold.fetch_max(record.hold_micros, Ordering::Relaxed);
     if matches!(record.holder, GateHolder::LocalIntent | GateHolder::UndoRedo) {
-      self.max_wait_micros_local_intent.fetch_max(record.wait_micros, Ordering::Relaxed);
+      self
+        .max_wait_micros_local_intent
+        .fetch_max(record.wait_micros, Ordering::Relaxed);
     }
   }
 }
@@ -218,7 +224,9 @@ impl<T> WriteGate<T> {
     let wait_micros = u64::try_from(requested_at.elapsed().as_micros()).unwrap_or(u64::MAX);
     // A fresh hold starts with no observed waiters; anyone who blocks from here
     // on flips `contention_seen`, which this hold reads at release.
-    self.contention_seen.store(self.waiters.load(Ordering::SeqCst) > 0, Ordering::SeqCst);
+    self
+      .contention_seen
+      .store(self.waiters.load(Ordering::SeqCst) > 0, Ordering::SeqCst);
     Ok(GateGuard {
       guard: Some(guard),
       gate: self,
@@ -234,13 +242,19 @@ impl<T> std::ops::Deref for GateGuard<'_, T> {
   type Target = T;
 
   fn deref(&self) -> &T {
-    self.guard.as_ref().expect("gate guard accessed after release")
+    self
+      .guard
+      .as_ref()
+      .expect("gate guard accessed after release")
   }
 }
 
 impl<T> std::ops::DerefMut for GateGuard<'_, T> {
   fn deref_mut(&mut self) -> &mut T {
-    self.guard.as_mut().expect("gate guard accessed after release")
+    self
+      .guard
+      .as_mut()
+      .expect("gate guard accessed after release")
   }
 }
 
@@ -292,7 +306,14 @@ mod tests {
     std::thread::sleep(std::time::Duration::from_millis(20));
     drop(held);
     waiter.join().expect("waiter completes");
-    assert!(gate.metrics().contended_acquisitions.load(Ordering::Relaxed) >= 1, "waiting acquisition must be recorded as contended");
+    assert!(
+      gate
+        .metrics()
+        .contended_acquisitions
+        .load(Ordering::Relaxed)
+        >= 1,
+      "waiting acquisition must be recorded as contended"
+    );
   }
 
   #[test]
@@ -346,6 +367,9 @@ mod tests {
       panic!("poison the gate");
     })
     .join();
-    assert!(gate.lock(GateHolder::Test).is_err(), "poisoned gate must surface as an error, not silence");
+    assert!(
+      gate.lock(GateHolder::Test).is_err(),
+      "poisoned gate must surface as an error, not silence"
+    );
   }
 }

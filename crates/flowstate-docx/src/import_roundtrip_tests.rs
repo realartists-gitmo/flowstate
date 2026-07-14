@@ -13,8 +13,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use flowstate_document::{
   AssetId, CellId, ColumnId, InputBlock, InputBlockAlignment, InputImageBlock, InputImageSizing, InputParagraph, InputRun, InputTableBlock,
-  InputTableCell, InputTableCellBlock, InputTableColumn, InputTableColumnWidth, InputTableRow, InputTableStyle, ParagraphStyle, RowId, RunStyles,
-  SOFT_LINE_BREAK, VertAlign, document_from_input_blocks, document_from_loro_with_defects, flowstate_document_theme,
+  InputTableCell, InputTableCellBlock, InputTableColumn, InputTableColumnWidth, InputTableRow, InputTableStyle, ParagraphStyle, RowId,
+  RunStyles, SOFT_LINE_BREAK, VertAlign, document_from_input_blocks, document_from_loro_with_defects, flowstate_document_theme,
 };
 
 use crate::{import_docx_bytes_to_loro, write_docx};
@@ -35,7 +35,10 @@ fn rich_document(paragraphs: usize) -> flowstate_document::DocumentProjection {
       runs: if text.is_empty() {
         Vec::new()
       } else {
-        vec![InputRun { text: text.to_string(), styles: RunStyles::default() }]
+        vec![InputRun {
+          text: text.to_string(),
+          styles: RunStyles::default(),
+        }]
       },
     })
   };
@@ -55,19 +58,34 @@ fn rich_document(paragraphs: usize) -> flowstate_document::DocumentProjection {
     column_id: ColumnId(col),
     blocks: vec![InputTableCellBlock::Paragraph(InputParagraph {
       style: ParagraphStyle::Normal,
-      runs: vec![InputRun { text: text.to_string(), styles: RunStyles::default() }],
+      runs: vec![InputRun {
+        text: text.to_string(),
+        styles: RunStyles::default(),
+      }],
     })],
     row_span: 1,
     col_span: 1,
   };
   let table = InputBlock::Table(InputTableBlock {
     columns: vec![
-      InputTableColumn { id: ColumnId(1), width: InputTableColumnWidth::Fraction(1) },
-      InputTableColumn { id: ColumnId(2), width: InputTableColumnWidth::Fraction(1) },
+      InputTableColumn {
+        id: ColumnId(1),
+        width: InputTableColumnWidth::Fraction(1),
+      },
+      InputTableColumn {
+        id: ColumnId(2),
+        width: InputTableColumnWidth::Fraction(1),
+      },
     ],
     rows: vec![
-      InputTableRow { id: RowId(1), cells: vec![cell(1, 1, "a"), cell(1, 2, "b")] },
-      InputTableRow { id: RowId(2), cells: vec![cell(2, 1, "c"), cell(2, 2, "d")] },
+      InputTableRow {
+        id: RowId(1),
+        cells: vec![cell(1, 1, "a"), cell(1, 2, "b")],
+      },
+      InputTableRow {
+        id: RowId(2),
+        cells: vec![cell(2, 1, "c"), cell(2, 2, "d")],
+      },
     ],
     style: InputTableStyle { header_row: true },
   });
@@ -206,7 +224,10 @@ fn linked_drawingml_blip_imports_as_external_url_image() {
   let images = image_blocks(&projection);
   assert_eq!(images.len(), 1, "the link-only blip must import as ONE image block");
   assert_eq!(
-    images[0].external_url.as_ref().map(|url| -> &str { url.as_ref() }),
+    images[0]
+      .external_url
+      .as_ref()
+      .map(|url| -> &str { url.as_ref() }),
     Some(url),
     "the external-mode relationship target must land on the image block"
   );
@@ -243,18 +264,28 @@ fn vml_href_external_imports_as_external_url_image() {
     r#"<w:p><w:r><w:t>after</w:t></w:r></w:p>"#,
     r#"</w:body></w:document>"#
   );
-  let rels = format!(concat!(
-    r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#,
-    r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
-    r#"<Relationship Id="rId7" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="{url}" TargetMode="External"/>"#,
-    r#"</Relationships>"#
-  ), url = url);
+  let rels = format!(
+    concat!(
+      r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#,
+      r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+      r#"<Relationship Id="rId7" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="{url}" TargetMode="External"/>"#,
+      r#"</Relationships>"#
+    ),
+    url = url
+  );
   let bytes = build_docx_zip(document_xml, &rels, &[]);
 
   let projection = assert_import_defect_free(&bytes, "vml external import");
   let images = image_blocks(&projection);
   assert_eq!(images.len(), 1, "the external-only VML pict must import as ONE image block");
-  assert_eq!(images[0].external_url.as_ref().map(|url| -> &str { url.as_ref() }), Some(url), "the r:href external target must survive");
+  assert_eq!(
+    images[0]
+      .external_url
+      .as_ref()
+      .map(|url| -> &str { url.as_ref() }),
+    Some(url),
+    "the r:href external target must survive"
+  );
   // 48pt x 36pt at 96dpi = 64px x 48px.
   assert_eq!(
     images[0].sizing,
@@ -375,7 +406,10 @@ fn synthetic_docx_roundtrip_has_no_projection_defects() {
   // Defect-freeness alone would also pass if the break were silently DROPPED;
   // pin the soft break to U+2028 in the imported text as well.
   assert!(
-    projection.text.to_string().contains(&soft_break_probe_text()),
+    projection
+      .text
+      .to_string()
+      .contains(&soft_break_probe_text()),
     "synthetic roundtrip: body-level soft break did not survive import as U+2028",
   );
 }
@@ -433,7 +467,10 @@ fn vert_align_run_property_is_captured_on_import() {
 fn vert_align_survives_docx_write_and_reimport() {
   let vert_run = |text: &str, vert_align: VertAlign| InputRun {
     text: text.to_string(),
-    styles: RunStyles { vert_align, ..RunStyles::default() },
+    styles: RunStyles {
+      vert_align,
+      ..RunStyles::default()
+    },
   };
   let blocks = vec![InputBlock::Paragraph(InputParagraph {
     style: ParagraphStyle::Normal,

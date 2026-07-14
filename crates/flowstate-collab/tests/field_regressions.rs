@@ -73,7 +73,9 @@ mod tests {
       .export(loro::ExportMode::updates(&loro::VersionVector::default()))
       .expect("peer export");
     let mut guard = gate.lock(GateHolder::ImportChunk).expect("gate");
-    guard.import_remote_update(&peer_seed).expect("local imports peer seed");
+    guard
+      .import_remote_update(&peer_seed)
+      .expect("local imports peer seed");
     drop(guard);
     let mut peer_vv = peer.doc().state_vv();
 
@@ -96,7 +98,10 @@ mod tests {
       let peer_body = flowstate_document::loro_schema::body_text(peer.doc());
       peer_body.insert(1, "R").expect("peer insert");
       peer.doc().commit();
-      let update = peer.doc().export(loro::ExportMode::updates(&peer_vv)).expect("export");
+      let update = peer
+        .doc()
+        .export(loro::ExportMode::updates(&peer_vv))
+        .expect("export");
       peer_vv = peer.doc().state_vv();
       let mut guard = gate.lock(GateHolder::ImportChunk).expect("gate");
       guard.import_remote_update(&update).expect("import");
@@ -216,7 +221,10 @@ mod tests {
   #[ignore = "timing harness: run on demand with --nocapture"]
   fn recorded_inverse_undo_timing() {
     use std::time::Instant;
-    let paragraphs = std::env::var("B1_PARAGRAPHS").ok().and_then(|v| v.parse().ok()).unwrap_or(4000usize);
+    let paragraphs = std::env::var("B1_PARAGRAPHS")
+      .ok()
+      .and_then(|v| v.parse().ok())
+      .unwrap_or(4000usize);
     let (handle, _gate) = new_handle("b1-timing");
     let mut paragraph = handle.projection().expect("projection").ids.paragraph_ids[0];
     for i in 0..paragraphs {
@@ -236,7 +244,13 @@ mod tests {
           inherited_style: ParagraphStyle::Normal,
         })
         .expect("seed split");
-      paragraph = *handle.projection().expect("projection").ids.paragraph_ids.last().expect("last");
+      paragraph = *handle
+        .projection()
+        .expect("projection")
+        .ids
+        .paragraph_ids
+        .last()
+        .expect("last");
     }
     let projection = handle.projection().expect("projection");
     let first = projection.ids.paragraph_ids[0];
@@ -302,19 +316,24 @@ mod tests {
     // startup so its chunks are causally complete.
     let snapshot = {
       let guard = gate.lock(GateHolder::ExportUpdates).expect("gate");
-      guard.doc().export(loro::ExportMode::Snapshot).expect("snapshot")
+      guard
+        .doc()
+        .export(loro::ExportMode::Snapshot)
+        .expect("snapshot")
     };
     let peer_doc = loro::LoroDoc::new();
-    peer_doc.import_with(&snapshot, "remote").expect("peer join");
+    peer_doc
+      .import_with(&snapshot, "remote")
+      .expect("peer join");
     let mut peer_vv = peer_doc.state_vv();
     let peer_core = flowstate_collab::crdt_runtime::CrdtRuntime::from_doc(peer_doc, None, None).expect("peer runtime");
-    let (peer_handle, peer_gate) = LocalDocHandle::new(
-      peer_core,
-      flowstate_collab::local_write::LocalWriteConfig {
-        release_audit_sample: None,
-      },
-    );
-    let peer_target = peer_handle.projection().expect("peer projection").ids.paragraph_ids[40];
+    let (peer_handle, peer_gate) =
+      LocalDocHandle::new(peer_core, flowstate_collab::local_write::LocalWriteConfig { release_audit_sample: None });
+    let peer_target = peer_handle
+      .projection()
+      .expect("peer projection")
+      .ids
+      .paragraph_ids[40];
 
     // Editor attaches to the main handle.
     let mut editor = LocalWriteAuthority::canonical_projection(&handle).expect("attach projection");
@@ -329,19 +348,26 @@ mod tests {
         10 => {
           // Backspace at paragraph start: join the two peers' split rows.
           let projection = peer_handle.projection().expect("peer projection");
-          let ix = projection.ids.paragraph_ids.iter().position(|id| *id == peer_target).expect("target present");
+          let ix = projection
+            .ids
+            .paragraph_ids
+            .iter()
+            .position(|id| *id == peer_target)
+            .expect("target present");
           let second = projection.ids.paragraph_ids[ix + 1];
           peer_handle
-            .join_paragraphs(flowstate_collab::local_write::JoinParagraphsIntent {
-              first: peer_target,
-              second,
-            })
+            .join_paragraphs(flowstate_collab::local_write::JoinParagraphsIntent { first: peer_target, second })
             .expect("peer join");
         },
         11 => {
           // Cross-paragraph delete spanning a boundary.
           let projection = peer_handle.projection().expect("peer projection");
-          let ix = projection.ids.paragraph_ids.iter().position(|id| *id == peer_target).expect("target present");
+          let ix = projection
+            .ids
+            .paragraph_ids
+            .iter()
+            .position(|id| *id == peer_target)
+            .expect("target present");
           let next = projection.ids.paragraph_ids[ix + 1];
           peer_handle
             .delete_range(flowstate_collab::local_write::DeleteRangeIntent {
@@ -370,7 +396,10 @@ mod tests {
       }
       let update = {
         let guard = peer_gate.lock(GateHolder::ExportUpdates).expect("gate");
-        let update = guard.doc().export(loro::ExportMode::updates(&peer_vv)).expect("export");
+        let update = guard
+          .doc()
+          .export(loro::ExportMode::updates(&peer_vv))
+          .expect("export");
         peer_vv = guard.doc().state_vv();
         update
       };
@@ -385,7 +414,10 @@ mod tests {
       }
       apply_stream(&mut editor, handle.drain_projection_stream().expect("drain"));
     }
-    assert_eq!(rebuilds, 0, "all {structural_chunks} structural chunks must take the regional patched path, never a full rebuild");
+    assert_eq!(
+      rebuilds, 0,
+      "all {structural_chunks} structural chunks must take the regional patched path, never a full rebuild"
+    );
 
     let canonical = LocalWriteAuthority::canonical_projection(&handle).expect("canonical");
     assert_eq!(editor.frontier, canonical.frontier, "editor tracked every structural import");
@@ -451,7 +483,10 @@ mod tests {
         .expect("typing during export");
       worst_keystroke = worst_keystroke.max(started.elapsed());
     }
-    let bytes = export.join().expect("export thread").expect("package bytes");
+    let bytes = export
+      .join()
+      .expect("export thread")
+      .expect("package bytes");
     assert!(!bytes.is_empty(), "export still produces the package");
 
     // Generous debug-build ceiling: the OLD shape held the gate for the whole
@@ -479,7 +514,13 @@ mod tests {
             inherited_style: ParagraphStyle::Normal,
           })
           .expect("split");
-        paragraph = *handle.projection().expect("projection").ids.paragraph_ids.last().expect("paragraph");
+        paragraph = *handle
+          .projection()
+          .expect("projection")
+          .ids
+          .paragraph_ids
+          .last()
+          .expect("paragraph");
       } else {
         handle
           .insert_text(InsertTextIntent {
@@ -572,7 +613,10 @@ mod tests {
       .expect("insert after open");
     handle.apply_undo().expect("undo");
     let text = body_string(&gate);
-    assert!(text.contains("typed before open") && !text.contains("and after"), "undo reverts only the live edit: {text:?}");
+    assert!(
+      text.contains("typed before open") && !text.contains("and after"),
+      "undo reverts only the live edit: {text:?}"
+    );
     let maintained = handle.projection().expect("projection");
     let fresh = LocalWriteAuthority::canonical_projection(&handle).expect("canonical");
     assert_eq!(maintained.paragraphs.len(), fresh.paragraphs.len());

@@ -3,9 +3,9 @@ use std::sync::Arc;
 use crop::Rope;
 
 use super::{
-  AssetStore, DocumentParagraphInput, DocumentProjection, DocumentTheme, InputParagraph, InputRun, Paragraph,
-  ParagraphStyle, RunStyle, RunStyles, TextRun, document_ids_for_shape, merge_adjacent_runs, paragraph_blocks_from_paragraphs,
-  rebuild_document_sections, reconcile_document_ids,
+  AssetStore, DocumentParagraphInput, DocumentProjection, DocumentTheme, InputParagraph, InputRun, Paragraph, ParagraphStyle, RunStyle,
+  RunStyles, TextRun, document_ids_for_shape, merge_adjacent_runs, paragraph_blocks_from_paragraphs, rebuild_document_sections,
+  reconcile_document_ids,
 };
 
 #[hotpath::measure]

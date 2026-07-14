@@ -4,8 +4,12 @@
 use flowstate_document::DocumentPackage;
 
 fn main() -> anyhow::Result<()> {
-  let input = std::env::args().nth(1).expect("usage: pkg_restore <in.db8> <out.db8>");
-  let output = std::env::args().nth(2).expect("usage: pkg_restore <in.db8> <out.db8>");
+  let input = std::env::args()
+    .nth(1)
+    .expect("usage: pkg_restore <in.db8> <out.db8>");
+  let output = std::env::args()
+    .nth(2)
+    .expect("usage: pkg_restore <in.db8> <out.db8>");
   let mut package = DocumentPackage::read(&input)?;
   let snapshot = package
     .latest_snapshot()
@@ -29,7 +33,10 @@ fn main() -> anyhow::Result<()> {
   println!(
     "verified: {} paragraphs, {} body chars",
     projection.paragraphs.len(),
-    flowstate_document::loro_schema::body_text(&doc).to_string().chars().count()
+    flowstate_document::loro_schema::body_text(&doc)
+      .to_string()
+      .chars()
+      .count()
   );
   Ok(())
 }

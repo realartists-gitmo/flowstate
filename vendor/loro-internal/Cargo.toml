@@ -359,3 +359,7 @@ features = ["checkpoint"]
 level = "warn"
 priority = 0
 check-cfg = ["cfg(loom)"]
+
+[package.metadata.cargo-machete]
+# Vendored crate: unused-in-our-build deps kept to minimize diff vs upstream.
+ignored = ["hotpath", "nonmax", "tabled"]

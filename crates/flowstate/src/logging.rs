@@ -207,11 +207,13 @@ fn log_directory() -> PathBuf {
   // usual `cargo run` from the repo root that puts logs right in the repo (and
   // it's git-ignored) instead of a hidden platform data dir under `/tmp`-style
   // paths, which is far easier to find during development.
-  env::var_os("FLOWSTATE_LOG_DIR").map(PathBuf::from).unwrap_or_else(|| {
-    env::current_dir()
-      .unwrap_or_else(|_| PathBuf::from("."))
-      .join("flowstate-logs")
-  })
+  env::var_os("FLOWSTATE_LOG_DIR")
+    .map(PathBuf::from)
+    .unwrap_or_else(|| {
+      env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("flowstate-logs")
+    })
 }
 
 /// Build a user-initiated diagnostics bundle without telemetry or network I/O.

@@ -46,7 +46,9 @@ fn thread_author_is_stored_and_gates_deletion() {
   guard
     .reply_to_comment(comment_id, "me too", 9, "Blair")
     .expect("reply");
-  let error = guard.delete_comment(comment_id, 9).expect_err("non-author delete");
+  let error = guard
+    .delete_comment(comment_id, 9)
+    .expect_err("non-author delete");
   assert!(error.to_string().contains("thread author"), "unexpected error: {error}");
   assert_eq!(guard.comments().len(), 1);
 
@@ -76,6 +78,14 @@ fn message_edits_are_author_gated_and_bodies_sanitized() {
     .expect("author edit");
   assert_eq!(guard.comments()[0].messages[0].body, "revised");
 
-  assert!(guard.create_comment(&selection(2, 2), "empty selection", 7, "Alex").is_err());
-  assert!(guard.create_comment(&selection(0, 5), " \r\u{0} ", 7, "Alex").is_err());
+  assert!(
+    guard
+      .create_comment(&selection(2, 2), "empty selection", 7, "Alex")
+      .is_err()
+  );
+  assert!(
+    guard
+      .create_comment(&selection(0, 5), " \r\u{0} ", 7, "Alex")
+      .is_err()
+  );
 }

@@ -355,23 +355,35 @@ mod tests {
     let peer_c = test_peer(3);
 
     let store_a = PresenceStore::new(&peer_a);
-    store_a.set_self(&named_state("Ada")).expect("set self presence");
+    store_a
+      .set_self(&named_state("Ada"))
+      .expect("set self presence");
     let frame = store_a.encode_self();
 
     // Delivered by its author, A's frame is accepted into B's roster.
     let honest = PresenceStore::new(&peer_b);
-    honest.apply_from(&peer_a, &frame).expect("honest presence applies");
+    honest
+      .apply_from(&peer_a, &frame)
+      .expect("honest presence applies");
     assert!(
-      honest.roster().iter().any(|entry| entry.key == peer_key(&peer_a)),
+      honest
+        .roster()
+        .iter()
+        .any(|entry| entry.key == peer_key(&peer_a)),
       "author-delivered presence must populate the roster",
     );
 
     // The identical frame delivered by an impersonating peer C is rejected: it
     // would mutate A's entry, which C is not authorized to touch.
     let guarded = PresenceStore::new(&peer_b);
-    guarded.apply_from(&peer_c, &frame).expect("impersonated presence is dropped, not fatal");
+    guarded
+      .apply_from(&peer_c, &frame)
+      .expect("impersonated presence is dropped, not fatal");
     assert!(
-      guarded.roster().iter().all(|entry| entry.key != peer_key(&peer_a)),
+      guarded
+        .roster()
+        .iter()
+        .all(|entry| entry.key != peer_key(&peer_a)),
       "presence delivered by a peer other than its author must be rejected",
     );
   }
@@ -384,17 +396,31 @@ mod tests {
 
     // B has learned A's presence.
     let store_a = PresenceStore::new(&peer_a);
-    store_a.set_self(&named_state("Ada")).expect("set self presence");
+    store_a
+      .set_self(&named_state("Ada"))
+      .expect("set self presence");
     let victim = PresenceStore::new(&peer_b);
-    victim.apply_from(&peer_a, &store_a.encode_self()).expect("learn A");
-    assert!(victim.roster().iter().any(|entry| entry.key == peer_key(&peer_a)));
+    victim
+      .apply_from(&peer_a, &store_a.encode_self())
+      .expect("learn A");
+    assert!(
+      victim
+        .roster()
+        .iter()
+        .any(|entry| entry.key == peer_key(&peer_a))
+    );
 
     // C crafts a frame that deletes A's entry and delivers it first-person.
     store_a.delete_self();
     let delete_frame = store_a.encode_self();
-    victim.apply_from(&peer_c, &delete_frame).expect("griefing delete is dropped, not fatal");
+    victim
+      .apply_from(&peer_c, &delete_frame)
+      .expect("griefing delete is dropped, not fatal");
     assert!(
-      victim.roster().iter().any(|entry| entry.key == peer_key(&peer_a)),
+      victim
+        .roster()
+        .iter()
+        .any(|entry| entry.key == peer_key(&peer_a)),
       "a peer must not be able to delete another peer's presence entry",
     );
   }
@@ -404,7 +430,10 @@ mod tests {
     let long_tail = "z".repeat(200);
     let dirty = format!("Ada\u{7}\nLovelace{long_tail}");
     let sanitized = sanitize_display_name(&dirty);
-    assert!(sanitized.len() <= MAX_PRESENCE_NAME_BYTES, "name must be capped to {MAX_PRESENCE_NAME_BYTES} bytes");
+    assert!(
+      sanitized.len() <= MAX_PRESENCE_NAME_BYTES,
+      "name must be capped to {MAX_PRESENCE_NAME_BYTES} bytes"
+    );
     assert!(!sanitized.chars().any(|c| c.is_control()), "control characters must be stripped");
     assert!(sanitized.starts_with("AdaLovelace"), "leading printable characters are preserved");
   }
@@ -431,7 +460,9 @@ mod tests {
     let frame = raw.encode(&peer_key(&peer_a));
 
     let guarded = PresenceStore::new(&peer_b);
-    guarded.apply_from(&peer_a, &frame).expect("oversized presence is dropped, not fatal");
+    guarded
+      .apply_from(&peer_a, &frame)
+      .expect("oversized presence is dropped, not fatal");
     assert!(
       guarded.roster().is_empty(),
       "a presence value exceeding the display-name cap must be rejected",

@@ -1,8 +1,6 @@
 use std::sync::Arc;
 
-use super::{
-  AssetId, AssetRecord, BlockId, DocumentProjection, InputBlock, InputParagraph, ParagraphId, ParagraphStyle, TextRun,
-};
+use super::{AssetId, AssetRecord, BlockId, DocumentProjection, InputBlock, InputParagraph, ParagraphId, ParagraphStyle, TextRun};
 use rustc_hash::FxHashMap;
 
 #[derive(Clone, Debug, Default)]

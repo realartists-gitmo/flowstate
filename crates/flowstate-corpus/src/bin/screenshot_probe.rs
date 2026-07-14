@@ -15,9 +15,7 @@
 //! `HEAVEN_DIR`, like the hotpath baselines).
 
 use gpui::{App, AppContext as _, Application, Bounds, WindowBounds, WindowOptions, px, size};
-use gpui_flowtext::{
-  DocumentTheme, InputParagraph, InputRun, ParagraphStyle, RichTextEditor, RunSemanticStyle, RunStyles, document_from_input,
-};
+use gpui_flowtext::{DocumentTheme, InputParagraph, InputRun, ParagraphStyle, RichTextEditor, RunSemanticStyle, RunStyles, document_from_input};
 
 fn run(text: &str, styles: RunStyles) -> InputRun {
   InputRun {
@@ -106,7 +104,9 @@ fn main() {
       .expect("screenshot probe window");
     // Keep painting for the settle interval (font load + first layout), then quit.
     cx.spawn(async move |cx| {
-      cx.background_executor().timer(std::time::Duration::from_millis(settle_ms)).await;
+      cx.background_executor()
+        .timer(std::time::Duration::from_millis(settle_ms))
+        .await;
       let _ = window;
       let _ = cx.update(|cx| cx.quit());
     })

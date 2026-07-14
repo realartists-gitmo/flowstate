@@ -8,7 +8,10 @@ use flowstate_collab::crdt_runtime::CrdtRuntime;
 
 fn main() {
   let mut args = std::env::args().skip(1);
-  let Some(path) = args.next().or_else(|| std::env::var("FLOWSTATE_BENCH_FIXTURE").ok()) else {
+  let Some(path) = args
+    .next()
+    .or_else(|| std::env::var("FLOWSTATE_BENCH_FIXTURE").ok())
+  else {
     eprintln!("usage: open_probe <FILE.docx> [N_OPENS]  (or set FLOWSTATE_BENCH_FIXTURE)");
     std::process::exit(2);
   };
@@ -37,7 +40,11 @@ fn main() {
     let t = std::time::Instant::now();
     let reopened = CrdtRuntime::open_package(&db8_path).expect("open package");
     let open_time = t.elapsed();
-    let paragraphs = reopened.projection_snapshot().expect("projection").paragraphs.len();
+    let paragraphs = reopened
+      .projection_snapshot()
+      .expect("projection")
+      .paragraphs
+      .len();
     eprintln!("[open-probe] OPEN #{i}: {open_time:?} ({paragraphs} paragraphs)");
     last = Some(reopened);
   }

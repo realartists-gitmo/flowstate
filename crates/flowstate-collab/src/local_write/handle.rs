@@ -18,9 +18,9 @@ use super::commit::apply_local_intent;
 use super::gate::{GateHolder, GateMetrics, WriteGate};
 use super::intents::{
   DeleteBlocksIntent, DeleteRangeIntent, InsertObjectIntent, InsertRichFragmentIntent, InsertTextIntent, JoinParagraphsIntent, LocalIntent,
-  LocalWriteAuthority, LocalWriteOutcome, MoveBlockIntent, ReplaceEquationSourceRangeIntent,
-  ReplaceImageAltTextIntent, ReplaceImageCaptionIntent, ReplaceMatchesIntent, ReplaceObjectIntent, SetImageLayoutIntent, SetMarksIntent,
-  SetParagraphStyleIntent, SetParagraphStylesIntent, SplitParagraphIntent, TableIntent, UndoOutcome, WriteRejected,
+  LocalWriteAuthority, LocalWriteOutcome, MoveBlockIntent, ReplaceEquationSourceRangeIntent, ReplaceImageAltTextIntent,
+  ReplaceImageCaptionIntent, ReplaceMatchesIntent, ReplaceObjectIntent, SetImageLayoutIntent, SetMarksIntent, SetParagraphStyleIntent,
+  SetParagraphStylesIntent, SplitParagraphIntent, TableIntent, UndoOutcome, WriteRejected,
 };
 use crate::crdt_runtime::{CrdtRuntime, RuntimeEvent, SemanticCommand};
 
@@ -80,7 +80,10 @@ impl LocalDocHandle {
   /// Clone the canonical projection (editor attach; afterwards the editor
   /// advances its copy exclusively by patch batches).
   pub fn projection(&self) -> Result<DocumentProjection, WriteRejected> {
-    let guard = self.core.lock(GateHolder::LocalIntent).map_err(|_| WriteRejected::GatePoisoned)?;
+    let guard = self
+      .core
+      .lock(GateHolder::LocalIntent)
+      .map_err(|_| WriteRejected::GatePoisoned)?;
     let projection = guard.projection_ref().clone();
     drop(guard);
     Ok(projection)
@@ -164,7 +167,10 @@ impl LocalDocHandle {
   #[hotpath::measure]
   pub fn apply_intent(&self, intent: LocalIntent) -> Result<LocalWriteOutcome, WriteRejected> {
     let started = Instant::now();
-    let mut guard = self.core.lock(GateHolder::LocalIntent).map_err(|_| WriteRejected::GatePoisoned)?;
+    let mut guard = self
+      .core
+      .lock(GateHolder::LocalIntent)
+      .map_err(|_| WriteRejected::GatePoisoned)?;
     let mut outcome = apply_local_intent(&mut guard, &intent)?;
     self.maybe_release_audit(&mut guard, &intent);
     drop(guard);
@@ -215,11 +221,16 @@ impl LocalDocHandle {
   }
 
   fn undo_redo(&self, command: SemanticCommand) -> Result<UndoOutcome, WriteRejected> {
-    let mut guard = self.core.lock(GateHolder::UndoRedo).map_err(|_| WriteRejected::GatePoisoned)?;
-    let events = guard.command(command).map_err(|error| WriteRejected::CompensatedFailure {
-      class: "undo-redo",
-      diagnostic: format!("{error:#}"),
-    })?;
+    let mut guard = self
+      .core
+      .lock(GateHolder::UndoRedo)
+      .map_err(|_| WriteRejected::GatePoisoned)?;
+    let events = guard
+      .command(command)
+      .map_err(|error| WriteRejected::CompensatedFailure {
+        class: "undo-redo",
+        diagnostic: format!("{error:#}"),
+      })?;
     let mut applied = false;
     let mut selection = None;
     let mut publish = Vec::new();
@@ -247,7 +258,10 @@ impl LocalDocHandle {
   /// notionally open reports an error. Returns whether a fresh group opened;
   /// the editor re-arms at the next boundary either way.
   pub fn begin_undo_group(&self) -> Result<bool, WriteRejected> {
-    let mut guard = self.core.lock(GateHolder::UndoRedo).map_err(|_| WriteRejected::GatePoisoned)?;
+    let mut guard = self
+      .core
+      .lock(GateHolder::UndoRedo)
+      .map_err(|_| WriteRejected::GatePoisoned)?;
     match guard.undo_manager_mut().group_start() {
       Ok(()) => Ok(true),
       Err(error) => {
@@ -258,7 +272,10 @@ impl LocalDocHandle {
   }
 
   pub fn finish_undo_group(&self) -> Result<(), WriteRejected> {
-    let mut guard = self.core.lock(GateHolder::UndoRedo).map_err(|_| WriteRejected::GatePoisoned)?;
+    let mut guard = self
+      .core
+      .lock(GateHolder::UndoRedo)
+      .map_err(|_| WriteRejected::GatePoisoned)?;
     guard.undo_manager_mut().group_end();
     drop(guard);
     Ok(())
@@ -289,7 +306,10 @@ impl LocalWriteAuthority for LocalDocHandle {
   }
 
   fn drain_projection_stream(&self) -> Result<Vec<gpui_flowtext::ProjectionStreamItem>, WriteRejected> {
-    let mut guard = self.core.lock(GateHolder::LocalIntent).map_err(|_| WriteRejected::GatePoisoned)?;
+    let mut guard = self
+      .core
+      .lock(GateHolder::LocalIntent)
+      .map_err(|_| WriteRejected::GatePoisoned)?;
     let items = guard.take_editor_stream();
     drop(guard);
     Ok(items)
@@ -303,10 +323,10 @@ impl LocalWriteAuthority for LocalDocHandle {
     &self,
     selection: &gpui_flowtext::EditorSelection,
     before: &DocumentProjection,
-    base_frontier: &[u8],
+    editor_frontier: &[u8],
   ) -> Option<gpui_flowtext::EditorSelection> {
     let guard = self.core.lock(GateHolder::LocalIntent).ok()?;
-    let rebased = guard.rebase_selection_across_import(selection, before, base_frontier);
+    let rebased = guard.rebase_selection_across_import(selection, before, editor_frontier);
     drop(guard);
     rebased
   }
@@ -326,7 +346,11 @@ impl LocalWriteAuthority for LocalDocHandle {
     encoded
   }
 
-  fn resolve_selection_anchor(&self, head_cursor: &[u8], anchor_cursor: &[u8]) -> Option<(flowstate_document::DocumentOffset, flowstate_document::DocumentOffset)> {
+  fn resolve_selection_anchor(
+    &self,
+    head_cursor: &[u8],
+    anchor_cursor: &[u8],
+  ) -> Option<(flowstate_document::DocumentOffset, flowstate_document::DocumentOffset)> {
     let guard = self.core.lock(GateHolder::LocalIntent).ok()?;
     let resolved = guard.resolve_selection_anchor(head_cursor, anchor_cursor);
     drop(guard);

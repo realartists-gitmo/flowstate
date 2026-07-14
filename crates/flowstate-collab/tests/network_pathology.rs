@@ -94,7 +94,10 @@ mod tests {
       if now == self.exported_vv {
         return None;
       }
-      let bytes = guard.doc().export(loro::ExportMode::updates(&self.exported_vv)).expect("export");
+      let bytes = guard
+        .doc()
+        .export(loro::ExportMode::updates(&self.exported_vv))
+        .expect("export");
       drop(guard);
       self.exported_vv = now;
       (!bytes.is_empty()).then_some(bytes)
@@ -102,7 +105,9 @@ mod tests {
 
     fn import(&self, bytes: &[u8]) {
       let mut guard = self.gate.lock(GateHolder::ImportChunk).expect("gate");
-      guard.import_remote_update(bytes).expect("import never errors, pending is a status");
+      guard
+        .import_remote_update(bytes)
+        .expect("import never errors, pending is a status");
     }
   }
 
@@ -205,8 +210,14 @@ mod tests {
       let before: Vec<_> = peers.iter().map(Peer::state_vv).collect();
       for from in 0..peers_n {
         let bytes = {
-          let guard = peers[from].gate.lock(GateHolder::ExportUpdates).expect("gate");
-          guard.doc().export(loro::ExportMode::all_updates()).expect("export")
+          let guard = peers[from]
+            .gate
+            .lock(GateHolder::ExportUpdates)
+            .expect("gate");
+          guard
+            .doc()
+            .export(loro::ExportMode::all_updates())
+            .expect("export")
         };
         for (to, peer) in peers.iter().enumerate() {
           if to != from {

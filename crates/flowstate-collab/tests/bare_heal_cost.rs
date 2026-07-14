@@ -35,7 +35,13 @@ fn seed(handle: &LocalDocHandle, paragraphs: usize) {
         inherited_style: ParagraphStyle::Normal,
       })
       .expect("seed split");
-    paragraph = *handle.projection().expect("projection").ids.paragraph_ids.last().expect("last paragraph");
+    paragraph = *handle
+      .projection()
+      .expect("projection")
+      .ids
+      .paragraph_ids
+      .last()
+      .expect("last paragraph");
   }
 }
 
@@ -45,19 +51,28 @@ fn run_bare_rounds(gate: &Arc<WriteGate<CrdtRuntime>>, rounds: usize) -> instrum
   // no flowstate runtime, so no records/marks accompany its boundaries.
   let snapshot = {
     let guard = gate.lock(GateHolder::ExportUpdates).expect("gate");
-    guard.doc().export(loro::ExportMode::Snapshot).expect("snapshot")
+    guard
+      .doc()
+      .export(loro::ExportMode::Snapshot)
+      .expect("snapshot")
   };
   let peer_doc = loro::LoroDoc::new();
-  peer_doc.import_with(&snapshot, "remote").expect("peer join");
+  peer_doc
+    .import_with(&snapshot, "remote")
+    .expect("peer join");
   let body_b = flowstate_document::loro_schema::body_text(&peer_doc);
   let mut peer_vv = peer_doc.state_vv();
 
   let before = instrument::snapshot();
   for _ in 0..rounds {
     let len = body_b.len_unicode();
-    body_b.insert(len / 2, "\n").expect("bare structural insert");
+    body_b
+      .insert(len / 2, "\n")
+      .expect("bare structural insert");
     peer_doc.commit();
-    let update = peer_doc.export(loro::ExportMode::updates(&peer_vv)).expect("peer export");
+    let update = peer_doc
+      .export(loro::ExportMode::updates(&peer_vv))
+      .expect("peer export");
     peer_vv = peer_doc.state_vv();
     gate
       .lock(GateHolder::ImportChunk)
@@ -117,9 +132,17 @@ mod tests {
       let guard = gate.lock(GateHolder::ExportUpdates).expect("gate");
       flowstate_document::document_from_loro(guard.doc()).expect("materializes")
     };
-    assert_eq!(live.paragraphs.len(), canonical.paragraphs.len(), "live == canonical paragraph count after heals");
-    let live_text: Vec<String> = (0..live.paragraphs.len()).map(|ix| flowstate_document::paragraph_text(&live, ix)).collect();
-    let canonical_text: Vec<String> = (0..canonical.paragraphs.len()).map(|ix| flowstate_document::paragraph_text(&canonical, ix)).collect();
+    assert_eq!(
+      live.paragraphs.len(),
+      canonical.paragraphs.len(),
+      "live == canonical paragraph count after heals"
+    );
+    let live_text: Vec<String> = (0..live.paragraphs.len())
+      .map(|ix| flowstate_document::paragraph_text(&live, ix))
+      .collect();
+    let canonical_text: Vec<String> = (0..canonical.paragraphs.len())
+      .map(|ix| flowstate_document::paragraph_text(&canonical, ix))
+      .collect();
     assert_eq!(live_text, canonical_text, "live == canonical text after heals");
     let live_styles: Vec<_> = live.paragraphs.iter().map(|p| p.style).collect();
     let canonical_styles: Vec<_> = canonical.paragraphs.iter().map(|p| p.style).collect();

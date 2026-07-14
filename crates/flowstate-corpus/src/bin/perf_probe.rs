@@ -17,7 +17,10 @@ use std::time::Instant;
 
 fn main() {
   let mut args = std::env::args().skip(1);
-  let Some(path) = args.next().or_else(|| std::env::var("FLOWSTATE_BENCH_FIXTURE").ok()) else {
+  let Some(path) = args
+    .next()
+    .or_else(|| std::env::var("FLOWSTATE_BENCH_FIXTURE").ok())
+  else {
     eprintln!("usage: flowstate-perf-probe <FILE.docx> [ITERS]   (or set FLOWSTATE_BENCH_FIXTURE)");
     std::process::exit(2);
   };
@@ -28,7 +31,7 @@ fn main() {
     Err(error) => {
       eprintln!("read {path}: {error}");
       std::process::exit(1);
-    }
+    },
   };
   println!("file: {path}\nsize: {:.2} MB   iters: {iters}\n", bytes.len() as f64 / 1_048_576.0);
 
@@ -39,10 +42,13 @@ fn main() {
     Err(error) => {
       eprintln!("import failed: {error}");
       std::process::exit(1);
-    }
+    },
   };
   let import_ms = t.elapsed().as_secs_f64() * 1000.0;
-  println!("IMPORT          {import_ms:8.1} ms   (paragraphs_imported={})", report.paragraphs_imported);
+  println!(
+    "IMPORT          {import_ms:8.1} ms   (paragraphs_imported={})",
+    report.paragraphs_imported
+  );
 
   // PROJECT-warm: the imported doc's richtext state is already materialized.
   let warm = time_median(iters, || {
@@ -52,8 +58,15 @@ fn main() {
 
   // SNAPSHOT
   let t = Instant::now();
-  let snapshot = imported.doc.export(loro::ExportMode::Snapshot).expect("snapshot");
-  println!("SNAPSHOT        {:8.1} ms   ({:.2} MB)", t.elapsed().as_secs_f64() * 1000.0, snapshot.len() as f64 / 1_048_576.0);
+  let snapshot = imported
+    .doc
+    .export(loro::ExportMode::Snapshot)
+    .expect("snapshot");
+  println!(
+    "SNAPSHOT        {:8.1} ms   ({:.2} MB)",
+    t.elapsed().as_secs_f64() * 1000.0,
+    snapshot.len() as f64 / 1_048_576.0
+  );
 
   // PROJECT-cold: fresh (undecoded) import each iter — the reopen / receiving-peer path.
   let cold = time_median(iters, || {

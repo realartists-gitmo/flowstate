@@ -80,13 +80,20 @@ fn main() {
     loro_micro();
     return;
   }
-  let audit = cli.audit.as_deref().map_or(AuditSampling::ProfileDefault, |value| {
-    if value.eq_ignore_ascii_case("off") {
-      AuditSampling::Off
-    } else {
-      AuditSampling::Every(value.parse().expect("--audit takes `off` or a positive integer"))
-    }
-  });
+  let audit = cli
+    .audit
+    .as_deref()
+    .map_or(AuditSampling::ProfileDefault, |value| {
+      if value.eq_ignore_ascii_case("off") {
+        AuditSampling::Off
+      } else {
+        AuditSampling::Every(
+          value
+            .parse()
+            .expect("--audit takes `off` or a positive integer"),
+        )
+      }
+    });
   run(&cli.input, cli.keystrokes, cli.splits, cli.imports, &audit, cli.restyle_cap).expect("collab hotpath soak failed");
 }
 
@@ -111,12 +118,21 @@ fn run(path: &Path, keystrokes: usize, splits: usize, imports: usize, audit: &Au
   );
   let (handle, gate) = LocalDocHandle::new(runtime, config);
 
-  let projection = handle.projection().map_err(|error| anyhow::anyhow!("{error}"))?;
+  let projection = handle
+    .projection()
+    .map_err(|error| anyhow::anyhow!("{error}"))?;
   let paragraph_count = projection.ids.paragraph_ids.len();
   let body_chars: usize = (0..projection.paragraphs.len())
-    .map(|ix| flowstate_document::paragraph_text(&projection, ix).chars().count())
+    .map(|ix| {
+      flowstate_document::paragraph_text(&projection, ix)
+        .chars()
+        .count()
+    })
     .sum();
-  println!("document shape: {paragraph_count} paragraphs, {body_chars} body chars, {} blocks", projection.blocks.len());
+  println!(
+    "document shape: {paragraph_count} paragraphs, {body_chars} body chars, {} blocks",
+    projection.blocks.len()
+  );
 
   // ---- Simulated editor: canonical attach + ordered-stream drains ------------
   let mut editor = LocalWriteAuthority::canonical_projection(&handle).map_err(|error| anyhow::anyhow!("{error}"))?;
@@ -163,8 +179,15 @@ fn run(path: &Path, keystrokes: usize, splits: usize, imports: usize, audit: &Au
   // deletes — the structural local edits from the field report.
   let mut join_times = Vec::new();
   for _ in 0..splits / 2 {
-    let projection = handle.projection().map_err(|error| anyhow::anyhow!("{error}"))?;
-    let Some(ix) = projection.ids.paragraph_ids.iter().position(|id| *id == target) else {
+    let projection = handle
+      .projection()
+      .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let Some(ix) = projection
+      .ids
+      .paragraph_ids
+      .iter()
+      .position(|id| *id == target)
+    else {
       break;
     };
     if ix + 1 >= projection.ids.paragraph_ids.len() {
@@ -190,8 +213,15 @@ fn run(path: &Path, keystrokes: usize, splits: usize, imports: usize, audit: &Au
       })
       .map_err(|error| anyhow::anyhow!("cross-delete setup split rejected: {error}"))?;
     drain_into_editor(&handle, &mut editor)?;
-    let projection = handle.projection().map_err(|error| anyhow::anyhow!("{error}"))?;
-    let Some(ix) = projection.ids.paragraph_ids.iter().position(|id| *id == target) else {
+    let projection = handle
+      .projection()
+      .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let Some(ix) = projection
+      .ids
+      .paragraph_ids
+      .iter()
+      .position(|id| *id == target)
+    else {
       break;
     };
     let Some(next) = projection.ids.paragraph_ids.get(ix + 1).copied() else {
@@ -200,7 +230,12 @@ fn run(path: &Path, keystrokes: usize, splits: usize, imports: usize, audit: &Au
     let started = Instant::now();
     handle
       .delete_range(DeleteRangeIntent {
-        start: TextAnchor::new(target, flowstate_document::paragraph_text(&projection, ix).len().saturating_sub(2)),
+        start: TextAnchor::new(
+          target,
+          flowstate_document::paragraph_text(&projection, ix)
+            .len()
+            .saturating_sub(2),
+        ),
         end: TextAnchor::new(next, 0),
       })
       .map_err(|error| anyhow::anyhow!("cross-paragraph delete rejected: {error}"))?;
@@ -213,7 +248,9 @@ fn run(path: &Path, keystrokes: usize, splits: usize, imports: usize, audit: &Au
   // A converged peer produced from the main doc's own snapshot, editing through
   // its own full write path; its update chunks import here like session_io does.
   let snapshot = {
-    let guard = gate.lock(GateHolder::ExportUpdates).map_err(|_| anyhow::anyhow!("gate poisoned"))?;
+    let guard = gate
+      .lock(GateHolder::ExportUpdates)
+      .map_err(|_| anyhow::anyhow!("gate poisoned"))?;
     guard
       .doc()
       .export(loro::ExportMode::Snapshot)
@@ -229,13 +266,10 @@ fn run(path: &Path, keystrokes: usize, splits: usize, imports: usize, audit: &Au
   // missing dependencies (and falls back to a full rebuild).
   let snapshot_vv = peer_doc.state_vv();
   let peer_runtime = CrdtRuntime::from_doc(peer_doc, None, None)?;
-  let (peer_handle, peer_gate) = LocalDocHandle::new(
-    peer_runtime,
-    LocalWriteConfig {
-      release_audit_sample: None,
-    },
-  );
-  let peer_projection = peer_handle.projection().map_err(|error| anyhow::anyhow!("{error}"))?;
+  let (peer_handle, peer_gate) = LocalDocHandle::new(peer_runtime, LocalWriteConfig { release_audit_sample: None });
+  let peer_projection = peer_handle
+    .projection()
+    .map_err(|error| anyhow::anyhow!("{error}"))?;
   let peer_target = mid_paragraph(&peer_projection);
   let mut peer_vv = snapshot_vv;
 
@@ -265,7 +299,9 @@ fn run(path: &Path, keystrokes: usize, splits: usize, imports: usize, audit: &Au
       }
     }
     let update = {
-      let guard = peer_gate.lock(GateHolder::ExportUpdates).map_err(|_| anyhow::anyhow!("gate poisoned"))?;
+      let guard = peer_gate
+        .lock(GateHolder::ExportUpdates)
+        .map_err(|_| anyhow::anyhow!("gate poisoned"))?;
       let update = guard
         .doc()
         .export(loro::ExportMode::updates(&peer_vv))
@@ -274,7 +310,9 @@ fn run(path: &Path, keystrokes: usize, splits: usize, imports: usize, audit: &Au
       update
     };
     let started = Instant::now();
-    let mut guard = gate.lock(GateHolder::ImportChunk).map_err(|_| anyhow::anyhow!("gate poisoned"))?;
+    let mut guard = gate
+      .lock(GateHolder::ImportChunk)
+      .map_err(|_| anyhow::anyhow!("gate poisoned"))?;
     let events = guard.import_remote_update(&update)?;
     drop(guard);
     for event in &events {
@@ -303,7 +341,9 @@ fn run(path: &Path, keystrokes: usize, splits: usize, imports: usize, audit: &Au
   // anti-amplification law under the heaviest realistic match count. Then one
   // undo (the storm is one undo member) to restore the text for phase 4.
   {
-    let projection = handle.projection().map_err(|error| anyhow::anyhow!("{error}"))?;
+    let projection = handle
+      .projection()
+      .map_err(|error| anyhow::anyhow!("{error}"))?;
     let mut matches = Vec::new();
     for (paragraph_ix, paragraph_id) in projection.ids.paragraph_ids.iter().enumerate() {
       let text = flowstate_document::paragraph_text(&projection, paragraph_ix);
@@ -332,7 +372,9 @@ fn run(path: &Path, keystrokes: usize, splits: usize, imports: usize, audit: &Au
       drain_into_editor(&handle, &mut editor)?;
       println!("replace-all storm (editor drain + apply):        {:?}", apply_started.elapsed());
       let started = Instant::now();
-      handle.apply_undo().map_err(|error| anyhow::anyhow!("undo replace-all rejected: {error}"))?;
+      handle
+        .apply_undo()
+        .map_err(|error| anyhow::anyhow!("undo replace-all rejected: {error}"))?;
       drain_into_editor(&handle, &mut editor)?;
       println!("undo replace-all storm (commit + drain):         {:?}", started.elapsed());
     } else {
@@ -346,42 +388,65 @@ fn run(path: &Path, keystrokes: usize, splits: usize, imports: usize, audit: &Au
   // one full write-path round trip per paragraph). Undo afterwards restores
   // styles and measures single-member undo of the mass restyle.
   {
-    let projection = handle.projection().map_err(|error| anyhow::anyhow!("{error}"))?;
-    let restyle_count = projection.ids.paragraph_ids.len().min(restyle_cap.unwrap_or(usize::MAX));
+    let projection = handle
+      .projection()
+      .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let restyle_count = projection
+      .ids
+      .paragraph_ids
+      .len()
+      .min(restyle_cap.unwrap_or(usize::MAX));
     if restyle_count == 0 {
       println!("select-all restyle: skipped (--restyle-cap 0)");
       // fall through to phase 4 with styles untouched
     } else {
-    let paragraphs: Vec<_> = projection.ids.paragraph_ids.iter().copied().take(restyle_count).collect();
-    let started = Instant::now();
-    handle
-      .set_paragraph_styles(flowstate_collab::local_write::SetParagraphStylesIntent {
-        paragraphs,
-        style: ParagraphStyle::Custom(1),
-      })
-      .map_err(|error| anyhow::anyhow!("batched restyle rejected: {error}"))?;
-    println!("select-all restyle ({restyle_count} paragraphs, ONE batched commit): {:?}", started.elapsed());
-    let apply_started = Instant::now();
-    drain_into_editor(&handle, &mut editor)?;
-    println!("select-all restyle (editor drain + apply):       {:?}", apply_started.elapsed());
-    let started = Instant::now();
-    handle.apply_undo().map_err(|error| anyhow::anyhow!("undo restyle rejected: {error}"))?;
-    drain_into_editor(&handle, &mut editor)?;
-    println!("undo select-all restyle (commit + drain):        {:?}", started.elapsed());
-    let started = Instant::now();
-    handle.apply_redo().map_err(|error| anyhow::anyhow!("redo restyle rejected: {error}"))?;
-    drain_into_editor(&handle, &mut editor)?;
-    println!("redo select-all restyle (commit + drain):        {:?}", started.elapsed());
-    let started = Instant::now();
-    handle.apply_undo().map_err(|error| anyhow::anyhow!("re-undo restyle rejected: {error}"))?;
-    drain_into_editor(&handle, &mut editor)?;
-    println!("re-undo select-all restyle (commit + drain):     {:?}", started.elapsed());
+      let paragraphs: Vec<_> = projection
+        .ids
+        .paragraph_ids
+        .iter()
+        .copied()
+        .take(restyle_count)
+        .collect();
+      let started = Instant::now();
+      handle
+        .set_paragraph_styles(flowstate_collab::local_write::SetParagraphStylesIntent {
+          paragraphs,
+          style: ParagraphStyle::Custom(1),
+        })
+        .map_err(|error| anyhow::anyhow!("batched restyle rejected: {error}"))?;
+      println!(
+        "select-all restyle ({restyle_count} paragraphs, ONE batched commit): {:?}",
+        started.elapsed()
+      );
+      let apply_started = Instant::now();
+      drain_into_editor(&handle, &mut editor)?;
+      println!("select-all restyle (editor drain + apply):       {:?}", apply_started.elapsed());
+      let started = Instant::now();
+      handle
+        .apply_undo()
+        .map_err(|error| anyhow::anyhow!("undo restyle rejected: {error}"))?;
+      drain_into_editor(&handle, &mut editor)?;
+      println!("undo select-all restyle (commit + drain):        {:?}", started.elapsed());
+      let started = Instant::now();
+      handle
+        .apply_redo()
+        .map_err(|error| anyhow::anyhow!("redo restyle rejected: {error}"))?;
+      drain_into_editor(&handle, &mut editor)?;
+      println!("redo select-all restyle (commit + drain):        {:?}", started.elapsed());
+      let started = Instant::now();
+      handle
+        .apply_undo()
+        .map_err(|error| anyhow::anyhow!("re-undo restyle rejected: {error}"))?;
+      drain_into_editor(&handle, &mut editor)?;
+      println!("re-undo select-all restyle (commit + drain):     {:?}", started.elapsed());
     }
   }
 
   // ---- Phase 4: select-all delete + retype (the ctrl-A field freeze). Runs
   // LAST because it guts the document. ------------------------------------------
-  let projection = handle.projection().map_err(|error| anyhow::anyhow!("{error}"))?;
+  let projection = handle
+    .projection()
+    .map_err(|error| anyhow::anyhow!("{error}"))?;
   let first = projection.ids.paragraph_ids[0];
   let last = *projection.ids.paragraph_ids.last().expect("paragraphs");
   let started = Instant::now();
@@ -396,7 +461,11 @@ fn run(path: &Path, keystrokes: usize, splits: usize, imports: usize, audit: &Au
   drain_into_editor(&handle, &mut editor)?;
   println!("select-all delete (editor drain + apply):        {:?}", apply_started.elapsed());
   let started = Instant::now();
-  let remaining = handle.projection().map_err(|error| anyhow::anyhow!("{error}"))?.ids.paragraph_ids[0];
+  let remaining = handle
+    .projection()
+    .map_err(|error| anyhow::anyhow!("{error}"))?
+    .ids
+    .paragraph_ids[0];
   handle
     .insert_text(InsertTextIntent {
       at: TextAnchor::new(remaining, usize::MAX),
@@ -411,12 +480,21 @@ fn run(path: &Path, keystrokes: usize, splits: usize, imports: usize, audit: &Au
   // freeze): undo retype, undo the mass delete (restores the whole doc), redo.
   for label in ["undo retype", "undo select-all delete"] {
     let started = Instant::now();
-    handle.apply_undo().map_err(|error| anyhow::anyhow!("{label} rejected: {error}"))?;
+    handle
+      .apply_undo()
+      .map_err(|error| anyhow::anyhow!("{label} rejected: {error}"))?;
     drain_into_editor(&handle, &mut editor)?;
-    println!("{label} (commit + drain):{:pad$}{:?}", "", started.elapsed(), pad = 31_usize.saturating_sub(label.len()));
+    println!(
+      "{label} (commit + drain):{:pad$}{:?}",
+      "",
+      started.elapsed(),
+      pad = 31_usize.saturating_sub(label.len())
+    );
   }
   let started = Instant::now();
-  handle.apply_redo().map_err(|error| anyhow::anyhow!("redo select-all delete rejected: {error}"))?;
+  handle
+    .apply_redo()
+    .map_err(|error| anyhow::anyhow!("redo select-all delete rejected: {error}"))?;
   drain_into_editor(&handle, &mut editor)?;
   println!("redo select-all delete (commit + drain):         {:?}", started.elapsed());
 
@@ -427,9 +505,13 @@ fn run(path: &Path, keystrokes: usize, splits: usize, imports: usize, audit: &Au
   // the repair-pass prune is holding.
   for cycle in 0..2 {
     let started = Instant::now();
-    handle.apply_undo().map_err(|error| anyhow::anyhow!("cycle undo rejected: {error}"))?;
+    handle
+      .apply_undo()
+      .map_err(|error| anyhow::anyhow!("cycle undo rejected: {error}"))?;
     drain_into_editor(&handle, &mut editor)?;
-    handle.apply_redo().map_err(|error| anyhow::anyhow!("cycle redo rejected: {error}"))?;
+    handle
+      .apply_redo()
+      .map_err(|error| anyhow::anyhow!("cycle redo rejected: {error}"))?;
     drain_into_editor(&handle, &mut editor)?;
     println!("mass undo+redo cycle {cycle} (commit + drain):        {:?}", started.elapsed());
   }
@@ -438,17 +520,23 @@ fn run(path: &Path, keystrokes: usize, splits: usize, imports: usize, audit: &Au
   // the 2026-07-07 field hang (peer froze importing the undo of a select-all
   // delete: thousands of dead-cursor history traces). Must complete in
   // seconds via the rebuild path, never trace per record.
-  let peer_guard = peer_gate.lock(GateHolder::ExportUpdates).map_err(|_| anyhow::anyhow!("peer gate poisoned"))?;
+  let peer_guard = peer_gate
+    .lock(GateHolder::ExportUpdates)
+    .map_err(|_| anyhow::anyhow!("peer gate poisoned"))?;
   let peer_known_vv = peer_guard.doc().state_vv();
   drop(peer_guard);
-  let main_guard = gate.lock(GateHolder::ExportUpdates).map_err(|_| anyhow::anyhow!("gate poisoned"))?;
+  let main_guard = gate
+    .lock(GateHolder::ExportUpdates)
+    .map_err(|_| anyhow::anyhow!("gate poisoned"))?;
   let mass_history_update = main_guard
     .doc()
     .export(loro::ExportMode::updates(&peer_known_vv))
     .map_err(|error| anyhow::anyhow!("mass-history export: {error}"))?;
   drop(main_guard);
   let mass_receipt_started = Instant::now();
-  let mut peer_import_guard = peer_gate.lock(GateHolder::ImportChunk).map_err(|_| anyhow::anyhow!("peer gate poisoned"))?;
+  let mut peer_import_guard = peer_gate
+    .lock(GateHolder::ImportChunk)
+    .map_err(|_| anyhow::anyhow!("peer gate poisoned"))?;
   peer_import_guard.import_remote_update(&mass_history_update)?;
   drop(peer_import_guard);
   println!(
@@ -460,7 +548,10 @@ fn run(path: &Path, keystrokes: usize, splits: usize, imports: usize, audit: &Au
   // ---- Convergence proof: the soak measured real work, not dropped work -------
   let canonical = LocalWriteAuthority::canonical_projection(&handle).map_err(|error| anyhow::anyhow!("{error}"))?;
   anyhow::ensure!(editor.frontier == canonical.frontier, "simulated editor diverged from canonical frontier");
-  println!("\nconverged: editor tracked all {} paragraphs at the canonical frontier", canonical.paragraphs.len());
+  println!(
+    "\nconverged: editor tracked all {} paragraphs at the canonical frontier",
+    canonical.paragraphs.len()
+  );
   Ok(())
 }
 
@@ -476,7 +567,9 @@ fn loro_micro() {
         let text = doc.get_text("t");
         for _ in 0..6000 {
           text.insert(text.len_unicode(), &paragraph).expect("insert");
-          text.insert(text.len_unicode(), "\n").expect("insert boundary");
+          text
+            .insert(text.len_unicode(), "\n")
+            .expect("insert boundary");
         }
         if marks {
           for i in 0..6000 {
@@ -488,7 +581,9 @@ fn loro_micro() {
         let _subscription = with_subscription.then(|| doc.subscribe_root(std::sync::Arc::new(|_event| {})));
         let _undo = with_undo.then(|| loro::UndoManager::new(&doc));
         let started = Instant::now();
-        text.delete(0, text.len_unicode()).expect("select-all delete");
+        text
+          .delete(0, text.len_unicode())
+          .expect("select-all delete");
         let delete_elapsed = started.elapsed();
         let started = Instant::now();
         doc.commit();
@@ -527,7 +622,10 @@ fn scratch_input_copy(path: &Path) -> anyhow::Result<std::path::PathBuf> {
   let scratch = std::env::temp_dir().join(format!(
     "flowstate-soak-{}-{}",
     std::process::id(),
-    path.file_name().and_then(|name| name.to_str()).unwrap_or("input")
+    path
+      .file_name()
+      .and_then(|name| name.to_str())
+      .unwrap_or("input")
   ));
   std::fs::copy(path, &scratch)?;
   Ok(scratch)
@@ -538,11 +636,22 @@ fn mid_paragraph(projection: &DocumentProjection) -> ParagraphId {
 }
 
 fn drain_into_editor(handle: &LocalDocHandle, editor: &mut DocumentProjection) -> anyhow::Result<()> {
-  for item in handle.drain_projection_stream().map_err(|error| anyhow::anyhow!("{error}"))? {
+  for item in handle
+    .drain_projection_stream()
+    .map_err(|error| anyhow::anyhow!("{error}"))?
+  {
     match item {
       ProjectionStreamItem::Patches(batch) => {
         if std::env::var_os("SOAK_PATCH_DEBUG").is_some() {
-          eprintln!("[batch] {} patches: {:?}", batch.patches.len(), batch.patches.iter().map(std::mem::discriminant).collect::<Vec<_>>());
+          eprintln!(
+            "[batch] {} patches: {:?}",
+            batch.patches.len(),
+            batch
+              .patches
+              .iter()
+              .map(std::mem::discriminant)
+              .collect::<Vec<_>>()
+          );
         }
         if batch.new_frontier == editor.frontier {
           continue;
@@ -550,8 +659,7 @@ fn drain_into_editor(handle: &LocalDocHandle, editor: &mut DocumentProjection) -
         // Mirror `sync_projection_from_authority` exactly: in-place apply
         // (the batch apply is internally transactional) — so the measured
         // cost is the real editor-side cost.
-        flowstate_document::apply_projection_patch_batch(editor, &batch)
-          .map_err(|error| anyhow::anyhow!("ordered batch failed: {error:?}"))?;
+        flowstate_document::apply_projection_patch_batch(editor, &batch).map_err(|error| anyhow::anyhow!("ordered batch failed: {error:?}"))?;
       },
       ProjectionStreamItem::Replace(document) => *editor = *document,
     }

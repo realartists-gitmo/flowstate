@@ -15,7 +15,9 @@ mod tests {
   fn shallow_session_with_behind_peer() -> (CrdtRuntime, LoroDoc, LoroDoc) {
     let source = new_loro_document("Shallow serve").expect("doc");
     let text = body_text(&source);
-    text.insert(text.len_unicode(), "ancient shared history").expect("insert");
+    text
+      .insert(text.len_unicode(), "ancient shared history")
+      .expect("insert");
     source.commit();
 
     // The far-behind peer last synced BEFORE the shallow root.
@@ -24,15 +26,21 @@ mod tests {
       .import(&source.export(ExportMode::Snapshot).expect("snapshot"))
       .expect("behind bootstrap");
 
-    text.insert(text.len_unicode(), " | past the root").expect("insert");
+    text
+      .insert(text.len_unicode(), " | past the root")
+      .expect("insert");
     source.commit();
     let root = source.state_frontiers();
-    text.insert(text.len_unicode(), " | recent window").expect("insert");
+    text
+      .insert(text.len_unicode(), " | recent window")
+      .expect("insert");
     source.commit();
 
     let mut package = DocumentPackage::from_loro_snapshot(&source, "Shallow serve").expect("package");
     package.compact_to_snapshot(&source).expect("compact");
-    package.record_shallow_snapshot(&source, &root).expect("record shallow");
+    package
+      .record_shallow_snapshot(&source, &root)
+      .expect("record shallow");
     let live = package
       .load_loro_doc_shallow()
       .expect("shallow load")
@@ -145,8 +153,12 @@ mod tests {
         .insert(peer_text.len_unicode(), &format!(" | peer round {round}"))
         .expect("peer edit");
       peer.commit();
-      let update = peer.export(ExportMode::updates(&peer_from)).expect("peer export");
-      runtime.import_remote_updates(&[&update]).expect("session import");
+      let update = peer
+        .export(ExportMode::updates(&peer_from))
+        .expect("peer export");
+      runtime
+        .import_remote_updates(&[&update])
+        .expect("session import");
 
       // Shallow session edit → peer.
       let session_from = peer.oplog_vv();
@@ -155,7 +167,9 @@ mod tests {
         .insert(session_text.len_unicode(), &format!(" | session round {round}"))
         .expect("session edit");
       runtime.doc().commit();
-      let update = runtime.export_updates_for(&session_from).expect("session export");
+      let update = runtime
+        .export_updates_for(&session_from)
+        .expect("session export");
       peer.import(&update).expect("peer import");
 
       assert_eq!(
@@ -206,7 +220,10 @@ mod tests {
       body_text(runtime.doc()).to_string(),
       "the incremental checkpoint must reopen to the live tip"
     );
-    let shallow = reopened.load_loro_doc_shallow().expect("shallow load").expect("chunk");
+    let shallow = reopened
+      .load_loro_doc_shallow()
+      .expect("shallow load")
+      .expect("chunk");
     assert_eq!(body_text(&shallow).to_string(), body_text(&full).to_string());
   }
 
@@ -238,8 +255,13 @@ mod tests {
         // recorded hull, forcing truncation of the fast-path stacks.
         let from = peer.oplog_vv();
         {
-          let guard = gate.lock(flowstate_collab::local_write::GateHolder::ExportUpdates).expect("gate");
-          let update = guard.doc().export(ExportMode::updates(&peer.oplog_vv())).expect("session export");
+          let guard = gate
+            .lock(flowstate_collab::local_write::GateHolder::ExportUpdates)
+            .expect("gate");
+          let update = guard
+            .doc()
+            .export(ExportMode::updates(&peer.oplog_vv()))
+            .expect("session export");
           drop(guard);
           peer.import(&update).expect("peer catch-up");
         }
@@ -249,9 +271,15 @@ mod tests {
         let at = peer_text.len_unicode().saturating_sub(2);
         peer_text.insert(at, "r").expect("peer edit");
         peer.commit();
-        let update = peer.export(ExportMode::updates(&from)).expect("peer export");
-        let mut guard = gate.lock(flowstate_collab::local_write::GateHolder::ImportChunk).expect("gate");
-        guard.import_remote_updates(&[&update]).expect("session import");
+        let update = peer
+          .export(ExportMode::updates(&from))
+          .expect("peer export");
+        let mut guard = gate
+          .lock(flowstate_collab::local_write::GateHolder::ImportChunk)
+          .expect("gate");
+        guard
+          .import_remote_updates(&[&update])
+          .expect("session import");
       }
     }
     // Undo the whole session; time the worst step (slow path engages once

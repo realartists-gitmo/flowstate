@@ -19,8 +19,8 @@ mod tests {
   /// the REAL write authority (production wiring).
   fn attach_test_authority(editor: &gpui::Entity<RichTextEditor>, cx: &mut gpui::TestAppContext) {
     let fixture = editor.read_with(cx, |editor, _| editor.document().clone());
-    let core = CrdtRuntime::from_document_projection(&fixture, "Test Document")
-      .expect("importing the fixture projection into a canonical Loro core");
+    let core =
+      CrdtRuntime::from_document_projection(&fixture, "Test Document").expect("importing the fixture projection into a canonical Loro core");
     let (handle, _gate) = LocalDocHandle::new(core, LocalWriteConfig::default());
     let projection = handle
       .projection()
@@ -33,7 +33,11 @@ mod tests {
   fn big_document(paragraphs: usize) -> DocumentProjection {
     let paras = (0..paragraphs)
       .map(|ix| InputParagraph {
-        style: if ix % 40 == 0 { ParagraphStyle::Custom(2) } else { ParagraphStyle::Normal },
+        style: if ix % 40 == 0 {
+          ParagraphStyle::Custom(2)
+        } else {
+          ParagraphStyle::Normal
+        },
         runs: vec![plain(
           "Body paragraph carrying several words so the layout has real text to measure and reflow.",
         )],
@@ -85,7 +89,10 @@ mod tests {
       let authority = std::sync::Arc::new(handle);
       let projection = authority.projection().expect("authority projection");
       editor.update(cx, |editor, cx| {
-        #[allow(clippy::clone_on_ref_ptr, reason = "method-syntax clone so the unsized coercion applies to the annotated binding")]
+        #[allow(
+          clippy::clone_on_ref_ptr,
+          reason = "method-syntax clone so the unsized coercion applies to the annotated binding"
+        )]
         let authority_dyn: std::sync::Arc<dyn LocalWriteAuthority> = authority.clone();
         editor.set_write_authority(authority_dyn, projection, cx);
       });
@@ -136,7 +143,11 @@ mod tests {
             document.paragraphs.len(),
             "seed {seed} step {step}: paragraph id vector desynced"
           );
-          assert_eq!(document.ids.block_ids.len(), document.blocks.len(), "seed {seed} step {step}: block id vector desynced");
+          assert_eq!(
+            document.ids.block_ids.len(),
+            document.blocks.len(),
+            "seed {seed} step {step}: block id vector desynced"
+          );
           let expected_rope_len: usize = document
             .paragraphs
             .iter()
@@ -149,7 +160,10 @@ mod tests {
             "seed {seed} step {step}: rope length inconsistent with paragraph lengths"
           );
           let head = editor.selection().head;
-          assert!(head.paragraph < document.paragraphs.len(), "seed {seed} step {step}: selection paragraph out of bounds");
+          assert!(
+            head.paragraph < document.paragraphs.len(),
+            "seed {seed} step {step}: selection paragraph out of bounds"
+          );
           let head_paragraph_len = flowstate_document::paragraph_text_len(&document.paragraphs[head.paragraph]);
           assert!(head.byte <= head_paragraph_len, "seed {seed} step {step}: selection byte out of bounds");
           let canonical = authority.projection().expect("authority projection");
@@ -183,46 +197,54 @@ mod tests {
     );
 
     editor.update(cx, |editor, cx| {
-      editor.set_selection(EditorSelection::collapsed(DocumentOffset {
-        paragraph: 0,
-        byte: "he".len(),
-      }), cx);
+      editor.set_selection(
+        EditorSelection::collapsed(DocumentOffset {
+          paragraph: 0,
+          byte: "he".len(),
+        }),
+        cx,
+      );
       editor.insert_text_command("y", cx);
       assert_eq!(paragraph_text(editor.document(), 0), "heyllo");
       assert_eq!(editor.document().paragraphs[0].runs.len(), 1);
 
-      editor.set_selection(EditorSelection::range(
-        DocumentOffset {
-          paragraph: 0,
-          byte: "hey".len(),
-        },
-        DocumentOffset {
-          paragraph: 0,
-          byte: "heyll".len(),
-        },
-      ), cx);
+      editor.set_selection(
+        EditorSelection::range(
+          DocumentOffset {
+            paragraph: 0,
+            byte: "hey".len(),
+          },
+          DocumentOffset {
+            paragraph: 0,
+            byte: "heyll".len(),
+          },
+        ),
+        cx,
+      );
       editor.apply_run_style_to_selection(RunStyle::Semantic(2), cx);
       assert_eq!(paragraph_text(editor.document(), 0), "heyllo");
       assert_eq!(editor.document().paragraphs[0].runs.len(), 3);
       assert_eq!(editor.document().paragraphs[0].runs[1].styles, emphasized);
 
-      editor.set_selection(EditorSelection::range(
-        DocumentOffset {
-          paragraph: 0,
-          byte: "he".len(),
-        },
-        DocumentOffset {
-          paragraph: 0,
-          byte: "heyll".len(),
-        },
-      ), cx);
+      editor.set_selection(
+        EditorSelection::range(
+          DocumentOffset {
+            paragraph: 0,
+            byte: "he".len(),
+          },
+          DocumentOffset {
+            paragraph: 0,
+            byte: "heyll".len(),
+          },
+        ),
+        cx,
+      );
       editor.backspace_command(cx);
       assert_eq!(paragraph_text(editor.document(), 0), "heo");
       assert_eq!(editor.document().paragraphs[0].runs.len(), 1);
       assert_eq!(editor.document().paragraphs[0].runs[0].styles, RunStyles::default());
     });
   }
-
 
   /// §act-three C (background open): a panel painted from a phase-V cached
   /// projection is a READ-ONLY display surface (no authority) — edits are inert
@@ -245,7 +267,13 @@ mod tests {
     editor.update(cx, |editor, cx| {
       assert!(!editor.has_write_authority(), "phase-V panel must have no write authority");
       // An edit against a read-only surface is inert (no fallback editing).
-      editor.set_selection(EditorSelection::collapsed(DocumentOffset { paragraph: 0, byte: "cached".len() }), cx);
+      editor.set_selection(
+        EditorSelection::collapsed(DocumentOffset {
+          paragraph: 0,
+          byte: "cached".len(),
+        }),
+        cx,
+      );
       editor.insert_text_command("X", cx);
       assert_eq!(paragraph_text(editor.document(), 0), "cached view", "read-only surface must ignore edits");
     });
@@ -258,7 +286,13 @@ mod tests {
       // The projection is now the authority's canonical one (same content).
       assert_eq!(paragraph_text(editor.document(), 0), "cached view");
       // Editing now commits through the real write path.
-      editor.set_selection(EditorSelection::collapsed(DocumentOffset { paragraph: 0, byte: "cached".len() }), cx);
+      editor.set_selection(
+        EditorSelection::collapsed(DocumentOffset {
+          paragraph: 0,
+          byte: "cached".len(),
+        }),
+        cx,
+      );
       editor.insert_text_command("X", cx);
       assert_eq!(paragraph_text(editor.document(), 0), "cachedX view", "editing must work after attach");
     });
@@ -281,28 +315,33 @@ mod tests {
     );
 
     editor.update(cx, |editor, cx| {
-      editor.set_selection(EditorSelection::collapsed(DocumentOffset {
-        paragraph: 0,
-        byte: "abé".len(),
-      }), cx);
+      editor.set_selection(
+        EditorSelection::collapsed(DocumentOffset {
+          paragraph: 0,
+          byte: "abé".len(),
+        }),
+        cx,
+      );
       editor.insert_text_command("Z", cx);
       assert_eq!(paragraph_text(editor.document(), 0), "abéZ🚀cd");
 
-      editor.set_selection(EditorSelection::range(
-        DocumentOffset {
-          paragraph: 0,
-          byte: "abé".len(),
-        },
-        DocumentOffset {
-          paragraph: 0,
-          byte: "abéZ🚀".len(),
-        },
-      ), cx);
+      editor.set_selection(
+        EditorSelection::range(
+          DocumentOffset {
+            paragraph: 0,
+            byte: "abé".len(),
+          },
+          DocumentOffset {
+            paragraph: 0,
+            byte: "abéZ🚀".len(),
+          },
+        ),
+        cx,
+      );
       editor.backspace_command(cx);
       assert_eq!(paragraph_text(editor.document(), 0), "abécd");
     });
   }
-
 
   /// Rich paste through the canonical `InsertRichFragment` intent: the FIRST
   /// pasted paragraph flows into the caret paragraph, which keeps ITS OWN
@@ -349,7 +388,6 @@ mod tests {
       assert_eq!(editor.document().paragraphs[1].style, ParagraphStyle::Custom(3));
     });
   }
-
 
   /// Clear-formatting over a selection spanning an empty paragraph, through the
   /// REAL write path: whole-paragraph selections clear paragraph styles back to
@@ -398,7 +436,6 @@ mod tests {
     });
   }
 
-
   /// Soft line breaks through the REAL write path (one `InsertText` intent —
   /// U+2028 is body text, not a paragraph boundary): the paragraph must not
   /// split, and plain-text copy renders the break as '\n'.
@@ -416,10 +453,13 @@ mod tests {
     );
 
     editor.update(cx, |editor, cx| {
-      editor.set_selection(EditorSelection::collapsed(DocumentOffset {
-        paragraph: 0,
-        byte: "alpha".len(),
-      }), cx);
+      editor.set_selection(
+        EditorSelection::collapsed(DocumentOffset {
+          paragraph: 0,
+          byte: "alpha".len(),
+        }),
+        cx,
+      );
       editor.insert_text_command(SOFT_LINE_BREAK_STR, cx);
 
       assert_eq!(editor.document().paragraphs.len(), 1);
@@ -436,7 +476,6 @@ mod tests {
       );
     });
   }
-
 
   /// Cross-paragraph run-style mutation through the REAL write path (one
   /// `SetMarks` intent over the selection): only the selected span changes;
@@ -461,10 +500,10 @@ mod tests {
     );
 
     editor.update(cx, |editor, cx| {
-      editor.set_selection(EditorSelection::range(
-        DocumentOffset { paragraph: 0, byte: 1 },
-        DocumentOffset { paragraph: 1, byte: 2 },
-      ), cx);
+      editor.set_selection(
+        EditorSelection::range(DocumentOffset { paragraph: 0, byte: 1 }, DocumentOffset { paragraph: 1, byte: 2 }),
+        cx,
+      );
       editor.apply_run_style_to_selection(RunStyle::Semantic(1), cx);
 
       let document = editor.document();
@@ -526,7 +565,11 @@ mod tests {
   fn keystroke_latency_through_the_authority(cx: &mut gpui::TestAppContext) {
     let paragraphs = (0..5_000)
       .map(|ix| InputParagraph {
-        style: if ix % 40 == 0 { ParagraphStyle::Custom(2) } else { ParagraphStyle::Normal },
+        style: if ix % 40 == 0 {
+          ParagraphStyle::Custom(2)
+        } else {
+          ParagraphStyle::Normal
+        },
         runs: vec![plain(
           "Competitive policy debate rewards evidence organized for instant retrieval and flawless formatting.",
         )],
@@ -563,8 +606,14 @@ mod tests {
     );
     // Spec §11 initial ratchet ceilings — tighten on improvement, never loosen
     // without a human decision. Being under budget is not a quality claim.
-    assert!(p50 < std::time::Duration::from_millis(16), "keystroke p50 regressed past the ratchet: {p50:?}");
-    assert!(p95 < std::time::Duration::from_millis(50), "keystroke p95 regressed past the ratchet: {p95:?}");
+    assert!(
+      p50 < std::time::Duration::from_millis(16),
+      "keystroke p50 regressed past the ratchet: {p50:?}"
+    );
+    assert!(
+      p95 < std::time::Duration::from_millis(50),
+      "keystroke p95 regressed past the ratchet: {p95:?}"
+    );
   }
 
   /// Replace-all must reach CANONICAL state (2026-07-07 field class: the old
@@ -652,13 +701,18 @@ mod tests {
     // peer B can share A's exact history, then install the real authority.
     let fixture = document_from_input(
       DocumentTheme::default(),
-      vec![InputParagraph { style: ParagraphStyle::Normal, runs: vec![plain("XY")] }],
+      vec![InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![plain("XY")],
+      }],
     );
     let core_a = CrdtRuntime::from_document_projection(&fixture, "peer-A").expect("core A");
     // Peer B is a fork of A's doc: it shares A's exact history but has a distinct
     // peer id, so its edits are genuinely concurrent and merge cleanly.
     let doc_b = core_a.doc().fork();
-    doc_b.set_peer_id(0x00B0_B0B0).expect("B gets a distinct peer id"); // fork keeps A's id
+    doc_b
+      .set_peer_id(0x00B0_B0B0)
+      .expect("B gets a distinct peer id"); // fork keeps A's id
     let base_vv = doc_b.state_vv();
     let body_b = flowstate_document::loro_schema::body_text(&doc_b);
 
@@ -674,7 +728,9 @@ mod tests {
     // base version vector).
     body_b.insert(1, "ABC").expect("B inserts");
     doc_b.commit();
-    let update_b = doc_b.export(loro::ExportMode::updates(&base_vv)).expect("B exports its delta");
+    let update_b = doc_b
+      .export(loro::ExportMode::updates(&base_vv))
+      .expect("B exports its delta");
 
     // A parks its caret between the shared X and Y ("X|Y" → byte 1).
     editor.update(cx, |editor, cx| {
@@ -690,7 +746,11 @@ mod tests {
     editor.update(cx, |editor, cx| editor.sync_projection_from_authority(cx));
 
     editor.read_with(cx, |editor, _| {
-      assert_eq!(paragraph_text(editor.document(), 0), "ABCXY", "B's prepend must merge before the shared text");
+      assert_eq!(
+        paragraph_text(editor.document(), 0),
+        "ABCXY",
+        "B's prepend must merge before the shared text"
+      );
       // Caret was at "X|Y" (byte 1). Three bytes inserted BEFORE it ⇒ the same
       // logical spot is byte 4 ("ABCX|Y"). A bare clamp leaves it at byte 1
       // ("A|BCXY"), which is the interleave bug.
@@ -705,7 +765,11 @@ mod tests {
     // never interleaved into B's run ("ABHCXY").
     editor.update(cx, |editor, cx| editor.insert_text_command("H", cx));
     editor.read_with(cx, |editor, _| {
-      assert_eq!(paragraph_text(editor.document(), 0), "ABCXHY", "A's keystroke must not interleave into the remote run");
+      assert_eq!(
+        paragraph_text(editor.document(), 0),
+        "ABCXHY",
+        "A's keystroke must not interleave into the remote run"
+      );
     });
   }
 
@@ -716,12 +780,15 @@ mod tests {
   /// so a regression to always-fork on every remote batch fails loudly.
   #[gpui::test]
   fn armed_caret_uses_fast_cursor_path_not_fork(cx: &mut gpui::TestAppContext) {
-    use flowstate_collab::crdt_runtime::{caret_rebase_fork_count, CrdtRuntime};
+    use flowstate_collab::crdt_runtime::{CrdtRuntime, caret_rebase_fork_count};
     use flowstate_collab::local_write::GateHolder;
 
     let fixture = document_from_input(
       DocumentTheme::default(),
-      vec![InputParagraph { style: ParagraphStyle::Normal, runs: vec![plain("XY")] }],
+      vec![InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![plain("XY")],
+      }],
     );
     let core_a = CrdtRuntime::from_document_projection(&fixture, "peer-A").expect("core A");
     // B forks the ORIGINAL base (before A's local edit), so B's insert is concurrent.
@@ -751,7 +818,9 @@ mod tests {
     // B (concurrent) prepends "ABC" before the shared X.
     body_b.insert(1, "ABC").expect("B inserts");
     doc_b.commit();
-    let update_b = doc_b.export(loro::ExportMode::updates(&base_vv)).expect("B delta");
+    let update_b = doc_b
+      .export(loro::ExportMode::updates(&base_vv))
+      .expect("B delta");
 
     let forks_before = caret_rebase_fork_count();
     let mut guard = gate_a.lock(GateHolder::ImportChunk).expect("gate healthy");
@@ -764,7 +833,11 @@ mod tests {
       assert_eq!(paragraph_text(editor.document(), 0), "ABCXZY", "B's prepend merges before A's local edit");
       // Caret was after Z (byte 2 in "XZY"); after "ABC" prepended it is byte 5 in
       // "ABCXZY" ("ABCXZ|Y").
-      assert_eq!(editor.selection().head, DocumentOffset { paragraph: 0, byte: 5 }, "armed caret repositions across the remote insert");
+      assert_eq!(
+        editor.selection().head,
+        DocumentOffset { paragraph: 0, byte: 5 },
+        "armed caret repositions across the remote insert"
+      );
     });
     assert_eq!(forks_after - forks_before, 0, "an armed caret must use the fast cursor path, not fork_at");
   }
@@ -777,12 +850,15 @@ mod tests {
   /// click/arrow fell to the ~350ms fork on a large doc.
   #[gpui::test]
   fn moved_caret_uses_fast_cursor_path_not_fork(cx: &mut gpui::TestAppContext) {
-    use flowstate_collab::crdt_runtime::{caret_rebase_fork_count, CrdtRuntime};
+    use flowstate_collab::crdt_runtime::{CrdtRuntime, caret_rebase_fork_count};
     use flowstate_collab::local_write::GateHolder;
 
     let fixture = document_from_input(
       DocumentTheme::default(),
-      vec![InputParagraph { style: ParagraphStyle::Normal, runs: vec![plain("XYZW")] }],
+      vec![InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![plain("XYZW")],
+      }],
     );
     let core_a = CrdtRuntime::from_document_projection(&fixture, "peer-A").expect("core A");
     let doc_b = core_a.doc().fork();
@@ -806,7 +882,9 @@ mod tests {
     // B (concurrent) prepends "ABC" before the shared text.
     body_b.insert(1, "ABC").expect("B inserts");
     doc_b.commit();
-    let update_b = doc_b.export(loro::ExportMode::updates(&base_vv)).expect("B delta");
+    let update_b = doc_b
+      .export(loro::ExportMode::updates(&base_vv))
+      .expect("B delta");
 
     let forks_before = caret_rebase_fork_count();
     let mut guard = gate_a.lock(GateHolder::ImportChunk).expect("gate healthy");
@@ -816,10 +894,22 @@ mod tests {
     let forks_after = caret_rebase_fork_count();
 
     editor.read_with(cx, |editor, _| {
-      assert_eq!(paragraph_text(editor.document(), 0), "ABCXYZW", "B's prepend merges before the shared text");
+      assert_eq!(
+        paragraph_text(editor.document(), 0),
+        "ABCXYZW",
+        "B's prepend merges before the shared text"
+      );
       // Caret at byte 2 ("XY|ZW") shifts past the 3-char prepend to byte 5 ("ABCXY|ZW").
-      assert_eq!(editor.selection().head, DocumentOffset { paragraph: 0, byte: 5 }, "moved caret repositions across the remote insert");
+      assert_eq!(
+        editor.selection().head,
+        DocumentOffset { paragraph: 0, byte: 5 },
+        "moved caret repositions across the remote insert"
+      );
     });
-    assert_eq!(forks_after - forks_before, 0, "a caret moved (not written) must still use the fast cursor path, not fork_at");
+    assert_eq!(
+      forks_after - forks_before,
+      0,
+      "a caret moved (not written) must still use the fast cursor path, not fork_at"
+    );
   }
 }

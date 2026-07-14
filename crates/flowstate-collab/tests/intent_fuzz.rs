@@ -18,8 +18,8 @@ mod tests {
   use flowstate_collab::crdt_runtime::CrdtRuntime;
   use flowstate_collab::local_write::{
     DeleteRangeIntent, FragmentBlock, GateHolder, InsertRichFragmentIntent, InsertTextIntent, JoinParagraphsIntent, LocalDocHandle,
-    LocalWriteConfig, ReplaceMatch, ReplaceMatchesIntent, SetMarksIntent, SetParagraphStyleIntent, SplitParagraphIntent, TextAnchor,
-    WriteGate, WriteRejected,
+    LocalWriteConfig, ReplaceMatch, ReplaceMatchesIntent, SetMarksIntent, SetParagraphStyleIntent, SplitParagraphIntent, TextAnchor, WriteGate,
+    WriteRejected,
   };
   use flowstate_document::{Block, DocumentProjection, InputParagraph, InputRun, ParagraphStyle, RunSemanticStyle, RunStyles, paragraph_text};
 
@@ -70,7 +70,10 @@ mod tests {
 
     fn export_updates_since(&self, vv: &loro::VersionVector) -> Vec<u8> {
       let guard = self.gate.lock(GateHolder::ExportUpdates).expect("gate");
-      guard.doc().export(loro::ExportMode::updates(vv)).expect("export")
+      guard
+        .doc()
+        .export(loro::ExportMode::updates(vv))
+        .expect("export")
     }
 
     fn state_vv(&self) -> loro::VersionVector {
@@ -143,7 +146,9 @@ mod tests {
             FragmentBlock::Paragraph(InputParagraph {
               style: ParagraphStyle::Normal,
               runs: vec![InputRun {
-                text: format!("m{step}r{ix:02} bulk row content padding padding padding padding padding padding padding padding padding padding padding"),
+                text: format!(
+                  "m{step}r{ix:02} bulk row content padding padding padding padding padding padding padding padding padding padding padding"
+                ),
                 styles: if ix % 3 == 0 { random_styles(rng) } else { RunStyles::default() },
               }],
             })
@@ -234,7 +239,11 @@ mod tests {
           .handle
           .split_paragraph(SplitParagraphIntent {
             at: TextAnchor::new(paragraph, byte),
-            inherited_style: if rng.below(2) == 0 { ParagraphStyle::Normal } else { ParagraphStyle::Custom(1) },
+            inherited_style: if rng.below(2) == 0 {
+              ParagraphStyle::Normal
+            } else {
+              ParagraphStyle::Custom(1)
+            },
           })
           .map(|_| ())
       },
@@ -287,7 +296,11 @@ mod tests {
         .handle
         .set_paragraph_style(SetParagraphStyleIntent {
           paragraph,
-          style: if rng.below(2) == 0 { ParagraphStyle::Normal } else { ParagraphStyle::Custom((rng.below(3) + 1) as u8) },
+          style: if rng.below(2) == 0 {
+            ParagraphStyle::Normal
+          } else {
+            ParagraphStyle::Custom((rng.below(3) + 1) as u8)
+          },
         })
         .map(|_| ()),
       // Undo/redo (spec §10): production `UndoManager` path. "Nothing to
@@ -324,7 +337,11 @@ mod tests {
           .handle
           .set_paragraph_styles(flowstate_collab::local_write::SetParagraphStylesIntent {
             paragraphs,
-            style: if rng.below(2) == 0 { ParagraphStyle::Normal } else { ParagraphStyle::Custom((rng.below(3) + 1) as u8) },
+            style: if rng.below(2) == 0 {
+              ParagraphStyle::Normal
+            } else {
+              ParagraphStyle::Custom((rng.below(3) + 1) as u8)
+            },
           })
           .map(|_| ())
       },
@@ -339,8 +356,13 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("flowstate-fuzz-ckpt-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("fuzz checkpoint dir");
         let path = dir.join(format!("peer-{:p}.db8", std::sync::Arc::as_ptr(&peer.gate)));
-        let mut guard = peer.gate.lock(GateHolder::DocumentService).expect("gate healthy");
-        guard.checkpoint_package("Fuzz autosave", Some(path)).expect("fuzz checkpoint must succeed");
+        let mut guard = peer
+          .gate
+          .lock(GateHolder::DocumentService)
+          .expect("gate healthy");
+        guard
+          .checkpoint_package("Fuzz autosave", Some(path))
+          .expect("fuzz checkpoint must succeed");
         drop(guard);
         Ok(())
       },
@@ -419,13 +441,20 @@ mod tests {
     }
     for ix in 0..left.paragraphs.len() {
       if paragraph_text(left, ix) != paragraph_text(right, ix) {
-        return Err(format!("paragraph[{ix}] text {:?} != {:?}", paragraph_text(left, ix), paragraph_text(right, ix)));
+        return Err(format!(
+          "paragraph[{ix}] text {:?} != {:?}",
+          paragraph_text(left, ix),
+          paragraph_text(right, ix)
+        ));
       }
       if left.paragraphs[ix].style != right.paragraphs[ix].style {
         return Err(format!("paragraph[{ix}] style differs"));
       }
       if left.paragraphs[ix].runs != right.paragraphs[ix].runs {
-        return Err(format!("paragraph[{ix}] runs differ: {:?} != {:?}", left.paragraphs[ix].runs, right.paragraphs[ix].runs));
+        return Err(format!(
+          "paragraph[{ix}] runs differ: {:?} != {:?}",
+          left.paragraphs[ix].runs, right.paragraphs[ix].runs
+        ));
       }
     }
     if left.ids.paragraph_ids != right.ids.paragraph_ids {
@@ -469,9 +498,7 @@ mod tests {
           Err(WriteRejected::EmptyIntent | WriteRejected::StructureViolation(_) | WriteRejected::UnresolvedParagraph(_)) => {},
           Err(other) => panic!("seed {seed} round {round} op {op}: unexpected rejection {other}"),
         }
-        if per_op_check
-          && let Err(reason) = projections_agree(&peers[peer_ix].projection(), &peers[peer_ix].fresh_canonical())
-        {
+        if per_op_check && let Err(reason) = projections_agree(&peers[peer_ix].projection(), &peers[peer_ix].fresh_canonical()) {
           panic!("seed {seed} round {round} op {op} (step {step}, peer {peer_ix}): projection deviates from own canonical: {reason}");
         }
       }
@@ -492,8 +519,16 @@ mod tests {
       for (ix, peer) in peers.iter().enumerate().skip(1) {
         // Equal op logs are a precondition for the state comparison: a version
         // vector mismatch here is a harness delivery hole, not divergence.
-        assert_eq!(peer.state_vv(), peers[0].state_vv(), "seed {seed} round {round}: peer {ix} version vector differs after quiescent sync");
-        assert_eq!(peer.body_text(), reference_text, "seed {seed} round {round}: peer {ix} body text diverged");
+        assert_eq!(
+          peer.state_vv(),
+          peers[0].state_vv(),
+          "seed {seed} round {round}: peer {ix} version vector differs after quiescent sync"
+        );
+        assert_eq!(
+          peer.body_text(),
+          reference_text,
+          "seed {seed} round {round}: peer {ix} body text diverged"
+        );
         if let Err(reason) = projections_agree(&peer.projection(), &reference_projection) {
           panic!("seed {seed} round {round}: peer {ix} projection diverged: {reason}");
         }
@@ -522,9 +557,18 @@ mod tests {
   #[test]
   #[ignore = "long-horizon soak — run via `heaven.sh soak`"]
   fn intent_fuzz_soak() {
-    let seeds: u64 = std::env::var("FUZZ_SOAK_SEEDS").ok().and_then(|v| v.parse().ok()).unwrap_or(500);
-    let rounds: usize = std::env::var("FUZZ_SOAK_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
-    let ops: usize = std::env::var("FUZZ_SOAK_OPS").ok().and_then(|v| v.parse().ok()).unwrap_or(16);
+    let seeds: u64 = std::env::var("FUZZ_SOAK_SEEDS")
+      .ok()
+      .and_then(|v| v.parse().ok())
+      .unwrap_or(500);
+    let rounds: usize = std::env::var("FUZZ_SOAK_ROUNDS")
+      .ok()
+      .and_then(|v| v.parse().ok())
+      .unwrap_or(8);
+    let ops: usize = std::env::var("FUZZ_SOAK_OPS")
+      .ok()
+      .and_then(|v| v.parse().ok())
+      .unwrap_or(16);
     for seed in 1..=seeds {
       let peers = 2 + (seed % 3) as usize; // 2–4 peers
       run_fuzz(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15), peers, rounds, ops);

@@ -101,8 +101,7 @@ impl EffectiveSection {
   }
 
   fn page_num_type(&self) -> Option<PageNumType> {
-    (self.page_num_enabled || self.page_num_start != 1)
-      .then(|| PageNumType::new().start(self.page_num_start.max(0) as u32))
+    (self.page_num_enabled || self.page_num_start != 1).then(|| PageNumType::new().start(self.page_num_start.max(0) as u32))
   }
 
   /// Build a paragraph-level `w:sectPr` for a non-final section boundary.
@@ -188,7 +187,12 @@ impl SectionContext {
         document.sections.len() <= 1,
         FidelityClass::ImportExport,
         "export-dropped-section",
-        || format!("{} canonical sections but none resolve a start paragraph; only one geometry written", document.sections.len()),
+        || {
+          format!(
+            "{} canonical sections but none resolve a start paragraph; only one geometry written",
+            document.sections.len()
+          )
+        },
       );
       let doc_level = effective_from(&document.sections[0]);
       return Self {

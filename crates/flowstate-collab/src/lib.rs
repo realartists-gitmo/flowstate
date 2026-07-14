@@ -7,11 +7,11 @@
 pub mod admission;
 pub mod bluetooth;
 pub mod crdt_runtime;
-pub mod doc_io;
 pub mod discovery;
+pub mod doc_io;
 pub mod dropbox;
-pub mod ids;
 pub mod identity;
+pub mod ids;
 pub mod local_write;
 pub mod net;
 pub mod presence;

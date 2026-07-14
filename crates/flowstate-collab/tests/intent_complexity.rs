@@ -15,8 +15,8 @@ mod tests {
     SetParagraphStylesIntent, SplitParagraphIntent, TextAnchor,
   };
   use flowstate_document::{
-    AssetId, InputBlock, InputBlockAlignment, InputImageBlock, InputImageSizing, ParagraphStyle, RunStyles,
-    block_ix_for_paragraph, block_ix_scan_count, reset_block_ix_scan_count,
+    AssetId, InputBlock, InputBlockAlignment, InputImageBlock, InputImageSizing, ParagraphStyle, RunStyles, block_ix_for_paragraph,
+    block_ix_scan_count, reset_block_ix_scan_count,
   };
 
   /// Paragraph count for the "large" fixture. Kept CI-friendly in debug builds
@@ -76,14 +76,25 @@ mod tests {
           inherited_style: ParagraphStyle::Normal,
         })
         .expect("seed split");
-      paragraph = *handle.projection().expect("projection").ids.paragraph_ids.last().expect("last paragraph");
+      paragraph = *handle
+        .projection()
+        .expect("projection")
+        .ids
+        .paragraph_ids
+        .last()
+        .expect("last paragraph");
     }
     // 2. Insert image objects at byte 0 of every OBJECT_EVERY-th paragraph — the
     // identity-anchored position the convergence tests use (robust, unlike the
     // end-of-paragraph interleave). Tolerate the rare reject; we only need SOME
     // objects so `blocks.len() != paragraphs.len()` and the aligned fast path
     // misses. Snapshot the ids first so the shifting projection doesn't matter.
-    let ids = handle.projection().expect("projection").ids.paragraph_ids.clone();
+    let ids = handle
+      .projection()
+      .expect("projection")
+      .ids
+      .paragraph_ids
+      .clone();
     for (n, paragraph_id) in ids.iter().enumerate() {
       if n % OBJECT_EVERY == OBJECT_EVERY / 2 {
         let _ = handle.insert_object(InsertObjectIntent {
@@ -157,7 +168,10 @@ mod tests {
     // (c) The real mass paragraph-style op must stay bounded too.
     reset_block_ix_scan_count();
     handle
-      .set_paragraph_styles(SetParagraphStylesIntent { paragraphs: all, style: ParagraphStyle::Custom(2) })
+      .set_paragraph_styles(SetParagraphStylesIntent {
+        paragraphs: all,
+        style: ParagraphStyle::Custom(2),
+      })
       .expect("mass set-paragraph-styles commits");
     let style_scans = block_ix_scan_count();
     assert!(
@@ -182,9 +196,16 @@ mod tests {
       .expect("insert commits");
     let counters = outcome.commit().counters;
     assert!(!counters.full_rebuild, "single-char insert must never full-rebuild (I-14)");
-    assert!(counters.containers_touched <= 2, "insert touches O(1) containers, got {}", counters.containers_touched);
+    assert!(
+      counters.containers_touched <= 2,
+      "insert touches O(1) containers, got {}",
+      counters.containers_touched
+    );
     assert!(counters.loro_ops <= 4, "insert emits O(1) Loro ops, got {}", counters.loro_ops);
-    assert_eq!(counters.marks_emitted, 0, "plain typing emits ZERO style ops (spec §9 — inheritance is Loro's job)");
+    assert_eq!(
+      counters.marks_emitted, 0,
+      "plain typing emits ZERO style ops (spec §9 — inheritance is Loro's job)"
+    );
     assert!(counters.patch_count <= 2, "insert patches O(1) paragraphs, got {}", counters.patch_count);
   }
 
@@ -203,7 +224,11 @@ mod tests {
     let counters = outcome.commit().counters;
     assert!(!counters.full_rebuild);
     // Marks bounded by the style-key count, never by run/paragraph counts.
-    assert!(counters.marks_emitted <= 8, "override marks are O(style keys), got {}", counters.marks_emitted);
+    assert!(
+      counters.marks_emitted <= 8,
+      "override marks are O(style keys), got {}",
+      counters.marks_emitted
+    );
     assert!(counters.loro_ops <= 12, "override insert stays O(1), got {}", counters.loro_ops);
   }
 
@@ -267,7 +292,15 @@ mod tests {
       .expect("marks commit");
     let counters = outcome.commit().counters;
     assert!(!counters.full_rebuild);
-    assert!(counters.patch_count <= 2, "one-paragraph restyle patches one paragraph, got {}", counters.patch_count);
-    assert!(counters.marks_emitted <= 8, "restyle emits O(style keys) marks, got {}", counters.marks_emitted);
+    assert!(
+      counters.patch_count <= 2,
+      "one-paragraph restyle patches one paragraph, got {}",
+      counters.patch_count
+    );
+    assert!(
+      counters.marks_emitted <= 8,
+      "restyle emits O(style keys) marks, got {}",
+      counters.marks_emitted
+    );
   }
 }

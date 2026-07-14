@@ -29,12 +29,14 @@ struct MetafileRenames {
 
 fn is_png_media_part(name: &str) -> bool {
   name.starts_with("word/media/")
-    && std::path::Path::new(name).extension().is_some_and(|extension| extension.eq_ignore_ascii_case("png"))
+    && std::path::Path::new(name)
+      .extension()
+      .is_some_and(|extension| extension.eq_ignore_ascii_case("png"))
 }
 
 fn metafile_renames(package: &[u8]) -> io::Result<MetafileRenames> {
-  let mut archive = ZipArchive::new(Cursor::new(package))
-    .map_err(|error| io::Error::other(format!("failed to read generated docx package: {error}")))?;
+  let mut archive =
+    ZipArchive::new(Cursor::new(package)).map_err(|error| io::Error::other(format!("failed to read generated docx package: {error}")))?;
   let mut renames = MetafileRenames::default();
   for index in 0..archive.len() {
     let mut entry = archive
@@ -64,7 +66,11 @@ fn metafile_renames(package: &[u8]) -> io::Result<MetafileRenames> {
 pub(super) fn write_recompressed_docx(path: &Path, package: Vec<u8>, side: &SideChannel) -> io::Result<()> {
   // §perf-heaven T8.8: metafile media parts get their real extension so EMF/WMF
   // images round-trip LOSSLESSLY instead of falling back to `[Picture N]` text.
-  let MetafileRenames { by_part: renames, needs_emf, needs_wmf } = metafile_renames(&package)?;
+  let MetafileRenames {
+    by_part: renames,
+    needs_emf,
+    needs_wmf,
+  } = metafile_renames(&package)?;
 
   let mut archive =
     ZipArchive::new(Cursor::new(package)).map_err(|error| io::Error::other(format!("failed to read generated docx package: {error}")))?;
@@ -146,7 +152,9 @@ fn rewrite_content_types(bytes: &[u8], needs_emf: bool, needs_wmf: bool) -> Vec<
   if inserts.is_empty() {
     return bytes.to_vec();
   }
-  xml.replacen("</Types>", &format!("{inserts}</Types>"), 1).into_bytes()
+  xml
+    .replacen("</Types>", &format!("{inserts}</Types>"), 1)
+    .into_bytes()
 }
 
 /// Rewrite relationship `Target`s for the renamed media parts (the rels are
@@ -187,7 +195,9 @@ fn inject_external_image_rels(bytes: &[u8], rels: &[(String, String)]) -> Vec<u8
   if inserts.is_empty() {
     return bytes.to_vec();
   }
-  xml.replacen("</Relationships>", &format!("{inserts}</Relationships>"), 1).into_bytes()
+  xml
+    .replacen("</Relationships>", &format!("{inserts}</Relationships>"), 1)
+    .into_bytes()
 }
 
 #[cfg(test)]
@@ -245,9 +255,17 @@ mod tests {
     let _ = std::fs::remove_file(&out);
 
     let mut archive = ZipArchive::new(Cursor::new(bytes)).expect("open out");
-    let names: Vec<String> = (0..archive.len()).map(|i| archive.by_index(i).unwrap().name().to_owned()).collect();
-    assert!(names.iter().any(|n| n == "word/media/image1.emf"), "metafile part not renamed to .emf: {names:?}");
-    assert!(!names.iter().any(|n| n == "word/media/image1.png"), "old .png media part still present: {names:?}");
+    let names: Vec<String> = (0..archive.len())
+      .map(|i| archive.by_index(i).unwrap().name().to_owned())
+      .collect();
+    assert!(
+      names.iter().any(|n| n == "word/media/image1.emf"),
+      "metafile part not renamed to .emf: {names:?}"
+    );
+    assert!(
+      !names.iter().any(|n| n == "word/media/image1.png"),
+      "old .png media part still present: {names:?}"
+    );
 
     let read = |archive: &mut ZipArchive<Cursor<Vec<u8>>>, name: &str| -> String {
       let mut entry = archive.by_name(name).unwrap();
@@ -255,7 +273,10 @@ mod tests {
       entry.read_to_string(&mut text).unwrap();
       text
     };
-    assert!(read(&mut archive, "[Content_Types].xml").contains(r#"Extension="emf""#), "emf content-type not declared");
+    assert!(
+      read(&mut archive, "[Content_Types].xml").contains(r#"Extension="emf""#),
+      "emf content-type not declared"
+    );
     let rels = read(&mut archive, "word/_rels/document.xml.rels");
     assert!(rels.contains("media/image1.emf"), "rel target not rewritten to .emf: {rels}");
     assert!(!rels.contains("media/image1.png"), "rel still points to .png: {rels}");
@@ -276,7 +297,12 @@ mod tests {
     let bytes = std::fs::read(&out).unwrap();
     let _ = std::fs::remove_file(&out);
     let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
-    let names: Vec<String> = (0..archive.len()).map(|i| archive.by_index(i).unwrap().name().to_owned()).collect();
-    assert!(names.iter().any(|n| n == "word/media/image1.png"), "png media renamed unexpectedly: {names:?}");
+    let names: Vec<String> = (0..archive.len())
+      .map(|i| archive.by_index(i).unwrap().name().to_owned())
+      .collect();
+    assert!(
+      names.iter().any(|n| n == "word/media/image1.png"),
+      "png media renamed unexpectedly: {names:?}"
+    );
   }
 }

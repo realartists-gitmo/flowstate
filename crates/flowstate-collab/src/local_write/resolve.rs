@@ -79,7 +79,11 @@ pub(crate) fn resolve_paragraph_position(
   // gate, but the identity check is cheap and a mismatch here would mean a
   // bookkeeping bug about to become a wrong-position op. Reject loudly.
   if projection.ids.paragraph_ids.get(paragraph_ix).copied() != Some(paragraph) {
-    tracing::error!(paragraph = paragraph.0, paragraph_ix, "projection index/id desync detected during resolution; rejecting intent");
+    tracing::error!(
+      paragraph = paragraph.0,
+      paragraph_ix,
+      "projection index/id desync detected during resolution; rejecting intent"
+    );
     return None;
   }
   let byte = clamp_byte_to_char_boundary(projection, paragraph_ix, byte_hint);
@@ -129,12 +133,7 @@ fn resolve_body_cursor(
 /// end, not a paragraph-relative position. Clamp such results into the last
 /// valid body position so a degraded cursor can never target the wrong end of
 /// a large document silently.
-fn clamp_degraded_cursor_position(
-  projection: &DocumentProjection,
-  index: &ProjectionRuntimeIndex,
-  cursor: &Cursor,
-  pos: usize,
-) -> usize {
+fn clamp_degraded_cursor_position(projection: &DocumentProjection, index: &ProjectionRuntimeIndex, cursor: &Cursor, pos: usize) -> usize {
   if cursor.id.is_some() {
     return pos;
   }

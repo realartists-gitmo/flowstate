@@ -95,7 +95,10 @@ struct FragmentQueue {
 
 impl FragmentQueue {
   fn new() -> Self {
-    FragmentQueue { state: Mutex::new((VecDeque::new(), false)), ready: Condvar::new() }
+    FragmentQueue {
+      state: Mutex::new((VecDeque::new(), false)),
+      ready: Condvar::new(),
+    }
   }
 
   fn push_batch(&self, fragments: &mut Vec<Fragment>) {
@@ -141,7 +144,9 @@ struct ScannedDocument {
 }
 
 fn parse_parallel(xml: &[u8]) -> Option<CT_Document> {
-  let workers = std::thread::available_parallelism().map_or(1, |n| n.get()).min(MAX_WORKERS);
+  let workers = std::thread::available_parallelism()
+    .map_or(1, |n| n.get())
+    .min(MAX_WORKERS);
   if workers < 2 {
     return None;
   }
@@ -187,7 +192,10 @@ fn parse_parallel(xml: &[u8]) -> Option<CT_Document> {
   }
   let content: Option<Vec<BodyContent>> = scanned.slots.into_iter().collect();
   Some(CT_Document {
-    body: CT_Body { content: content?, sect_pr: scanned.sect_pr },
+    body: CT_Body {
+      content: content?,
+      sect_pr: scanned.sect_pr,
+    },
     extra_namespaces: scanned.extra_namespaces,
     background_xml: scanned.background_xml,
   })
@@ -310,12 +318,16 @@ fn scan_body(reader: &mut Reader<&[u8]>, scanned: &mut ScannedDocument, queue: &
           scanned.sect_pr = Some(CT_SectPr::from_xml(reader)?);
         } else {
           queue.push_batch(&mut pending);
-          scanned.slots.push(Some(BodyContent::RawXml(capture_element(reader, &e)?)));
+          scanned
+            .slots
+            .push(Some(BodyContent::RawXml(capture_element(reader, &e)?)));
         }
       },
       Ok(Event::Empty(e)) => {
         if !matches_local_name(e.name().as_ref(), b"body") {
-          scanned.slots.push(Some(BodyContent::RawXml(capture_empty_element(&e)?)));
+          scanned
+            .slots
+            .push(Some(BodyContent::RawXml(capture_empty_element(&e)?)));
         }
       },
       Ok(Event::End(e)) if matches_local_name(e.name().as_ref(), b"body") => break,
@@ -367,9 +379,8 @@ mod tests {
         xml.push_str(r#"<w:bookmarkStart w:id="7" w:name="mark"/>"#);
       }
     }
-    xml.push_str(
-      r#"<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>"#,
-    );
+    xml
+      .push_str(r#"<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>"#);
     xml.push_str("</w:body></w:document>");
     xml.into_bytes()
   }
@@ -377,7 +388,11 @@ mod tests {
   #[test]
   fn parallel_parse_equals_sequential_on_synthetic_document() {
     let xml = synthetic_document_xml();
-    assert!(xml.len() >= MIN_FRAGMENT_PARSE_BYTES, "fixture must engage the parallel path ({} bytes)", xml.len());
+    assert!(
+      xml.len() >= MIN_FRAGMENT_PARSE_BYTES,
+      "fixture must engage the parallel path ({} bytes)",
+      xml.len()
+    );
     let sequential = CT_Document::from_xml(&xml).expect("sequential parse");
     let parallel = parse_parallel(&xml).expect("parallel path should engage on this fixture");
     assert!(parallel == sequential, "parallel CT_Document must equal the sequential parse");

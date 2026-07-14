@@ -39,10 +39,14 @@ fn share_dialog_reopen_replaces_previous(cx: &mut TestAppContext) {
   h.new_document(cx);
   h.update(cx, |ws, window, cx| ws.open_collaboration_dialog(window, cx));
   cx.run_until_parked();
-  let first = h.read(cx, |ws| ws.collaboration_dialog.clone()).expect("first dialog open");
+  let first = h
+    .read(cx, |ws| ws.collaboration_dialog.clone())
+    .expect("first dialog open");
   h.update(cx, |ws, window, cx| ws.open_join_collaboration_dialog(window, cx));
   cx.run_until_parked();
-  let second = h.read(cx, |ws| ws.collaboration_dialog.clone()).expect("second dialog open");
+  let second = h
+    .read(cx, |ws| ws.collaboration_dialog.clone())
+    .expect("second dialog open");
   assert_ne!(first.entity_id(), second.entity_id(), "reopen must build a fresh dialog");
 }
 

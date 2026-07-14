@@ -58,9 +58,7 @@ fn main() {
 
   // The content everything converges to: `ops` chars, a paragraph break every
   // 80 chars (realistic paragraph density).
-  let char_at = |op_ix: usize| -> char {
-    if op_ix % 80 == 79 { '\n' } else { (b'a' + (op_ix % 26) as u8) as char }
-  };
+  let char_at = |op_ix: usize| -> char { if op_ix % 80 == 79 { '\n' } else { (b'a' + (op_ix % 26) as u8) as char } };
 
   // --- fresh: one bulk insert ------------------------------------------------
   let fresh_start = Instant::now();
@@ -87,8 +85,7 @@ fn main() {
   let mut styled_final_frontiers = None;
   for styled in [false, true] {
     let build_start = Instant::now();
-    let doc = loro_schema::new_loro_document(if styled { "history-growth-styled" } else { "history-growth-typed" })
-      .expect("typed doc");
+    let doc = loro_schema::new_loro_document(if styled { "history-growth-styled" } else { "history-growth-typed" }).expect("typed doc");
     let text = loro_schema::body_text(&doc);
     let base = text.len_unicode();
     for op_ix in 0..ops {
@@ -109,9 +106,19 @@ fn main() {
     let export_ms = export_start.elapsed().as_secs_f64() * 1e3;
     if styled {
       styled_final_frontiers = Some((doc.state_frontiers(), doc));
-      legs.push(Leg { name: "typed-styled", snapshot, export_ms, build_ms });
+      legs.push(Leg {
+        name: "typed-styled",
+        snapshot,
+        export_ms,
+        build_ms,
+      });
     } else {
-      legs.push(Leg { name: "typed", snapshot, export_ms, build_ms });
+      legs.push(Leg {
+        name: "typed",
+        snapshot,
+        export_ms,
+        build_ms,
+      });
     }
   }
 
@@ -143,40 +150,42 @@ fn main() {
 }
 
 fn churn_legs(ops: usize, char_at: &dyn Fn(usize) -> char) {
-    let build_start = Instant::now();
-    let doc = loro_schema::new_loro_document("history-growth-churn").expect("churn doc");
-    let text = loro_schema::body_text(&doc);
-    let base = text.len_unicode();
-    let mut churn_ops = 0usize;
-    while churn_ops < ops * 5 {
-      // Type an 80-char paragraph...
-      let cursor = text.len_unicode();
-      for op_ix in 0..80 {
-        text
-          .insert(cursor + op_ix, &char_at(churn_ops + op_ix).to_string())
-          .expect("churn insert");
-        doc.commit();
-      }
-      churn_ops += 80;
-      // ...then delete 64 of its chars 4 paragraphs back (rewrite churn),
-      // keeping the doc length roughly steady at ~5x80 visible chars.
-      let len = text.len_unicode();
-      if len > base + 400 {
-        let del_start = base + ((churn_ops / 80) * 13) % (len - base - 80);
-        text.delete(del_start, 64).expect("churn delete");
-        doc.commit();
-        churn_ops += 1;
-      }
+  let build_start = Instant::now();
+  let doc = loro_schema::new_loro_document("history-growth-churn").expect("churn doc");
+  let text = loro_schema::body_text(&doc);
+  let base = text.len_unicode();
+  let mut churn_ops = 0usize;
+  while churn_ops < ops * 5 {
+    // Type an 80-char paragraph...
+    let cursor = text.len_unicode();
+    for op_ix in 0..80 {
+      text
+        .insert(cursor + op_ix, &char_at(churn_ops + op_ix).to_string())
+        .expect("churn insert");
+      doc.commit();
     }
-    let build_ms = build_start.elapsed().as_secs_f64() * 1e3;
-    let export_start = Instant::now();
-    let snapshot = doc.export(ExportMode::Snapshot).expect("churn export");
-    let export_ms = export_start.elapsed().as_secs_f64() * 1e3;
-    let churn_text = loro_schema::body_text(&doc).to_string();
-    let frontiers = doc.state_frontiers();
-    let shallow_start = Instant::now();
-    let churn_shallow = doc.export(ExportMode::shallow_snapshot(&frontiers)).expect("churn shallow export");
-    let churn_shallow_export = shallow_start.elapsed().as_secs_f64() * 1e3;
-    measure_decode("churn", &snapshot, build_ms, export_ms, &churn_text);
-    measure_decode("churn-shallow", &churn_shallow, 0.0, churn_shallow_export, &churn_text);
+    churn_ops += 80;
+    // ...then delete 64 of its chars 4 paragraphs back (rewrite churn),
+    // keeping the doc length roughly steady at ~5x80 visible chars.
+    let len = text.len_unicode();
+    if len > base + 400 {
+      let del_start = base + ((churn_ops / 80) * 13) % (len - base - 80);
+      text.delete(del_start, 64).expect("churn delete");
+      doc.commit();
+      churn_ops += 1;
+    }
+  }
+  let build_ms = build_start.elapsed().as_secs_f64() * 1e3;
+  let export_start = Instant::now();
+  let snapshot = doc.export(ExportMode::Snapshot).expect("churn export");
+  let export_ms = export_start.elapsed().as_secs_f64() * 1e3;
+  let churn_text = loro_schema::body_text(&doc).to_string();
+  let frontiers = doc.state_frontiers();
+  let shallow_start = Instant::now();
+  let churn_shallow = doc
+    .export(ExportMode::shallow_snapshot(&frontiers))
+    .expect("churn shallow export");
+  let churn_shallow_export = shallow_start.elapsed().as_secs_f64() * 1e3;
+  measure_decode("churn", &snapshot, build_ms, export_ms, &churn_text);
+  measure_decode("churn-shallow", &churn_shallow, 0.0, churn_shallow_export, &churn_text);
 }

@@ -24,13 +24,12 @@ pub(crate) mod resolve;
 #[cfg(test)]
 mod tests;
 
-pub use gate::{GateHolder, GateHoldRecord, GateMetrics, GatePoisonedError, WriteGate};
+pub use gate::{GateHoldRecord, GateHolder, GateMetrics, GatePoisonedError, WriteGate};
 pub use handle::{LocalDocHandle, LocalWriteConfig};
 pub use intents::{
   CursorEndpoint, DeleteBlocksIntent, DeleteRangeIntent, FragmentBlock, InsertObjectIntent, InsertRichFragmentIntent, InsertTextIntent,
-  IntentCounters, JoinParagraphsIntent, LocalCommit, LocalIntent, LocalWriteOutcome, MoveBlockIntent, ProjectionReplace,
+  IntentCounters, JoinParagraphsIntent, LocalCommit, LocalIntent, LocalWriteAuthority, LocalWriteOutcome, MoveBlockIntent, ProjectionReplace,
   ReplaceEquationSourceRangeIntent, ReplaceImageAltTextIntent, ReplaceImageCaptionIntent, ReplaceMatch, ReplaceMatchesIntent,
-  ReplaceObjectIntent, SelectionSnapshot,
-  LocalWriteAuthority, SetImageLayoutIntent, SetMarksIntent, SetParagraphStyleIntent, SetParagraphStylesIntent, SplitParagraphIntent, TableIntent,
-  TextAnchor, UndoOutcome, WriteRejected,
+  ReplaceObjectIntent, SelectionSnapshot, SetImageLayoutIntent, SetMarksIntent, SetParagraphStyleIntent, SetParagraphStylesIntent,
+  SplitParagraphIntent, TableIntent, TextAnchor, UndoOutcome, WriteRejected,
 };

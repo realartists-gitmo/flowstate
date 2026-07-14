@@ -35,12 +35,17 @@ fn interleaved_split_import_cost(splits: usize) -> Result<std::time::Duration> {
   // Forked peer: same history, then `splits` mid-fragment inserts.
   let fork_bytes = {
     let guard = gate.lock(GateHolder::ExportUpdates).expect("gate healthy");
-    guard.doc().export(loro::ExportMode::Snapshot).expect("snapshot export")
+    guard
+      .doc()
+      .export(loro::ExportMode::Snapshot)
+      .expect("snapshot export")
   };
   let peer = CrdtRuntime::new_empty("patch-guard-peer")?;
   let (peer_handle, peer_gate) = LocalDocHandle::new(peer, LocalWriteConfig::default());
   {
-    let mut guard = peer_gate.lock(GateHolder::ImportChunk).expect("gate healthy");
+    let mut guard = peer_gate
+      .lock(GateHolder::ImportChunk)
+      .expect("gate healthy");
     guard.import_remote_update(&fork_bytes)?
   };
   // Bidirectional base sync: a `new_empty` peer mints its OWN sentinel init
@@ -49,14 +54,21 @@ fn interleaved_split_import_cost(splits: usize) -> Result<std::time::Duration> {
   // one-way-exchange trap from the P3-deep validation).
   {
     let peer_init = {
-      let guard = peer_gate.lock(GateHolder::ExportUpdates).expect("gate healthy");
-      guard.doc().export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("peer init export")
+      let guard = peer_gate
+        .lock(GateHolder::ExportUpdates)
+        .expect("gate healthy");
+      guard
+        .doc()
+        .export(loro::ExportMode::updates(&loro::VersionVector::default()))
+        .expect("peer init export")
     };
     let mut guard = gate.lock(GateHolder::ImportChunk).expect("gate healthy");
     guard.import_remote_update(&peer_init)?
   };
   let peer_vv_before = {
-    let guard = peer_gate.lock(GateHolder::ExportUpdates).expect("gate healthy");
+    let guard = peer_gate
+      .lock(GateHolder::ExportUpdates)
+      .expect("gate healthy");
     guard.doc().state_vv()
   };
   let peer_projection = peer_handle.projection()?;
@@ -76,8 +88,13 @@ fn interleaved_split_import_cost(splits: usize) -> Result<std::time::Duration> {
       .map_err(|error| anyhow::anyhow!("split insert {split_ix} rejected: {error:?}"))?;
   }
   let divergence = {
-    let guard = peer_gate.lock(GateHolder::ExportUpdates).expect("gate healthy");
-    guard.doc().export(loro::ExportMode::updates(&peer_vv_before)).expect("delta export")
+    let guard = peer_gate
+      .lock(GateHolder::ExportUpdates)
+      .expect("gate healthy");
+    guard
+      .doc()
+      .export(loro::ExportMode::updates(&peer_vv_before))
+      .expect("delta export")
   };
 
   let start = Instant::now();
@@ -93,7 +110,9 @@ fn interleaved_split_import_cost(splits: usize) -> Result<std::time::Duration> {
     flowstate_document::loro_schema::body_text(guard.doc()).to_string()
   };
   let remote = {
-    let guard = peer_gate.lock(GateHolder::ExportUpdates).expect("gate healthy");
+    let guard = peer_gate
+      .lock(GateHolder::ExportUpdates)
+      .expect("gate healthy");
     flowstate_document::loro_schema::body_text(guard.doc()).to_string()
   };
   assert_eq!(local, remote, "interleaved-split import diverged at splits={splits}");
@@ -140,10 +159,16 @@ fn styled_divergence_cost(edits: usize) -> (std::time::Duration, std::time::Dura
   let import_start = Instant::now();
   b.import(&blob).expect("reconnect import");
   let import_time = import_start.elapsed();
-  a.import(&b.export(loro::ExportMode::updates(&a.oplog_vv())).expect("b export"))
-    .expect("a import");
-  b.import(&a.export(loro::ExportMode::updates(&b.oplog_vv())).expect("a export"))
-    .expect("b import");
+  a.import(
+    &b.export(loro::ExportMode::updates(&a.oplog_vv()))
+      .expect("b export"),
+  )
+  .expect("a import");
+  b.import(
+    &a.export(loro::ExportMode::updates(&b.oplog_vv()))
+      .expect("a export"),
+  )
+  .expect("b import");
   assert_eq!(ta.to_string(), b.get_text("t").to_string(), "styled divergence failed to converge");
   (edit_time, import_time)
 }
@@ -189,81 +214,91 @@ mod tests {
 
   #[test]
   fn interleaved_split_checkout_scales_subquadratically() -> Result<()> {
-  // Warm once so allocator/lazy-init noise doesn't pollute the small run.
-  let _ = interleaved_split_import_cost(16)?;
-  let small = interleaved_split_import_cost(128)?;
-  let large = interleaved_split_import_cost(512)?;
-  // Size ratio 4x. Patched (amortized-linear) checkout ⇒ time ratio ≈ 4;
-  // the unpatched quadratic ⇒ ≈ 16. The bound sits between with margin for
-  // noise; on a loaded machine the ABSOLUTE floor also protects against a
-  // degenerate tiny `small` inflating the ratio.
-  let ratio = large.as_secs_f64() / small.as_secs_f64().max(0.0005);
-  assert!(
-    ratio < 10.0,
-    "interleaved-split import scaled {ratio:.1}x for a 4x input (small={small:?}, large={large:?}) — a vendored checkout patch (loro-vendor-patch #4–#7) has regressed"
-  );
-  Ok(())
-}
+    // Warm once so allocator/lazy-init noise doesn't pollute the small run.
+    let _ = interleaved_split_import_cost(16)?;
+    let small = interleaved_split_import_cost(128)?;
+    let large = interleaved_split_import_cost(512)?;
+    // Size ratio 4x. Patched (amortized-linear) checkout ⇒ time ratio ≈ 4;
+    // the unpatched quadratic ⇒ ≈ 16. The bound sits between with margin for
+    // noise; on a loaded machine the ABSOLUTE floor also protects against a
+    // degenerate tiny `small` inflating the ratio.
+    let ratio = large.as_secs_f64() / small.as_secs_f64().max(0.0005);
+    assert!(
+      ratio < 10.0,
+      "interleaved-split import scaled {ratio:.1}x for a 4x input (small={small:?}, large={large:?}) — a vendored checkout patch (loro-vendor-patch #4–#7) has regressed"
+    );
+    Ok(())
+  }
 
-/// §bimodal-undo fix (vendor patch #23 + the vendored generic-btree
-/// `next_leaf_matching`): two peers each PREPEND `n` chars concurrently, then
-/// a checkout crosses from one tip to the other. The LCA is the ROOT, so the
-/// tracker rebuild feeds branch A, RETREATS it wholesale (marks every A
-/// element FUTURE), then feeds branch B — whose inserts land at position 0
-/// with the entire retreated A block to their right. Upstream's linear
-/// `origin_right` scan made every such insert O(block) ⇒ O(n²) per rebuild:
-/// the 80-195s dirty-history undo regime, load/merge-boundary dependent. The
-/// probe + `non_future_num` cache jump makes it O(n log n).
-fn concurrent_prepend_checkout_cost(n: usize) -> (std::time::Duration, String) {
-  let a = loro::LoroDoc::new();
-  a.set_peer_id(1).expect("peer id");
-  let ta = a.get_text("t");
-  for _ in 0..n {
-    ta.insert(0, "a").expect("A prepend");
-    a.commit();
-  }
-  let b = loro::LoroDoc::new();
-  b.set_peer_id(2).expect("peer id");
-  let tb = b.get_text("t");
-  for _ in 0..n {
-    tb.insert(0, "b").expect("B prepend");
-    b.commit();
-  }
-  let a_tip = a.state_frontiers();
-  let b_tip = b.state_frontiers();
-  a.import(&b.export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("B export"))
+  /// §bimodal-undo fix (vendor patch #23 + the vendored generic-btree
+  /// `next_leaf_matching`): two peers each PREPEND `n` chars concurrently, then
+  /// a checkout crosses from one tip to the other. The LCA is the ROOT, so the
+  /// tracker rebuild feeds branch A, RETREATS it wholesale (marks every A
+  /// element FUTURE), then feeds branch B — whose inserts land at position 0
+  /// with the entire retreated A block to their right. Upstream's linear
+  /// `origin_right` scan made every such insert O(block) ⇒ O(n²) per rebuild:
+  /// the 80-195s dirty-history undo regime, load/merge-boundary dependent. The
+  /// probe + `non_future_num` cache jump makes it O(n log n).
+  fn concurrent_prepend_checkout_cost(n: usize) -> (std::time::Duration, String) {
+    let a = loro::LoroDoc::new();
+    a.set_peer_id(1).expect("peer id");
+    let ta = a.get_text("t");
+    for _ in 0..n {
+      ta.insert(0, "a").expect("A prepend");
+      a.commit();
+    }
+    let b = loro::LoroDoc::new();
+    b.set_peer_id(2).expect("peer id");
+    let tb = b.get_text("t");
+    for _ in 0..n {
+      tb.insert(0, "b").expect("B prepend");
+      b.commit();
+    }
+    let a_tip = a.state_frontiers();
+    let b_tip = b.state_frontiers();
+    a.import(
+      &b.export(loro::ExportMode::updates(&loro::VersionVector::default()))
+        .expect("B export"),
+    )
     .expect("A imports B");
-  let merged = {
-    // Reference merged text from an independent replica (convergence oracle).
-    let c = loro::LoroDoc::new();
-    c.import(&a.export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("A export"))
+    let merged = {
+      // Reference merged text from an independent replica (convergence oracle).
+      let c = loro::LoroDoc::new();
+      c.import(
+        &a.export(loro::ExportMode::updates(&loro::VersionVector::default()))
+          .expect("A export"),
+      )
       .expect("C imports merged");
-    c.get_text("t").to_string()
-  };
-  a.checkout(&a_tip).expect("checkout A tip");
-  let t = Instant::now();
-  // The timed leg: A-tip → B-tip crosses the root LCA — the tracker feeds
-  // both branches and the second faces the first as one giant future run.
-  a.checkout(&b_tip).expect("checkout B tip");
-  let cost = t.elapsed();
-  a.checkout_to_latest();
-  assert_eq!(a.get_text("t").to_string(), merged, "checkout round-trip must not corrupt the merged text");
-  (cost, merged)
-}
+      c.get_text("t").to_string()
+    };
+    a.checkout(&a_tip).expect("checkout A tip");
+    let t = Instant::now();
+    // The timed leg: A-tip → B-tip crosses the root LCA — the tracker feeds
+    // both branches and the second faces the first as one giant future run.
+    a.checkout(&b_tip).expect("checkout B tip");
+    let cost = t.elapsed();
+    a.checkout_to_latest();
+    assert_eq!(
+      a.get_text("t").to_string(),
+      merged,
+      "checkout round-trip must not corrupt the merged text"
+    );
+    (cost, merged)
+  }
 
-#[test]
-fn concurrent_prepend_checkout_scales_subquadratically() {
-  let _ = concurrent_prepend_checkout_cost(256); // warm
-  let (small, small_text) = concurrent_prepend_checkout_cost(4_000);
-  let (large, large_text) = concurrent_prepend_checkout_cost(12_000);
-  assert_eq!(small_text.len(), 8_000);
-  assert_eq!(large_text.len(), 24_000);
-  // Size ratio 3x. Near-linear ⇒ time ratio ≈ 3-4; the unpatched quadratic
-  // ⇒ ≥ 9 (measured far higher — the future-run Vec collection compounds).
-  let ratio = large.as_secs_f64() / small.as_secs_f64().max(0.0005);
-  assert!(
-    ratio < 8.0,
-    "concurrent-prepend checkout scaled {ratio:.1}x for a 3x input (small={small:?}, large={large:?}) — the future-run probe/jump (vendor patch #23, vendored generic-btree next_leaf_matching) has regressed"
-  );
-}
+  #[test]
+  fn concurrent_prepend_checkout_scales_subquadratically() {
+    let _ = concurrent_prepend_checkout_cost(256); // warm
+    let (small, small_text) = concurrent_prepend_checkout_cost(4_000);
+    let (large, large_text) = concurrent_prepend_checkout_cost(12_000);
+    assert_eq!(small_text.len(), 8_000);
+    assert_eq!(large_text.len(), 24_000);
+    // Size ratio 3x. Near-linear ⇒ time ratio ≈ 3-4; the unpatched quadratic
+    // ⇒ ≥ 9 (measured far higher — the future-run Vec collection compounds).
+    let ratio = large.as_secs_f64() / small.as_secs_f64().max(0.0005);
+    assert!(
+      ratio < 8.0,
+      "concurrent-prepend checkout scaled {ratio:.1}x for a 3x input (small={small:?}, large={large:?}) — the future-run probe/jump (vendor patch #23, vendored generic-btree next_leaf_matching) has regressed"
+    );
+  }
 }

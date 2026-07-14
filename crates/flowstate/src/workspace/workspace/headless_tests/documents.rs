@@ -21,9 +21,13 @@ fn new_document_activates_panel(cx: &mut TestAppContext) {
 fn second_document_takes_focus_and_activation_switches_back(cx: &mut TestAppContext) {
   let h = support::open_workspace(cx);
   h.new_document(cx);
-  let first = h.read(cx, |ws| ws.active_document_id).expect("first panel active");
+  let first = h
+    .read(cx, |ws| ws.active_document_id)
+    .expect("first panel active");
   h.new_document(cx);
-  let second = h.read(cx, |ws| ws.active_document_id).expect("second panel active");
+  let second = h
+    .read(cx, |ws| ws.active_document_id)
+    .expect("second panel active");
   assert_ne!(first, second, "new document must become active");
 
   h.update(cx, |ws, _, cx| {

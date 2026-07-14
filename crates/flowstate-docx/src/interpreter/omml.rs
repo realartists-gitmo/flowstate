@@ -84,7 +84,7 @@ fn parse_tree(bytes: &[u8]) -> Option<Node> {
       },
       Ok(Event::Text(event)) => {
         if let Some(top) = stack.last_mut()
-          && let Ok(text) = event.unescape()
+          && let Ok(text) = event.xml10_content()
         {
           top.text.push_str(&text);
         }

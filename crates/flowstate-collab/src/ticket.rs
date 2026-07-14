@@ -30,7 +30,9 @@ impl SessionTicket {
       admission,
       tag: [0; 32],
     };
-    ticket.tag = ticket.expected_tag().expect("ticket metadata serialization should not fail");
+    ticket.tag = ticket
+      .expected_tag()
+      .expect("ticket metadata serialization should not fail");
     ticket
   }
 
@@ -48,8 +50,8 @@ impl SessionTicket {
   }
 
   fn expected_tag(&self) -> Result<[u8; 32]> {
-    let payload = postcard::to_stdvec(&(self.version, self.session, &self.bootstrap, &self.title))
-      .context("encoding collaboration invite metadata")?;
+    let payload =
+      postcard::to_stdvec(&(self.version, self.session, &self.bootstrap, &self.title)).context("encoding collaboration invite metadata")?;
     Ok(self.admission.tag(&payload))
   }
 
@@ -80,8 +82,7 @@ impl Ticket for SessionTicket {
   }
 
   fn decode_bytes(bytes: &[u8]) -> Result<Self, ParseError> {
-    let ticket: Self = postcard::from_bytes(bytes)
-      .map_err(|_| ParseError::verification_failed("invalid collaboration ticket payload"))?;
+    let ticket: Self = postcard::from_bytes(bytes).map_err(|_| ParseError::verification_failed("invalid collaboration ticket payload"))?;
     ticket
       .verify_for_join()
       .map_err(|_| ParseError::verification_failed("invalid collaboration ticket authentication"))?;
@@ -109,14 +110,26 @@ mod tests {
   fn ticket_round_trips_and_authenticates_metadata() {
     let encoded = ticket().encode_text();
     let decoded = SessionTicket::decode_text(&encoded).expect("ticket should decode");
-    decoded.verify_for_join().expect("ticket should authenticate");
+    decoded
+      .verify_for_join()
+      .expect("ticket should authenticate");
   }
 
   #[test]
   fn deep_link_and_raw_ticket_are_both_accepted() {
     let ticket = ticket();
-    assert_eq!(SessionTicket::decode_text(&ticket.encode_text()).unwrap().session, ticket.session);
-    assert_eq!(SessionTicket::decode_text(&ticket.encode_invite_link()).unwrap().session, ticket.session);
+    assert_eq!(
+      SessionTicket::decode_text(&ticket.encode_text())
+        .unwrap()
+        .session,
+      ticket.session
+    );
+    assert_eq!(
+      SessionTicket::decode_text(&ticket.encode_invite_link())
+        .unwrap()
+        .session,
+      ticket.session
+    );
   }
 
   #[test]

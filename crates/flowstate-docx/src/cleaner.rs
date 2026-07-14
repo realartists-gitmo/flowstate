@@ -352,7 +352,10 @@ fn normalize_numeric_attr(original_tag: &str, normalized_tag: &mut Option<String
   let Ok(number) = value.parse::<f64>() else {
     return; // non-numeric (e.g. "auto") — leave for the enum/value normalizers
   };
-  #[allow(clippy::cast_possible_truncation, reason = "twip/half-point attributes are small; a rounded fractional value cannot overflow i64")]
+  #[allow(
+    clippy::cast_possible_truncation,
+    reason = "twip/half-point attributes are small; a rounded fractional value cannot overflow i64"
+  )]
   let rounded = number.round() as i64;
   let mut normalized = String::with_capacity(tag.len());
   normalized.push_str(&tag[..value_start]);

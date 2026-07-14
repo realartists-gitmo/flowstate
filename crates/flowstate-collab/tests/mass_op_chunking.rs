@@ -48,7 +48,9 @@ mod tests {
     let peer = LoroDoc::new();
     peer.import(&baseline).expect("baseline import");
     for (ix, update) in updates.iter().enumerate() {
-      let status = peer.import(update).unwrap_or_else(|error| panic!("slice {ix} import failed: {error}"));
+      let status = peer
+        .import(update)
+        .unwrap_or_else(|error| panic!("slice {ix} import failed: {error}"));
       assert!(status.pending.is_none(), "slice {ix} must be causally self-contained: {status:?}");
     }
     assert_eq!(body_text(&peer).to_string(), body_text(runtime.doc()).to_string());
@@ -103,13 +105,13 @@ mod tests {
     .expect("receiver runtime");
     let mut slices_with_projection = 0;
     for update in &updates {
-      let batches = receiver.import_remote_updates(&[update.as_slice()]).expect("import");
-      let has_projection = batches.iter().flatten().any(|event| {
-        matches!(
-          event,
-          RuntimeEvent::ProjectionUpdated { .. } | RuntimeEvent::ProjectionPatched { .. }
-        )
-      });
+      let batches = receiver
+        .import_remote_updates(&[update.as_slice()])
+        .expect("import");
+      let has_projection = batches
+        .iter()
+        .flatten()
+        .any(|event| matches!(event, RuntimeEvent::ProjectionUpdated { .. } | RuntimeEvent::ProjectionPatched { .. }));
       if has_projection {
         slices_with_projection += 1;
       }

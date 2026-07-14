@@ -107,7 +107,9 @@ impl SideChannel {
       sentinel: sentinel.clone(),
       xml,
     });
-    self.linked_image_rels.push((relationship_id, url.to_string()));
+    self
+      .linked_image_rels
+      .push((relationship_id, url.to_string()));
     sentinel
   }
 
@@ -341,7 +343,10 @@ mod tests {
   fn linked_image_injection_replaces_enclosing_run_with_drawing() {
     let mut side = SideChannel::default();
     let sentinel = side.push_linked_image("https://example.com/a.png?x=1&y=2", Some("alt <text>"), 914_400, 685_800);
-    assert_eq!(side.linked_image_rels(), &[("rIdFsLink1".to_string(), "https://example.com/a.png?x=1&y=2".to_string())]);
+    assert_eq!(
+      side.linked_image_rels(),
+      &[("rIdFsLink1".to_string(), "https://example.com/a.png?x=1&y=2".to_string())]
+    );
     let xml = format!("<w:p><w:r><w:rPr/><w:t xml:space=\"preserve\">{sentinel}</w:t></w:r></w:p>").into_bytes();
     let out = String::from_utf8(rewrite_document_xml(xml, &side)).expect("utf8");
     assert!(out.contains("r:link=\"rIdFsLink1\""), "blip link missing: {out}");

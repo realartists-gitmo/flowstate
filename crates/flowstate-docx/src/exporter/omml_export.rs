@@ -520,27 +520,15 @@ fn render_node(node: &Node) -> String {
     Node::Text(value) => format!("<m:r><m:t>{}</m:t></m:r>", escape_text(value)),
     Node::Ident(value) => format!("<m:r><m:t>{}</m:t></m:r>", escape_text(value)),
     Node::Group(inner) => render_nodes(inner),
-    Node::Sub(base, sub) => format!(
-      "<m:sSub><m:e>{}</m:e><m:sub>{}</m:sub></m:sSub>",
-      render_node(base),
-      render_nodes(sub)
-    ),
-    Node::Sup(base, sup) => format!(
-      "<m:sSup><m:e>{}</m:e><m:sup>{}</m:sup></m:sSup>",
-      render_node(base),
-      render_nodes(sup)
-    ),
+    Node::Sub(base, sub) => format!("<m:sSub><m:e>{}</m:e><m:sub>{}</m:sub></m:sSub>", render_node(base), render_nodes(sub)),
+    Node::Sup(base, sup) => format!("<m:sSup><m:e>{}</m:e><m:sup>{}</m:sup></m:sSup>", render_node(base), render_nodes(sup)),
     Node::SubSup(base, sub, sup) => format!(
       "<m:sSubSup><m:e>{}</m:e><m:sub>{}</m:sub><m:sup>{}</m:sup></m:sSubSup>",
       render_node(base),
       render_nodes(sub),
       render_nodes(sup)
     ),
-    Node::Frac(num, den) => format!(
-      "<m:f><m:num>{}</m:num><m:den>{}</m:den></m:f>",
-      render_nodes(num),
-      render_nodes(den)
-    ),
+    Node::Frac(num, den) => format!("<m:f><m:num>{}</m:num><m:den>{}</m:den></m:f>", render_nodes(num), render_nodes(den)),
     Node::Sqrt(Some(degree), radicand) => format!(
       "<m:rad><m:deg>{}</m:deg><m:e>{}</m:e></m:rad>",
       render_nodes(degree),
@@ -621,7 +609,10 @@ fn escape_attr(value: &str) -> String {
 }
 
 fn is_spacing(name: &str) -> bool {
-  matches!(name, "," | ";" | ":" | "!" | " " | "quad" | "qquad" | "thinspace" | "medspace" | "thickspace")
+  matches!(
+    name,
+    "," | ";" | ":" | "!" | " " | "quad" | "qquad" | "thinspace" | "medspace" | "thickspace"
+  )
 }
 
 fn literal_command(name: &str) -> Option<&'static str> {

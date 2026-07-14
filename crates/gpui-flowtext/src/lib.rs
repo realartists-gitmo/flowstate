@@ -1,20 +1,20 @@
 mod api;
 pub mod block_tree;
-pub mod local_intents;
 mod collaboration;
 mod demo;
 mod document;
 mod edit_ops;
+pub mod local_intents;
 mod persistence;
 mod rich_text;
 
 pub use api::*;
 pub use block_tree::{BlockTree, Summary};
 pub use collaboration::*;
-pub use local_intents::*;
 pub use demo::*;
 pub use document::*;
 pub use edit_ops::*;
+pub use local_intents::*;
 pub use persistence::*;
 pub use rich_text::*;
 

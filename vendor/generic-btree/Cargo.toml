@@ -102,3 +102,7 @@ version = "1.0.93"
 debug = 2
 
 [workspace]
+
+[package.metadata.cargo-machete]
+# Vendored crate: unused-in-our-build deps kept to minimize diff vs upstream.
+ignored = ["proc-macro2"]

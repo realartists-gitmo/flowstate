@@ -50,7 +50,10 @@ static GLOBAL: FlowstateAllocator = FlowstateAllocator;
 #[hotpath::main(allocator = FlowstateAllocator)]
 fn main() {
   let mut args = std::env::args().skip(1);
-  let Some(path) = args.next().or_else(|| std::env::var("FLOWSTATE_BENCH_FIXTURE").ok()) else {
+  let Some(path) = args
+    .next()
+    .or_else(|| std::env::var("FLOWSTATE_BENCH_FIXTURE").ok())
+  else {
     eprintln!(
       "usage: hotpath_bench <FILE.docx | synthetic:<kind>:<paragraphs>> [ITERS]   (or set FLOWSTATE_BENCH_FIXTURE)\n  \
        synthetic kinds: equations (default), mixed, text — e.g. synthetic:equations:9000"
@@ -88,7 +91,11 @@ fn main() {
     doc.import(&snapshot).expect("reimport");
     let projection = flowstate_document::document_from_loro(&doc).expect("cold project");
     if iteration == 0 {
-      eprintln!("  projection: {} paragraphs, {} blocks", projection.paragraphs.len(), projection.blocks.len());
+      eprintln!(
+        "  projection: {} paragraphs, {} blocks",
+        projection.paragraphs.len(),
+        projection.blocks.len()
+      );
     }
   }
   eprintln!("hotpath_bench: done — tables below.");

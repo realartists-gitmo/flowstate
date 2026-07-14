@@ -18,25 +18,25 @@
 
 use anyhow::{Context as _, Result};
 use flowstate_document::{
-  BlockId, DocumentProjection, MARK_DIRECT_UNDERLINE, MARK_HIGHLIGHT_STYLE, MARK_PARAGRAPH_STYLE, MARK_RUN_SEMANTIC_STYLE,
-  MARK_STRIKETHROUGH, OBJECT_REPLACEMENT, ParagraphId, ProjectionPatchBatch, loro_schema::body_text,
+  BlockId, DocumentProjection, MARK_DIRECT_UNDERLINE, MARK_HIGHLIGHT_STYLE, MARK_PARAGRAPH_STYLE, MARK_RUN_SEMANTIC_STYLE, MARK_STRIKETHROUGH,
+  OBJECT_REPLACEMENT, ParagraphId, ProjectionPatchBatch, loro_schema::body_text,
 };
 use gpui_flowtext::{DocumentOffset, SelectionAffinity, VisualGravity};
 use loro::LoroDoc;
 use uuid::Uuid;
 
 use super::intents::{
-  CursorEndpoint, FragmentBlock, IntentCounters, LocalCommit, LocalIntent, LocalWriteOutcome, ProjectionReplace, SelectionSnapshot,
-  TableIntent, WriteRejected,
+  CursorEndpoint, FragmentBlock, IntentCounters, LocalCommit, LocalIntent, LocalWriteOutcome, ProjectionReplace, SelectionSnapshot, TableIntent,
+  WriteRejected,
 };
 use super::patch_synthesis::{PatchPlan, synthesize_patches};
 use super::resolve::{ResolvedTextPosition, resolve_text_anchor, resolve_text_range};
 use crate::crdt_runtime::{
   CrdtRuntime, cursor_for_boundary, delete_projection_object_block, delete_projection_paragraph_metadata, insert_projection_object_block,
   join_projection_paragraphs, mark_run_styles, move_projection_object_block, paragraph_boundary_loro_unicode_index, paragraph_style_value,
-  prune_orphaned_body_object_blocks, repair_paragraph_metadata_after_stable_split,
-  replace_projection_equation_source_range, replace_projection_image_alt_text, replace_projection_image_caption,
-  replace_projection_object_block, sentinel_protected_delete_range, set_projection_image_layout, table_ops,
+  prune_orphaned_body_object_blocks, repair_paragraph_metadata_after_stable_split, replace_projection_equation_source_range,
+  replace_projection_image_alt_text, replace_projection_image_caption, replace_projection_object_block, sentinel_protected_delete_range,
+  set_projection_image_layout, table_ops,
 };
 
 /// The fully-resolved execution plan for one intent, produced before any
@@ -367,7 +367,9 @@ fn compensate_failed_intent(
   // The inverse ops sit in the renewed pending txn — commit them under the
   // repair origin.
   core.doc().set_next_commit_origin("repair");
-  core.doc().set_next_commit_message("intent-compensation-inverse");
+  core
+    .doc()
+    .set_next_commit_message("intent-compensation-inverse");
   core.doc().commit();
 
   // One atomic publish payload covering partial + inverse: the export starts
@@ -564,7 +566,10 @@ fn resolve_intent(core: &CrdtRuntime, intent: &LocalIntent) -> Result<ResolvedPl
       if targets.is_empty() {
         return Err(WriteRejected::EmptyIntent);
       }
-      let indices: Vec<usize> = targets.iter().map(|(_, paragraph_ix)| *paragraph_ix).collect();
+      let indices: Vec<usize> = targets
+        .iter()
+        .map(|(_, paragraph_ix)| *paragraph_ix)
+        .collect();
       let boundaries = crate::crdt_runtime::paragraph_boundaries_loro_unicode_indices(doc, projection, &indices);
       Ok(ResolvedPlan::SetParagraphStyles {
         targets: targets
@@ -617,7 +622,9 @@ fn resolve_intent(core: &CrdtRuntime, intent: &LocalIntent) -> Result<ResolvedPl
         .block_index(move_block.block)
         .ok_or(WriteRejected::UnresolvedBlock(move_block.block))?;
       let to_ix = match move_block.before {
-        Some(before) => index.block_index(before).ok_or(WriteRejected::UnresolvedBlock(before))?,
+        Some(before) => index
+          .block_index(before)
+          .ok_or(WriteRejected::UnresolvedBlock(before))?,
         None => projection.blocks.len(),
       };
       Ok(ResolvedPlan::MoveBlock {
@@ -651,10 +658,12 @@ fn resolve_intent(core: &CrdtRuntime, intent: &LocalIntent) -> Result<ResolvedPl
       let mut distinct_slots: std::collections::HashMap<flowstate_document::ParagraphId, usize> = std::collections::HashMap::new();
       for entry in &replace.matches {
         if entry.start.cursor.is_none() && entry.end.cursor.is_none() && entry.start.paragraph == entry.end.paragraph {
-          distinct_slots.entry(entry.start.paragraph).or_insert_with(|| {
-            distinct.push(entry.start.paragraph);
-            distinct.len() - 1
-          });
+          distinct_slots
+            .entry(entry.start.paragraph)
+            .or_insert_with(|| {
+              distinct.push(entry.start.paragraph);
+              distinct.len() - 1
+            });
         }
       }
       let starts = crate::crdt_runtime::paragraph_body_starts_in_loro(doc, &distinct);
@@ -692,7 +701,11 @@ fn resolve_intent(core: &CrdtRuntime, intent: &LocalIntent) -> Result<ResolvedPl
           let text = flowstate_document::paragraph_text(projection, paragraph_ix);
           let start_byte = super::resolve::clamp_byte_to_char_boundary(projection, paragraph_ix, entry.start.byte_hint);
           let end_byte = super::resolve::clamp_byte_to_char_boundary(projection, paragraph_ix, entry.end.byte_hint);
-          let (start_byte, end_byte) = if start_byte <= end_byte { (start_byte, end_byte) } else { (end_byte, start_byte) };
+          let (start_byte, end_byte) = if start_byte <= end_byte {
+            (start_byte, end_byte)
+          } else {
+            (end_byte, start_byte)
+          };
           let start_unicode = paragraph_start + text[..start_byte].chars().count();
           let end_unicode = start_unicode + text[start_byte..end_byte].chars().count();
           (
@@ -726,10 +739,12 @@ fn resolve_intent(core: &CrdtRuntime, intent: &LocalIntent) -> Result<ResolvedPl
       // match is the user-visible winner), then flip to descending for
       // back-to-front application.
       matches.sort_by_key(|entry| entry.0.body_unicode);
-      let mut kept: Vec<(ResolvedTextPosition, ResolvedTextPosition, Option<flowstate_document::RunStyles>)> =
-        Vec::with_capacity(matches.len());
+      let mut kept: Vec<(ResolvedTextPosition, ResolvedTextPosition, Option<flowstate_document::RunStyles>)> = Vec::with_capacity(matches.len());
       for entry in matches {
-        if kept.last().is_none_or(|prev| entry.0.body_unicode >= prev.1.body_unicode) {
+        if kept
+          .last()
+          .is_none_or(|prev| entry.0.body_unicode >= prev.1.body_unicode)
+        {
           kept.push(entry);
         }
       }
@@ -753,21 +768,27 @@ fn resolve_intent(core: &CrdtRuntime, intent: &LocalIntent) -> Result<ResolvedPl
       })
     },
     LocalIntent::ReplaceImageAltText(img) => {
-      index.block_index(img.image).ok_or(WriteRejected::UnresolvedBlock(img.image))?;
+      index
+        .block_index(img.image)
+        .ok_or(WriteRejected::UnresolvedBlock(img.image))?;
       Ok(ResolvedPlan::ReplaceImageAltText {
         image: img.image,
         text: img.text.clone(),
       })
     },
     LocalIntent::ReplaceImageCaption(img) => {
-      index.block_index(img.image).ok_or(WriteRejected::UnresolvedBlock(img.image))?;
+      index
+        .block_index(img.image)
+        .ok_or(WriteRejected::UnresolvedBlock(img.image))?;
       Ok(ResolvedPlan::ReplaceImageCaption {
         image: img.image,
         caption: img.caption.clone(),
       })
     },
     LocalIntent::SetImageLayout(img) => {
-      index.block_index(img.image).ok_or(WriteRejected::UnresolvedBlock(img.image))?;
+      index
+        .block_index(img.image)
+        .ok_or(WriteRejected::UnresolvedBlock(img.image))?;
       Ok(ResolvedPlan::SetImageLayout {
         image: img.image,
         sizing: img.sizing.clone(),
@@ -792,7 +813,9 @@ fn resolve_table_intent(core: &CrdtRuntime, intent: &TableIntent) -> Result<Reso
     | TableIntent::SetCellSpan { table, .. }
     | TableIntent::SetColumnWidth { table, .. } => table,
   };
-  let table_ix = index.block_index(table).ok_or(WriteRejected::UnresolvedBlock(table))?;
+  let table_ix = index
+    .block_index(table)
+    .ok_or(WriteRejected::UnresolvedBlock(table))?;
   let table_block = match projection.blocks.get(table_ix) {
     Some(flowstate_document::Block::Table(block)) => block,
     _ => {
@@ -917,7 +940,10 @@ fn contiguous_boundary_span(targets: &[(ParagraphId, usize, usize)]) -> Option<(
   if targets.len() < 2 {
     return None;
   }
-  let mut indices: Vec<usize> = targets.iter().map(|(_, paragraph_ix, _)| *paragraph_ix).collect();
+  let mut indices: Vec<usize> = targets
+    .iter()
+    .map(|(_, paragraph_ix, _)| *paragraph_ix)
+    .collect();
   indices.sort_unstable();
   if indices.windows(2).any(|pair| pair[1] != pair[0] + 1) {
     return None; // a gap → a range mark would restyle a non-target paragraph.
@@ -976,7 +1002,9 @@ fn execute_plan(core: &mut CrdtRuntime, plan: &ResolvedPlan) -> Result<MutationS
         let object_in_range = {
           let positions = core.projection_index_ref().object_positions();
           let from = positions.partition_point(|&pos| pos < clamped_start);
-          positions.get(from).is_some_and(|&pos| pos < clamped_start + clamped_len)
+          positions
+            .get(from)
+            .is_some_and(|&pos| pos < clamped_start + clamped_len)
         };
         if object_in_range {
           hotpath::measure_block!("delete_range_prune_objects", {
@@ -990,7 +1018,9 @@ fn execute_plan(core: &mut CrdtRuntime, plan: &ResolvedPlan) -> Result<MutationS
           for paragraph_ix in (start.paragraph_ix + 1)..=end.paragraph_ix {
             let (Some(paragraph_id), Some(block_id)) = (
               projection.ids.paragraph_ids.get(paragraph_ix).copied(),
-              rows.get(paragraph_ix).and_then(|&ix| projection.ids.block_ids.get(ix).copied()),
+              rows
+                .get(paragraph_ix)
+                .and_then(|&ix| projection.ids.block_ids.get(ix).copied()),
             ) else {
               continue;
             };
@@ -1008,9 +1038,15 @@ fn execute_plan(core: &mut CrdtRuntime, plan: &ResolvedPlan) -> Result<MutationS
       new_block,
     } => {
       let body = body_text(&doc);
-      body.insert(at.body_unicode, "\n").context("inserting split boundary")?;
       body
-        .mark(at.body_unicode..at.body_unicode + 1, MARK_PARAGRAPH_STYLE, paragraph_style_value(*inherited_style))
+        .insert(at.body_unicode, "\n")
+        .context("inserting split boundary")?;
+      body
+        .mark(
+          at.body_unicode..at.body_unicode + 1,
+          MARK_PARAGRAPH_STYLE,
+          paragraph_style_value(*inherited_style),
+        )
         .context("marking split paragraph style")?;
       // Sentinel hygiene (spec §9): expand-`After` run marks ending exactly at
       // the split point absorb the inserted newline; strip run-style keys from
@@ -1156,7 +1192,9 @@ fn execute_plan(core: &mut CrdtRuntime, plan: &ResolvedPlan) -> Result<MutationS
       summary.containers_touched = 1;
       // First entry = LAST match in document order; the caret lands after its
       // replacement (find/replace UX contract).
-      summary.caret_body_unicode = matches.first().map(|(start, _, _)| start.body_unicode + replacement_chars);
+      summary.caret_body_unicode = matches
+        .first()
+        .map(|(start, _, _)| start.body_unicode + replacement_chars);
     },
   }
   Ok(summary)
@@ -1176,12 +1214,7 @@ thread_local! {
 /// Compound fragment insertion: paragraphs splice into body text (with
 /// boundaries + styles + marks), objects insert at their positions. One gate
 /// hold, one commit; a failure anywhere trips I-10 compensation in the caller.
-fn execute_rich_fragment(
-  doc: &LoroDoc,
-  projection: &DocumentProjection,
-  at: &ResolvedTextPosition,
-  blocks: &[FragmentBlock],
-) -> Result<u32> {
+fn execute_rich_fragment(doc: &LoroDoc, projection: &DocumentProjection, at: &ResolvedTextPosition, blocks: &[FragmentBlock]) -> Result<u32> {
   let body = body_text(doc);
   let mut containers: u32 = 1;
   let mut cursor_unicode = at.body_unicode;
@@ -1197,9 +1230,15 @@ fn execute_rich_fragment(
       FragmentBlock::Paragraph(paragraph) => {
         if !first {
           // New paragraph boundary before this fragment paragraph.
-          body.insert(cursor_unicode, "\n").context("inserting fragment paragraph boundary")?;
           body
-            .mark(cursor_unicode..cursor_unicode + 1, MARK_PARAGRAPH_STYLE, paragraph_style_value(paragraph.style))
+            .insert(cursor_unicode, "\n")
+            .context("inserting fragment paragraph boundary")?;
+          body
+            .mark(
+              cursor_unicode..cursor_unicode + 1,
+              MARK_PARAGRAPH_STYLE,
+              paragraph_style_value(paragraph.style),
+            )
             .context("marking fragment paragraph style")?;
           unmark_run_style_keys(&body, cursor_unicode..cursor_unicode + 1)?;
           let new_paragraph = ParagraphId(Uuid::new_v4().as_u128());
@@ -1225,8 +1264,7 @@ fn execute_rich_fragment(
       FragmentBlock::Object(input) => {
         let new_block = BlockId(Uuid::new_v4().as_u128());
         // Objects sit between paragraphs; land it at the current position.
-        crate::crdt_runtime::insert_input_object_block(doc, cursor_unicode, new_block, input)
-          .context("inserting fragment object block")?;
+        crate::crdt_runtime::insert_input_object_block(doc, cursor_unicode, new_block, input).context("inserting fragment object block")?;
         containers = containers.saturating_add(2);
         cursor_unicode += 1;
         first = false;
@@ -1310,4 +1348,3 @@ fn selection_after(core: &CrdtRuntime, summary: &MutationSummary) -> Option<Sele
     head: endpoint,
   })
 }
-

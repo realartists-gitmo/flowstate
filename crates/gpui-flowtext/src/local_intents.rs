@@ -14,9 +14,9 @@
 use std::ops::Range;
 
 use crate::{
-  BlockId, ColumnId, DocumentOffset, DocumentProjection, EditorSelection, InputBlock, InputBlockAlignment, InputImageSizing,
-  InputParagraph, InputTableCell, InputTableColumnWidth, InputTableRow, ParagraphId, ParagraphStyle, ProjectionPatchBatch, RowId,
-  RunStyles, SelectionAffinity, VisualGravity,
+  BlockId, ColumnId, DocumentOffset, DocumentProjection, EditorSelection, InputBlock, InputBlockAlignment, InputImageSizing, InputParagraph,
+  InputTableCell, InputTableColumnWidth, InputTableRow, ParagraphId, ParagraphStyle, ProjectionPatchBatch, RowId, RunStyles, SelectionAffinity,
+  VisualGravity,
 };
 
 /// A position in body text addressed by stable identity.
@@ -408,10 +408,16 @@ impl std::fmt::Display for WriteRejected {
       Self::StructureViolation(reason) => write!(f, "intent violates document structure: {reason}"),
       Self::GatePoisoned => f.write_str("write gate poisoned; reload from persisted state"),
       Self::CompensatedFailure { class, diagnostic } => {
-        write!(f, "intent '{class}' failed mid-apply and was compensated back to pre-intent state: {diagnostic}")
+        write!(
+          f,
+          "intent '{class}' failed mid-apply and was compensated back to pre-intent state: {diagnostic}"
+        )
       },
       Self::CompensationFailed { class, diagnostic } => {
-        write!(f, "intent '{class}' failed mid-apply AND compensation failed — core must be reloaded: {diagnostic}")
+        write!(
+          f,
+          "intent '{class}' failed mid-apply AND compensation failed — core must be reloaded: {diagnostic}"
+        )
       },
     }
   }
@@ -537,17 +543,12 @@ pub trait LocalWriteAuthority: Send + Sync {
   fn canonical_projection(&self) -> Result<DocumentProjection, WriteRejected>;
   /// Re-anchor a selection across a remote projection patch using CRDT cursors:
   /// `selection` and `before` are the editor's PRE-patch selection and projection,
-  /// `base_frontier` its pre-patch frontier. Returns the equivalent selection in
+  /// `editor_frontier` its pre-patch frontier. Returns the equivalent selection in
   /// the current canonical state (so a concurrent insert/delete before the caret
   /// repositions it), or `None` when it can't be resolved — the editor then falls
   /// back to clamping. Default `None` keeps non-collab authorities trivial.
-  fn rebase_selection(
-    &self,
-    selection: &EditorSelection,
-    before: &DocumentProjection,
-    base_frontier: &[u8],
-  ) -> Option<EditorSelection> {
-    let _ = (selection, before, base_frontier);
+  fn rebase_selection(&self, selection: &EditorSelection, before: &DocumentProjection, editor_frontier: &[u8]) -> Option<EditorSelection> {
+    let _ = (selection, before, editor_frontier);
     None
   }
   /// FAST-path companion to [`Self::rebase_selection`]: encode the selection's

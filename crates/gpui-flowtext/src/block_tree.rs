@@ -79,16 +79,24 @@ struct Node {
   summary: Summary,
 }
 
-#[allow(clippy::ref_option, reason = "the &Option form threads cleanly through the recursive treap walk; per-call .as_ref() adds noise without benefit")]
+#[allow(
+  clippy::ref_option,
+  reason = "the &Option form threads cleanly through the recursive treap walk; per-call .as_ref() adds noise without benefit"
+)]
 #[must_use]
 fn size(node: &Option<Arc<Node>>) -> usize {
   node.as_ref().map_or(0, |node| node.size)
 }
 
-#[allow(clippy::ref_option, reason = "the &Option form threads cleanly through the recursive treap walk; per-call .as_ref() adds noise without benefit")]
+#[allow(
+  clippy::ref_option,
+  reason = "the &Option form threads cleanly through the recursive treap walk; per-call .as_ref() adds noise without benefit"
+)]
 #[must_use]
 fn summary(node: &Option<Arc<Node>>) -> Summary {
-  node.as_ref().map_or(Summary::default(), |node| node.summary)
+  node
+    .as_ref()
+    .map_or(Summary::default(), |node| node.summary)
 }
 
 /// Well-distributed priorities from a global counter via splitmix64 — no
@@ -97,7 +105,9 @@ fn summary(node: &Option<Arc<Node>>) -> Summary {
 fn next_priority() -> u64 {
   use std::sync::atomic::{AtomicU64, Ordering};
   static COUNTER: AtomicU64 = AtomicU64::new(0);
-  let mut z = COUNTER.fetch_add(0x9E37_79B9_7F4A_7C15, Ordering::Relaxed).wrapping_add(0x9E37_79B9_7F4A_7C15);
+  let mut z = COUNTER
+    .fetch_add(0x9E37_79B9_7F4A_7C15, Ordering::Relaxed)
+    .wrapping_add(0x9E37_79B9_7F4A_7C15);
   z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
   z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
   z ^ (z >> 31)
@@ -111,7 +121,9 @@ fn node(value: Arc<Block>, priority: u64, left: Option<Arc<Node>>, right: Option
   let value_summary = Summary::of_block(&value);
   Arc::new(Node {
     size: 1 + size(&left) + size(&right),
-    summary: summary(&left).combine(value_summary).combine(summary(&right)),
+    summary: summary(&left)
+      .combine(value_summary)
+      .combine(summary(&right)),
     priority,
     value,
     left,
@@ -142,7 +154,10 @@ fn merge(left: Option<Arc<Node>>, right: Option<Arc<Node>>) -> Option<Arc<Node>>
   }
 }
 
-#[allow(clippy::ref_option, reason = "the &Option form threads cleanly through the recursive treap walk; per-call .as_ref() adds noise without benefit")]
+#[allow(
+  clippy::ref_option,
+  reason = "the &Option form threads cleanly through the recursive treap walk; per-call .as_ref() adds noise without benefit"
+)]
 /// Split a subtree so the left part holds the first `k` elements. `O(log N)`.
 fn split(root: &Option<Arc<Node>>, k: usize) -> (Option<Arc<Node>>, Option<Arc<Node>>) {
   let Some(current) = root else {
@@ -161,7 +176,10 @@ fn split(root: &Option<Arc<Node>>, k: usize) -> (Option<Arc<Node>>, Option<Arc<N
 /// Sum of `para_text_bytes` over the first `k` PARAGRAPH blocks of the subtree
 /// (objects are skipped — they hold 0 paragraphs). Descends by paragraph-rank
 /// using the cached `paragraphs` counts. `O(log N)`.
-#[allow(clippy::ref_option, reason = "recursive treap walk over &Option children, consistent with split/size/summary")]
+#[allow(
+  clippy::ref_option,
+  reason = "recursive treap walk over &Option children, consistent with split/size/summary"
+)]
 fn prefix_para_text_bytes(node: &Option<Arc<Node>>, k: usize) -> usize {
   let Some(current) = node else {
     return 0;
@@ -187,7 +205,9 @@ fn prefix_para_text_bytes(node: &Option<Arc<Node>>, k: usize) -> usize {
 /// Recompute a node's cached `summary` from its (possibly just-mutated)
 /// children and value. `size` is unaffected — these maps never restructure.
 fn refresh_summary(node: &mut Node) {
-  node.summary = summary(&node.left).combine(Summary::of_block(&node.value)).combine(summary(&node.right));
+  node.summary = summary(&node.left)
+    .combine(Summary::of_block(&node.value))
+    .combine(summary(&node.right));
 }
 
 /// COW descent to `index`, applying `edit` to that block in place. `make_mut`
@@ -245,7 +265,6 @@ impl BlockTree {
     self.root.is_none()
   }
 
-
   /// The block at `index`, or `None` if out of range. `O(log N)`.
   #[must_use]
   pub fn get(&self, index: usize) -> Option<Arc<Block>> {
@@ -291,8 +310,6 @@ impl BlockTree {
       }
     }
   }
-
-
 
   /// The number of paragraph blocks in the tree. `O(1)`.
   #[must_use]
@@ -462,7 +479,6 @@ impl BlockTree {
     }
   }
 
-
   /// Replace blocks `range` with `replacement`, returning a NEW tree that
   /// shares every node outside the cut. `O((log N) + |replacement|)`.
   #[must_use]
@@ -561,7 +577,9 @@ mod tests {
           assert!(node.priority >= child.priority, "treap heap order violated");
         }
         assert_eq!(node.size, 1 + size(&node.left) + size(&node.right), "size annotation stale");
-        let recomputed = summary(&node.left).combine(Summary::of_block(&node.value)).combine(summary(&node.right));
+        let recomputed = summary(&node.left)
+          .combine(Summary::of_block(&node.value))
+          .combine(summary(&node.right));
         assert_eq!(node.summary, recomputed, "summary annotation stale");
         1 + assert_invariants(&node.left).max(assert_invariants(&node.right))
       },
@@ -631,14 +649,7 @@ mod tests {
 
   #[test]
   fn paragraph_view_accessors_skip_objects_and_match_reference() {
-    let mixed = vec![
-      paragraph(4),
-      image_block(),
-      paragraph(0),
-      paragraph(6),
-      image_block(),
-      paragraph(2),
-    ];
+    let mixed = vec![paragraph(4), image_block(), paragraph(0), paragraph(6), image_block(), paragraph(2)];
     let tree = BlockTree::from_blocks(mixed.clone());
     let reference: Vec<&Paragraph> = mixed
       .iter()
@@ -662,21 +673,22 @@ mod tests {
     let tree = BlockTree::from_blocks(plain.clone());
     assert_eq!(tree.paragraph_count(), 5);
     for p in 0..=5 {
-      assert_eq!(tree.paragraph_start(p), reference_paragraph_start(&plain, p), "plain paragraph_start[{p}]");
+      assert_eq!(
+        tree.paragraph_start(p),
+        reference_paragraph_start(&plain, p),
+        "plain paragraph_start[{p}]"
+      );
     }
     // Object-interleaved doc: paragraph rank must skip images.
-    let mixed = vec![
-      paragraph(4),
-      image_block(),
-      paragraph(0),
-      paragraph(6),
-      image_block(),
-      paragraph(2),
-    ];
+    let mixed = vec![paragraph(4), image_block(), paragraph(0), paragraph(6), image_block(), paragraph(2)];
     let tree = BlockTree::from_blocks(mixed.clone());
     assert_eq!(tree.paragraph_count(), 4);
     for p in 0..=4 {
-      assert_eq!(tree.paragraph_start(p), reference_paragraph_start(&mixed, p), "mixed paragraph_start[{p}]");
+      assert_eq!(
+        tree.paragraph_start(p),
+        reference_paragraph_start(&mixed, p),
+        "mixed paragraph_start[{p}]"
+      );
     }
     // Splices keep the paragraph monoid correct.
     let spliced = tree.splice(1..3, blocks(&[9, 9]));
@@ -686,7 +698,11 @@ mod tests {
       v
     };
     for p in 0..=spliced.paragraph_count() {
-      assert_eq!(spliced.paragraph_start(p), reference_paragraph_start(&spliced_ref, p), "spliced paragraph_start[{p}]");
+      assert_eq!(
+        spliced.paragraph_start(p),
+        reference_paragraph_start(&spliced_ref, p),
+        "spliced paragraph_start[{p}]"
+      );
     }
   }
 
@@ -788,7 +804,11 @@ mod tests {
         let start = rng.below(len + 1);
         let end = (start + rng.below(len - start + 1)).min(len);
         let insert_count = rng.below(4);
-        let repl = blocks(&(0..insert_count).map(|i| 1 + ((step + i) % 7)).collect::<Vec<_>>());
+        let repl = blocks(
+          &(0..insert_count)
+            .map(|i| 1 + ((step + i) % 7))
+            .collect::<Vec<_>>(),
+        );
 
         reference.splice(start..end, repl.clone());
         tree = tree.splice(start..end, repl);
@@ -801,13 +821,20 @@ mod tests {
         // (§act-ten A9.5: the block-space `bytes` monoid was removed — dead
         // outside the tree, maintained on every splice; `paragraph_start` is
         // the surviving load-bearing offset space).
-        let paragraph_count = reference.iter().filter(|block| matches!(block, Block::Paragraph(_))).count();
+        let paragraph_count = reference
+          .iter()
+          .filter(|block| matches!(block, Block::Paragraph(_)))
+          .count();
         let mut cum = 0usize;
         let mut paragraph_rank = 0usize;
         for block in &reference {
           if let Block::Paragraph(paragraph) = block {
             let expected = cum + paragraph_rank.min(paragraph_count.saturating_sub(1));
-            assert_eq!(tree.paragraph_start(paragraph_rank), expected, "seed {seed} step {step}: paragraph_start[{paragraph_rank}]");
+            assert_eq!(
+              tree.paragraph_start(paragraph_rank),
+              expected,
+              "seed {seed} step {step}: paragraph_start[{paragraph_rank}]"
+            );
             cum += paragraph_runs_len(paragraph);
             paragraph_rank += 1;
           }

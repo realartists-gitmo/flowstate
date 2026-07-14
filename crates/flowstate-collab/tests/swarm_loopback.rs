@@ -7,8 +7,7 @@ use async_channel::Receiver;
 use flowstate_collab::{
   DIRECT_ALPN, SessionAdmission, SessionId,
   net::{
-    NetEvent, PublishPayload,
-    auth,
+    NetEvent, PublishPayload, auth,
     direct::{self, DirectProto, DirectServeRequest, DirectServeState, DirectSessionHandler},
     swarm::SwarmHandle,
   },
@@ -94,7 +93,10 @@ async fn swarm_loopback_net_subset() -> Result<()> {
   let mut c = Peer::spawn(lookup.clone()).await?;
   let admission = SessionAdmission::generate();
   for peer in [&a, &b, &c] {
-    peer.direct_state.auth().configure_session(session, admission.clone());
+    peer
+      .direct_state
+      .auth()
+      .configure_session(session, admission.clone());
   }
   auth::install_local_admission(session, admission.clone());
 

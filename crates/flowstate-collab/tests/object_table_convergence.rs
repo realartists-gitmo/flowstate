@@ -30,10 +30,10 @@ mod tests {
     TableIntent, TextAnchor, WriteGate, WriteRejected,
   };
   use flowstate_document::{
-    AssetId, Block, BlockId, CellId, ColumnId, DocumentProjection, InputBlock, InputBlockAlignment, InputEquationBlock,
-    InputEquationDisplay, InputEquationSyntax, InputImageBlock, InputImageSizing, InputParagraph, InputRun, InputTableBlock,
-    InputTableCell, InputTableCellBlock, InputTableColumn, InputTableColumnWidth, InputTableRow, InputTableStyle, ParagraphStyle, RowId,
-    RunSemanticStyle, RunStyles, TableBlock, TableCell, TableCellBlock, document_from_loro, paragraph_text, paragraph_text_len,
+    AssetId, Block, BlockId, CellId, ColumnId, DocumentProjection, InputBlock, InputBlockAlignment, InputEquationBlock, InputEquationDisplay,
+    InputEquationSyntax, InputImageBlock, InputImageSizing, InputParagraph, InputRun, InputTableBlock, InputTableCell, InputTableCellBlock,
+    InputTableColumn, InputTableColumnWidth, InputTableRow, InputTableStyle, ParagraphStyle, RowId, RunSemanticStyle, RunStyles, TableBlock,
+    TableCell, TableCellBlock, document_from_loro, paragraph_text, paragraph_text_len,
   };
   use uuid::Uuid;
 
@@ -88,7 +88,10 @@ mod tests {
 
     fn export_updates_since(&self, vv: &loro::VersionVector) -> Vec<u8> {
       let guard = self.gate.lock(GateHolder::ExportUpdates).expect("gate");
-      guard.doc().export(loro::ExportMode::updates(vv)).expect("export")
+      guard
+        .doc()
+        .export(loro::ExportMode::updates(vv))
+        .expect("export")
     }
 
     fn state_vv(&self) -> loro::VersionVector {
@@ -187,7 +190,11 @@ mod tests {
     }
     for (row_ix, (left_row, right_row)) in left.rows.iter().zip(&right.rows).enumerate() {
       if left_row.cells.len() != right_row.cells.len() {
-        return Err(format!("table row {row_ix} cell count {} != {}", left_row.cells.len(), right_row.cells.len()));
+        return Err(format!(
+          "table row {row_ix} cell count {} != {}",
+          left_row.cells.len(),
+          right_row.cells.len()
+        ));
       }
       for (col_ix, (left_cell, right_cell)) in left_row.cells.iter().zip(&right_row.cells).enumerate() {
         if (left_cell.row_id, left_cell.column_id) != (right_cell.row_id, right_cell.column_id) {
@@ -250,7 +257,11 @@ mod tests {
     }
     for ix in 0..left.paragraphs.len() {
       if paragraph_text(left, ix) != paragraph_text(right, ix) {
-        return Err(format!("paragraph[{ix}] text {:?} != {:?}", paragraph_text(left, ix), paragraph_text(right, ix)));
+        return Err(format!(
+          "paragraph[{ix}] text {:?} != {:?}",
+          paragraph_text(left, ix),
+          paragraph_text(right, ix)
+        ));
       }
       if left.paragraphs[ix].style != right.paragraphs[ix].style {
         return Err(format!(
@@ -261,7 +272,10 @@ mod tests {
         ));
       }
       if left.paragraphs[ix].runs != right.paragraphs[ix].runs {
-        return Err(format!("paragraph[{ix}] runs differ: {:?} != {:?}", left.paragraphs[ix].runs, right.paragraphs[ix].runs));
+        return Err(format!(
+          "paragraph[{ix}] runs differ: {:?} != {:?}",
+          left.paragraphs[ix].runs, right.paragraphs[ix].runs
+        ));
       }
     }
     if left.ids.paragraph_ids != right.ids.paragraph_ids {
@@ -369,14 +383,19 @@ mod tests {
     let row_id = RowId(Uuid::new_v4().as_u128());
     InputTableRow {
       id: row_id,
-      cells: columns.iter().map(|column| table_cell_input(row_id, *column, text)).collect(),
+      cells: columns
+        .iter()
+        .map(|column| table_cell_input(row_id, *column, text))
+        .collect(),
     }
   }
 
   /// A `rows`x`columns` table input with uuid-minted durable ids and per-cell
   /// coordinate text (`r{r}c{c}`), the old `table_fixture` in miniature.
   fn table_input(rows: usize, columns: usize) -> InputBlock {
-    let column_ids: Vec<ColumnId> = (0..columns).map(|_| ColumnId(Uuid::new_v4().as_u128())).collect();
+    let column_ids: Vec<ColumnId> = (0..columns)
+      .map(|_| ColumnId(Uuid::new_v4().as_u128()))
+      .collect();
     let input_rows: Vec<InputTableRow> = (0..rows)
       .map(|r| {
         let row_id = RowId(Uuid::new_v4().as_u128());
@@ -404,10 +423,14 @@ mod tests {
   }
 
   fn first_table(projection: &DocumentProjection) -> Option<(BlockId, TableBlock)> {
-    projection.blocks.iter().enumerate().find_map(|(ix, block)| match block {
-      Block::Table(table) => Some((projection.ids.block_ids[ix], table.clone())),
-      _ => None,
-    })
+    projection
+      .blocks
+      .iter()
+      .enumerate()
+      .find_map(|(ix, block)| match block {
+        Block::Table(table) => Some((projection.ids.block_ids[ix], table.clone())),
+        _ => None,
+      })
   }
 
   fn object_block_indices(projection: &DocumentProjection) -> Vec<usize> {
@@ -528,7 +551,11 @@ mod tests {
         .handle
         .split_paragraph(SplitParagraphIntent {
           at: TextAnchor::new(paragraph, byte),
-          inherited_style: if rng.below(2) == 0 { ParagraphStyle::Normal } else { ParagraphStyle::Custom(1) },
+          inherited_style: if rng.below(2) == 0 {
+            ParagraphStyle::Normal
+          } else {
+            ParagraphStyle::Custom(1)
+          },
         })
         .map(|_| ()),
       6 => {
@@ -560,7 +587,11 @@ mod tests {
         .handle
         .set_paragraph_style(SetParagraphStyleIntent {
           paragraph,
-          style: if rng.below(2) == 0 { ParagraphStyle::Normal } else { ParagraphStyle::Custom((rng.below(3) + 1) as u8) },
+          style: if rng.below(2) == 0 {
+            ParagraphStyle::Normal
+          } else {
+            ParagraphStyle::Custom((rng.below(3) + 1) as u8)
+          },
         })
         .map(|_| ()),
     }
@@ -639,7 +670,9 @@ mod tests {
           .map(|_| ())
       },
       5 => {
-        let Some(&image_ix) = images.get(rng.below(images.len().max(1))) else { return Ok(()) };
+        let Some(&image_ix) = images.get(rng.below(images.len().max(1))) else {
+          return Ok(());
+        };
         let image = projection.ids.block_ids[image_ix];
         match rng.below(3) {
           0 => peer
@@ -678,7 +711,9 @@ mod tests {
         }
       },
       6 => {
-        let Some(&equation_ix) = equations.get(rng.below(equations.len().max(1))) else { return Ok(()) };
+        let Some(&equation_ix) = equations.get(rng.below(equations.len().max(1))) else {
+          return Ok(());
+        };
         peer
           .handle
           .replace_equation_source_range(ReplaceEquationSourceRangeIntent {
@@ -834,7 +869,9 @@ mod tests {
 
   fn run_fuzz(seed: u64, peers_n: usize, rounds: usize, ops_per_round: usize, seeder: Seeder, generator: IntentGenerator) {
     let mut rng = Rng::new(seed);
-    let mut peers: Vec<Peer> = (0..peers_n).map(|_| Peer::new("structural fuzz", peers_n)).collect();
+    let mut peers: Vec<Peer> = (0..peers_n)
+      .map(|_| Peer::new("structural fuzz", peers_n))
+      .collect();
     // Converge the mergeable empty seeds, build the fixture on peer 0 through
     // the intent API, and converge again so every peer shares the identities.
     sync_all(&mut peers);
@@ -853,8 +890,18 @@ mod tests {
           let fresh = peers[peer_ix].fresh_projection();
           eprintln!(
             "  after step {step}: maintained={:?} fresh={:?}",
-            maintained.ids.paragraph_ids.iter().map(|id| id.0 % 100000).collect::<Vec<_>>(),
-            fresh.ids.paragraph_ids.iter().map(|id| id.0 % 100000).collect::<Vec<_>>(),
+            maintained
+              .ids
+              .paragraph_ids
+              .iter()
+              .map(|id| id.0 % 100000)
+              .collect::<Vec<_>>(),
+            fresh
+              .ids
+              .paragraph_ids
+              .iter()
+              .map(|id| id.0 % 100000)
+              .collect::<Vec<_>>(),
           );
           if let Err(reason) = projections_agree(&maintained, &fresh) {
             let fresh_again = peers[peer_ix].fresh_projection();
@@ -902,9 +949,18 @@ mod tests {
   #[test]
   #[ignore = "long-horizon soak — run via `heaven.sh soak`"]
   fn object_table_fuzz_soak() {
-    let seeds: u64 = std::env::var("FUZZ_SOAK_SEEDS").ok().and_then(|v| v.parse().ok()).unwrap_or(500);
-    let rounds: usize = std::env::var("FUZZ_SOAK_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
-    let ops: usize = std::env::var("FUZZ_SOAK_OPS").ok().and_then(|v| v.parse().ok()).unwrap_or(12);
+    let seeds: u64 = std::env::var("FUZZ_SOAK_SEEDS")
+      .ok()
+      .and_then(|v| v.parse().ok())
+      .unwrap_or(500);
+    let rounds: usize = std::env::var("FUZZ_SOAK_ROUNDS")
+      .ok()
+      .and_then(|v| v.parse().ok())
+      .unwrap_or(8);
+    let ops: usize = std::env::var("FUZZ_SOAK_OPS")
+      .ok()
+      .and_then(|v| v.parse().ok())
+      .unwrap_or(12);
     for seed in 1..=seeds {
       let peers = 2 + (seed % 2) as usize; // 2–3 peers
       let mixed = seed.wrapping_mul(0xD1B5_4A32_D192_ED03);
@@ -943,7 +999,14 @@ mod tests {
     table
       .rows
       .iter()
-      .map(|row| row.cells.iter().map(cell_text).collect::<Vec<_>>().join("|"))
+      .map(|row| {
+        row
+          .cells
+          .iter()
+          .map(cell_text)
+          .collect::<Vec<_>>()
+          .join("|")
+      })
       .collect()
   }
 
@@ -1130,7 +1193,11 @@ mod tests {
     assert_materializer_equivalence(&peers, "concurrent same-paragraph edits");
 
     let projection = peers[0].projection();
-    assert_eq!(paragraph_text(&projection, 0), "A>hello world<B", "both concurrent inserts must survive the merge");
+    assert_eq!(
+      paragraph_text(&projection, 0),
+      "A>hello world<B",
+      "both concurrent inserts must survive the merge"
+    );
     let style = projection.paragraphs[0].style;
     assert!(
       matches!(style, ParagraphStyle::Custom(2) | ParagraphStyle::Custom(3)),
