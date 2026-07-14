@@ -1,33 +1,29 @@
 # Flowstate
-The performant, narrow text editor for debaters.
+The performant, multiplayer word processor for debaters.
 
-# Building
-To build Flowstate, you need to have [Cargo](https://doc.rust-lang.org/cargo/) installed.
+# Installation
+Flowstate is in early alpha. To build Flowstate, you need to have [Cargo](https://doc.rust-lang.org/cargo/) installed. You also need to enable nightly rust; we use it for compiler optimizations. You can do this by running `rustup override set nightly`.
 Run `cargo run --package flowstate --release` to build and run.
 
-# Logging
-Flowstate writes a daily-rotated log file (`flowstate.log`) to its data directory.
-By default it logs **only `error`-level events** so it stays quiet; raise the
-verbosity with the environment variables below.
-
-| Variable | Values | Effect |
-|---|---|---|
-| `FLOWSTATE_LOG_LEVEL` | `error` \| `warn` \| `info` \| `debug` \| `trace` | Sets the level for Flowstate's own crates (`flowstate`, `flowstate_collab`, `gpui_flowtext`); dependencies stay at `error`. Simplest knob. |
-| `FLOWSTATE_LOG` | an [`EnvFilter`](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html) directive | Full control, including dependency crates, e.g. `flowstate_collab=trace,flowstate::collab=debug`. Takes precedence over `RUST_LOG` and `FLOWSTATE_LOG_LEVEL`. |
-| `RUST_LOG` | an `EnvFilter` directive | Same as `FLOWSTATE_LOG` but the standard variable; used if `FLOWSTATE_LOG` is unset. |
-| `FLOWSTATE_LOG_STDOUT` | `1` \| `true` \| `yes` \| `on` | Also mirror logs to stdout (in addition to the file). |
-| `FLOWSTATE_LOG_DIR` | a directory path | Override where the log file is written. |
-
-Precedence for the level/filter: `FLOWSTATE_LOG` > `RUST_LOG` > `FLOWSTATE_LOG_LEVEL` > default (`error`).
-
-Examples:
-```sh
-# Verbose Flowstate logs, mirrored to the terminal:
-FLOWSTATE_LOG_LEVEL=debug FLOWSTATE_LOG_STDOUT=1 cargo run --package flowstate
-
-# Fine-grained control over specific targets:
-FLOWSTATE_LOG="flowstate_collab=trace,flowstate::collab=debug" cargo run --package flowstate
-```
+# Roadmap
+- [x] Blazing-fast text editor with all Verbatim styles and Anthony Trufanov's Undertag and Analytic.
+- [x] Full support for importing and exporting .docx Verbatim documents with instant stylepox cleaning. Pending full support for .cmir.
+- [x] Native .db8 file format that halves the size of .docx for large documents, with significantly faster read and write.
+- [x] Tab-based editor with freeform multipanelling, a built-in filesystem tree, and easy navigation.
+- [ ] Native structural and spreadsheet-style flow support via native .fl0 file format, with freeform marker annotations that work seamlessly during collaboration.
+- [x] Full functionality on Windows, Linux, and Mac.
+- [ ] Full feature parity with Verbatim.
+- [ ] Full feature parity with CardMirror.
+- [ ] Web version with Google Drive and Dropbox integration.
+- [ ] Mobile.
+- [x] Drag-and-drop lightning-fast index of your entire tub with rendered previews, searchable by blocks, tags, cites, or anything else.
+- [ ] Block aliases like '/condogood' that resolve instantly, without you ever having to open up another document or menu.
+- [ ] Live, synchronous, peer-to-peer collaboration with the whole squad. No external server, eternally free and safe.
+- [x] Instant invisiblity mode, instant ctrl-F, instant find-and-replace--even on impact defense.
+- [x] Infinite themeability, with a huge built-in roster from which to choose.
+- [ ] Maximal extensibility--write any functionality you want in Rust, Python, Javascript, Typescript, C, C++, or C#.
+- [ ] Infinite style freedom, with no risk of stylepox or inaccessibility. Everybody's editor starts with a small, universal set of styles and purely client-side appearance. Need more styles? Enable them for yourself, and everything you send to others automatically converts to an analogous and recognizable style if they haven't enabled yours.
+- [x] Compression algorithim specially-trained on representative strata from OpenEvidence to achieve transporation speed jumps on debate documents as high as 3x.
 
 # License
 Flowstate is licensed under the GNU Affero General Public License v3.0.
