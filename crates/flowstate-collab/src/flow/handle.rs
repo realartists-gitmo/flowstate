@@ -156,6 +156,12 @@ impl FlowDocHandle {
       .map_err(|error| FlowWriteRejected::Invalid(error.to_string()))
   }
 
+  /// A per-cell [`gpui_flowtext::LocalWriteAuthority`] over this same gate,
+  /// for injection into the cell's `RichTextEditor`.
+  pub fn cell_authority(&self, cell_id: CellId) -> std::sync::Arc<super::FlowCellAuthority> {
+    std::sync::Arc::new(super::FlowCellAuthority::new(std::sync::Arc::clone(&self.core), cell_id))
+  }
+
   pub fn document_id(&self) -> Result<Option<Uuid>, FlowWriteRejected> {
     let guard = self
       .core

@@ -5,11 +5,14 @@
 //! [`FlowDocHandle`] is the app-facing authority. Transport carries opaque
 //! Loro bytes, so everything from `net/` down is shared with .db8 unchanged.
 
+mod cell_authority;
+mod cell_text;
 mod handle;
 mod runtime;
 #[cfg(test)]
 mod tests;
 
+pub use cell_authority::FlowCellAuthority;
 pub use handle::{FlowDocHandle, FlowWriteRejected};
 pub use runtime::{FlowLocalOutcome, FlowPublishEvent, FlowRuntime, FlowStreamItem};
 

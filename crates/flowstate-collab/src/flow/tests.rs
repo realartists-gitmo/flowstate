@@ -328,3 +328,318 @@ fn import_classification_feeds_per_cell_streams() {
   let cell_items = a.drain_cell_stream(cell).unwrap();
   assert!(!cell_items.is_empty(), "the edited cell's stream must receive a Replace");
 }
+
+// ------------------------------------------------------- cell authority ----
+
+mod cell_authority_tests {
+  use super::*;
+  use flowstate_flow::CellId;
+  use gpui_flowtext::{
+    DeleteRangeIntent, DocumentOffset, EditorSelection, FragmentBlock, InsertRichFragmentIntent, InsertTextIntent, JoinParagraphsIntent,
+    LocalIntent, LocalWriteAuthority as _, LocalWriteOutcome, ReplaceMatch, ReplaceMatchesIntent, RunStyles, SetMarksIntent,
+    SetParagraphStyleIntent, SplitParagraphIntent, TextAnchor, WriteRejected,
+  };
+
+  fn cell_fixture() -> (FlowDocHandle, SheetId, CellId) {
+    let (handle, sheet) = handle_with_sheet();
+    let cell = add_cell(&handle, sheet, CellPlacement::SheetEnd { column_index: 0 }, "seed text");
+    (handle, sheet, cell)
+  }
+
+  fn projection_of(handle: &FlowDocHandle, cell: CellId) -> flowstate_document::DocumentProjection {
+    handle.cell_projection(cell).unwrap()
+  }
+
+  fn first_paragraph_id(projection: &flowstate_document::DocumentProjection) -> gpui_flowtext::ParagraphId {
+    projection.ids.paragraph_ids[0]
+  }
+
+  #[test]
+  fn typing_is_minimal_ops_and_merges_with_remote() {
+    let (a, _sheet, cell) = cell_fixture();
+    let snapshot = {
+      let guard = a.gate().lock(GateHolder::DocumentService).unwrap();
+      guard.snapshot_bytes().unwrap()
+    };
+    let (b, _gb) = FlowDocHandle::new(FlowRuntime::from_snapshot(&snapshot).unwrap());
+    {
+      let mut guard = a.gate().lock(GateHolder::DocumentService).unwrap();
+      let _ = guard.take_pending_publish();
+    }
+
+    // A types at the start; B types at the end — same cell, concurrently.
+    let authority_a = a.cell_authority(cell);
+    let authority_b = b.cell_authority(cell);
+    let paragraph_a = first_paragraph_id(&projection_of(&a, cell));
+    let paragraph_b = first_paragraph_id(&projection_of(&b, cell));
+    assert_eq!(paragraph_a, paragraph_b, "durable ids agree across peers");
+    authority_a
+      .apply(LocalIntent::InsertText(InsertTextIntent {
+        at: TextAnchor::new(paragraph_a, 0),
+        text: "aff ".into(),
+        style_override: None,
+      }))
+      .unwrap();
+    authority_b
+      .apply(LocalIntent::InsertText(InsertTextIntent {
+        at: TextAnchor::new(paragraph_b, "seed text".len()),
+        text: " neg".into(),
+        style_override: None,
+      }))
+      .unwrap();
+
+    let from_a: Vec<Vec<u8>> = {
+      let mut guard = a.gate().lock(GateHolder::DocumentService).unwrap();
+      guard
+        .take_pending_publish()
+        .into_iter()
+        .map(|FlowPublishEvent::LocalUpdate { bytes, .. }| bytes)
+        .collect()
+    };
+    let from_b: Vec<Vec<u8>> = {
+      let mut guard = b.gate().lock(GateHolder::DocumentService).unwrap();
+      guard
+        .take_pending_publish()
+        .into_iter()
+        .map(|FlowPublishEvent::LocalUpdate { bytes, .. }| bytes)
+        .collect()
+    };
+    a.import_remote_updates(&from_b.iter().map(Vec::as_slice).collect::<Vec<_>>())
+      .unwrap();
+    b.import_remote_updates(&from_a.iter().map(Vec::as_slice).collect::<Vec<_>>())
+      .unwrap();
+
+    let text_a = projection_of(&a, cell).text.to_string();
+    let text_b = projection_of(&b, cell).text.to_string();
+    assert_eq!(text_a, text_b, "same-cell typing converges");
+    assert_eq!(text_a, "aff seed text neg", "char-level merge, no clobber");
+  }
+
+  #[test]
+  fn split_join_round_trip_with_registry_identity() {
+    let (handle, _sheet, cell) = cell_fixture();
+    let authority = handle.cell_authority(cell);
+    let projection = projection_of(&handle, cell);
+    let paragraph = first_paragraph_id(&projection);
+    authority
+      .apply(LocalIntent::SplitParagraph(SplitParagraphIntent {
+        at: TextAnchor::new(paragraph, "seed".len()),
+        inherited_style: gpui_flowtext::ParagraphStyle::Normal,
+      }))
+      .unwrap();
+    let split = projection_of(&handle, cell);
+    assert_eq!(split.paragraphs.len(), 2);
+    assert_eq!(split.ids.paragraph_ids.len(), 2);
+    assert_eq!(split.ids.paragraph_ids[0], paragraph, "first identity survives the split");
+    let second = split.ids.paragraph_ids[1];
+    assert_ne!(second, paragraph);
+
+    authority
+      .apply(LocalIntent::JoinParagraphs(JoinParagraphsIntent { first: paragraph, second }))
+      .unwrap();
+    let joined = projection_of(&handle, cell);
+    assert_eq!(joined.paragraphs.len(), 1);
+    assert_eq!(joined.text.to_string(), "seed text");
+  }
+
+  #[test]
+  fn marks_styles_fragment_and_replace_matches() {
+    let (handle, _sheet, cell) = cell_fixture();
+    let authority = handle.cell_authority(cell);
+    let paragraph = first_paragraph_id(&projection_of(&handle, cell));
+
+    // Strike "seed".
+    let struck = RunStyles {
+      strikethrough: true,
+      ..Default::default()
+    };
+    authority
+      .apply(LocalIntent::SetMarks(SetMarksIntent {
+        start: TextAnchor::new(paragraph, 0),
+        end: TextAnchor::new(paragraph, 4),
+        styles: struck,
+      }))
+      .unwrap();
+    let projection = projection_of(&handle, cell);
+    assert!(projection.paragraphs[0].runs[0].styles.strikethrough);
+    assert!(
+      !projection.paragraphs[0]
+        .runs
+        .last()
+        .unwrap()
+        .styles
+        .strikethrough
+    );
+
+    // Paragraph style.
+    authority
+      .apply(LocalIntent::SetParagraphStyle(SetParagraphStyleIntent {
+        paragraph,
+        style: flowstate_document::PARAGRAPH_UNDERTAG,
+      }))
+      .unwrap();
+    assert_eq!(projection_of(&handle, cell).paragraphs[0].style, flowstate_document::PARAGRAPH_UNDERTAG);
+
+    // Paste a two-paragraph fragment at the end.
+    authority
+      .apply(LocalIntent::InsertRichFragment(InsertRichFragmentIntent {
+        at: TextAnchor::new(paragraph, "seed text".len()),
+        blocks: vec![
+          FragmentBlock::Paragraph(gpui_flowtext::InputParagraph {
+            style: gpui_flowtext::ParagraphStyle::Normal,
+            runs: vec![gpui_flowtext::InputRun {
+              text: " tail".into(),
+              styles: RunStyles::default(),
+            }],
+          }),
+          FragmentBlock::Paragraph(gpui_flowtext::InputParagraph {
+            style: flowstate_document::PARAGRAPH_ANALYTIC,
+            runs: vec![gpui_flowtext::InputRun {
+              text: "analytic line".into(),
+              styles: RunStyles::default(),
+            }],
+          }),
+        ],
+      }))
+      .unwrap();
+    let pasted = projection_of(&handle, cell);
+    assert_eq!(pasted.paragraphs.len(), 2);
+    assert_eq!(pasted.paragraphs[1].style, flowstate_document::PARAGRAPH_ANALYTIC);
+    assert!(pasted.text.to_string().contains("seed text tail"));
+
+    // Replace both occurrences of "line"... only one exists; replace "seed".
+    authority
+      .apply(LocalIntent::ReplaceMatches(ReplaceMatchesIntent {
+        matches: vec![ReplaceMatch {
+          start: TextAnchor::new(paragraph, 0),
+          end: TextAnchor::new(paragraph, 4),
+          styles: None,
+        }],
+        replacement: "SEED".into(),
+      }))
+      .unwrap();
+    assert!(
+      projection_of(&handle, cell)
+        .text
+        .to_string()
+        .starts_with("SEED")
+    );
+  }
+
+  #[test]
+  fn object_intents_are_rejected_and_leave_state_clean() {
+    let (handle, _sheet, cell) = cell_fixture();
+    let authority = handle.cell_authority(cell);
+    let before = projection_of(&handle, cell).text.to_string();
+    let error = authority
+      .apply(LocalIntent::DeleteBlocks(gpui_flowtext::DeleteBlocksIntent { blocks: vec![] }))
+      .unwrap_err();
+    assert!(matches!(error, WriteRejected::StructureViolation(_)));
+    assert_eq!(projection_of(&handle, cell).text.to_string(), before);
+  }
+
+  #[test]
+  fn outcome_is_rebuild_with_exact_projection() {
+    let (handle, _sheet, cell) = cell_fixture();
+    let authority = handle.cell_authority(cell);
+    let paragraph = first_paragraph_id(&projection_of(&handle, cell));
+    let outcome = authority
+      .apply(LocalIntent::InsertText(InsertTextIntent {
+        at: TextAnchor::new(paragraph, 0),
+        text: "x".into(),
+        style_override: None,
+      }))
+      .unwrap();
+    match outcome {
+      LocalWriteOutcome::CommittedWithRebuild { replace, .. } => {
+        assert_eq!(replace.document.text.to_string(), "xseed text");
+      },
+      LocalWriteOutcome::Committed(_) => panic!("cell authority always returns rebuild outcomes"),
+    }
+  }
+
+  #[test]
+  fn selection_anchors_survive_concurrent_remote_edits() {
+    let (a, _sheet, cell) = cell_fixture();
+    let snapshot = {
+      let guard = a.gate().lock(GateHolder::DocumentService).unwrap();
+      guard.snapshot_bytes().unwrap()
+    };
+    let (b, _gb) = FlowDocHandle::new(FlowRuntime::from_snapshot(&snapshot).unwrap());
+
+    let authority_a = a.cell_authority(cell);
+    // Caret between "seed" and " text" (paragraph 0, byte 4).
+    let selection = EditorSelection::collapsed(DocumentOffset { paragraph: 0, byte: 4 });
+    let frontier = {
+      let guard = a.gate().lock(GateHolder::DocumentService).unwrap();
+      guard.frontier()
+    };
+    let (head, anchor) = authority_a
+      .encode_selection_anchor(&selection, &frontier)
+      .expect("anchors encode");
+
+    // B prepends text; A imports.
+    let authority_b = b.cell_authority(cell);
+    let paragraph_b = first_paragraph_id(&projection_of(&b, cell));
+    authority_b
+      .apply(LocalIntent::InsertText(InsertTextIntent {
+        at: TextAnchor::new(paragraph_b, 0),
+        text: "ABC ".into(),
+        style_override: None,
+      }))
+      .unwrap();
+    let updates: Vec<Vec<u8>> = {
+      let mut guard = b.gate().lock(GateHolder::DocumentService).unwrap();
+      guard
+        .take_pending_publish()
+        .into_iter()
+        .map(|FlowPublishEvent::LocalUpdate { bytes, .. }| bytes)
+        .collect()
+    };
+    a.import_remote_updates(&updates.iter().map(Vec::as_slice).collect::<Vec<_>>())
+      .unwrap();
+
+    let (resolved_head, _resolved_anchor) = authority_a
+      .resolve_selection_anchor(&head, &anchor)
+      .expect("anchors resolve");
+    assert_eq!(
+      resolved_head,
+      DocumentOffset { paragraph: 0, byte: 8 },
+      "caret shifts past the concurrent 4-char prepend"
+    );
+
+    // A stale-frontier encode must refuse (the editor hasn't drained yet).
+    assert!(
+      authority_a
+        .encode_selection_anchor(&selection, &frontier)
+        .is_none(),
+      "encoding against a stale frontier must return None"
+    );
+  }
+
+  #[test]
+  fn delete_range_across_boundary_prunes_registry() {
+    let (handle, _sheet, cell) = cell_fixture();
+    let authority = handle.cell_authority(cell);
+    let paragraph = first_paragraph_id(&projection_of(&handle, cell));
+    authority
+      .apply(LocalIntent::SplitParagraph(SplitParagraphIntent {
+        at: TextAnchor::new(paragraph, 4),
+        inherited_style: gpui_flowtext::ParagraphStyle::Normal,
+      }))
+      .unwrap();
+    let split = projection_of(&handle, cell);
+    let second = split.ids.paragraph_ids[1];
+    // Delete across the boundary (from mid-first into mid-second).
+    authority
+      .apply(LocalIntent::DeleteRange(DeleteRangeIntent {
+        start: TextAnchor::new(paragraph, 2),
+        end: TextAnchor::new(second, 2),
+      }))
+      .unwrap();
+    let after = projection_of(&handle, cell);
+    assert_eq!(after.paragraphs.len(), 1, "boundary removed");
+    assert_eq!(after.text.to_string(), "seext");
+    assert_eq!(after.ids.paragraph_ids[0], paragraph, "surviving identity is the first paragraph");
+  }
+}

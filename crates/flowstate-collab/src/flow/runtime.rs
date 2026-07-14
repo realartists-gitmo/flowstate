@@ -168,6 +168,15 @@ impl FlowRuntime {
   /// Resolve → mutate → ONE commit (origin `local`, message = class) →
   /// classified refresh → streams → publish. Mirrors `local_write/commit.rs`.
   pub fn apply_intent(&mut self, intent: &FlowIntent) -> anyhow::Result<FlowLocalOutcome> {
+    if let FlowIntent::CellText { cell_id, intent } = intent {
+      self
+        .apply_cell_text(*cell_id, intent)
+        .map_err(|rejection| anyhow::anyhow!(rejection.to_string()))?;
+      return Ok(FlowLocalOutcome {
+        board: self.board.clone(),
+        content_cells: vec![*cell_id],
+      });
+    }
     let vv_before = self.doc.oplog_vv();
     let report = mutate::execute_intent(&self.doc, &self.board, intent)?;
     self.doc.set_next_commit_origin("local");
@@ -187,6 +196,57 @@ impl FlowRuntime {
     Ok(FlowLocalOutcome {
       board: self.board.clone(),
       content_cells: report.content_cells,
+    })
+  }
+
+  /// A cell-text intent: minimal ops on the cell's flow (char-level remote
+  /// merging), one commit, compensation via revert on mid-apply failure.
+  pub fn apply_cell_text(
+    &mut self,
+    cell_id: CellId,
+    intent: &gpui_flowtext::LocalIntent,
+  ) -> Result<super::cell_authority::CellTextCommit, gpui_flowtext::WriteRejected> {
+    let vv_before = self.doc.oplog_vv();
+    let frontier_before = self.doc.state_frontiers();
+    if let Err(rejection) = super::cell_text::execute_cell_text(&self.doc, cell_id, intent) {
+      // Compound intents may have partially applied: converge back.
+      self.doc.set_next_commit_origin("repair");
+      self.doc.commit();
+      if self.doc.state_frontiers() != frontier_before {
+        let _ = self.doc.revert_to(&frontier_before);
+        self.doc.set_next_commit_origin("repair");
+        self.doc.commit();
+        let _ = self.refresh(None);
+      }
+      return Err(rejection);
+    }
+    self.doc.set_next_commit_origin("local");
+    self
+      .doc
+      .set_next_commit_message(&format!("cell.{}", intent.class()));
+    self.doc.commit();
+
+    let mut dirty = HashSet::new();
+    dirty.insert(cell_id);
+    self
+      .refresh(Some(&dirty))
+      .map_err(|_| gpui_flowtext::WriteRejected::StructureViolation("flow refresh failed"))?;
+    self.push_board_stream();
+    // The authority receives the replace synchronously; OTHER consumers (a
+    // second editor on the same cell) still get the stream item.
+    self.push_cell_replace(cell_id);
+    self
+      .queue_local_update(&vv_before)
+      .map_err(|_| gpui_flowtext::WriteRejected::StructureViolation("flow publish failed"))?;
+    let projection = self
+      .cell_projection(cell_id)
+      .map_err(|_| gpui_flowtext::WriteRejected::StructureViolation("flow cell projection unavailable"))?;
+    Ok(super::cell_authority::CellTextCommit {
+      replace: gpui_flowtext::ProjectionReplace {
+        document: projection,
+        frontier: self.frontier(),
+        version_vector: self.doc.oplog_vv().encode(),
+      },
     })
   }
 
