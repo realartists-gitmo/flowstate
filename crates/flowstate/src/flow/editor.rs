@@ -56,6 +56,15 @@ pub enum AnnotationTool {
   Eraser,
 }
 
+/// R6: the replay scrubber's state — a historical board checked out on a
+/// fork, never the live doc.
+struct FlowScrubber {
+  fraction: f32,
+  board: FlowBoardProjection,
+  shown_ops: usize,
+  total_ops: usize,
+}
+
 /// This replica's own board focus (spec S11) as published into presence.
 pub struct FlowPresenceSnapshot {
   pub sheet: Option<SheetId>,
@@ -141,6 +150,9 @@ pub struct FlowEditor {
   recovery_write_pending: bool,
   /// S11: remote hands on the board.
   external_presences: Vec<FlowExternalPresence>,
+  /// R6 scrubber: a read-only historical board under the replay slider.
+  scrubber: Option<FlowScrubber>,
+  scrub_bar_bounds: Option<Bounds<gpui::Pixels>>,
   drag_autoscroll: Option<gpui::Point<gpui::Pixels>>,
   drag_autoscroll_scheduled: bool,
   drag_log: Option<telemetry::DragLogSession>,
@@ -206,6 +218,8 @@ impl FlowEditor {
       recovery_path: None,
       recovery_write_pending: false,
       external_presences: Vec::new(),
+      scrubber: None,
+      scrub_bar_bounds: None,
       drag_autoscroll: None,
       drag_autoscroll_scheduled: false,
       drag_log: None,
@@ -397,6 +411,200 @@ impl FlowEditor {
 
   pub fn external_presences(&self) -> &[FlowExternalPresence] {
     &self.external_presences
+  }
+
+  /// R6: toggle the replay scrubber (read-only checkout over the oplog).
+  pub fn toggle_history_scrubber(&mut self, cx: &mut Context<Self>) {
+    if self.scrubber.take().is_some() {
+      cx.notify();
+      return;
+    }
+    self.set_scrubber_fraction(1.0, cx);
+  }
+
+  pub fn history_scrubbing(&self) -> bool {
+    self.scrubber.is_some()
+  }
+
+  fn set_scrubber_fraction(&mut self, fraction: f32, cx: &mut Context<Self>) {
+    match self.handle.history_board_at(fraction) {
+      Ok((board, shown_ops, total_ops)) => {
+        self.scrubber = Some(FlowScrubber {
+          fraction: fraction.clamp(0.0, 1.0),
+          board,
+          shown_ops,
+          total_ops,
+        });
+        cx.notify();
+      },
+      Err(error) => {
+        tracing::warn!(%error, "flow history checkout failed");
+        self.refuse(format!("history replay failed: {error}"), None, cx);
+      },
+    }
+  }
+
+  fn scrub_to_position(&mut self, x: gpui::Pixels, cx: &mut Context<Self>) {
+    let Some(bounds) = self.scrub_bar_bounds else {
+      return;
+    };
+    if bounds.size.width <= px(1.0) {
+      return;
+    }
+    let fraction = ((x - bounds.left()).as_f32() / bounds.size.width.as_f32()).clamp(0.0, 1.0);
+    self.set_scrubber_fraction(fraction, cx);
+  }
+
+  /// The read-only replay view: the historical board's summaries in column
+  /// order + the scrub bar. No editors, no drags — replay only (R6).
+  fn render_history_view(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    let Some(scrubber) = &self.scrubber else {
+      return div().into_any_element();
+    };
+    let zoom = self.board_zoom;
+    let sheet = self
+      .active_sheet
+      .and_then(|sheet_id| {
+        scrubber
+          .board
+          .sheets
+          .iter()
+          .find(|sheet| sheet.id == sheet_id)
+      })
+      .or_else(|| scrubber.board.sheets.first());
+    let fraction = scrubber.fraction;
+    let label: SharedString = format!("history · {} / {} ops", scrubber.shown_ops, scrubber.total_ops).into();
+    let weak = cx.entity().downgrade();
+    let columns: Vec<AnyElement> = sheet
+      .and_then(|sheet| {
+        let definition = scrubber.board.format.sheet_type(sheet.sheet_type_id)?;
+        Some(
+          definition
+            .columns
+            .iter()
+            .map(|column| {
+              let side = flow_side_palette(column.side, cx);
+              div()
+                .w(px(280.0 * zoom))
+                .flex_none()
+                .flex_col()
+                .gap(px(8.0 * zoom))
+                .bg(side.base.opacity(0.035))
+                .rounded(px(9.0 * zoom))
+                .p(px(8.0 * zoom))
+                .child(
+                  div()
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_color(side.base)
+                    .text_size(px(13.0 * zoom))
+                    .child(column.label.clone()),
+                )
+                .children(
+                  sheet
+                    .cells
+                    .iter()
+                    .filter(|cell| cell.column_id == column.id)
+                    .map(|cell| {
+                      div()
+                        .w_full()
+                        .p(px(8.0 * zoom))
+                        .rounded(px(9.0 * zoom))
+                        .bg(side.base.opacity(0.08))
+                        .text_size(px(12.0 * zoom))
+                        .text_color(
+                          cx.theme()
+                            .foreground
+                            .opacity(if cell.summary.struck { 0.45 } else { 0.9 }),
+                        )
+                        .when(cell.summary.struck, |this| this.line_through())
+                        .child(SharedString::from(cell.summary.summary_text.to_string()))
+                        .into_any_element()
+                    }),
+                )
+                .into_any_element()
+            })
+            .collect(),
+        )
+      })
+      .unwrap_or_default();
+    div()
+      .size_full()
+      .flex()
+      .flex_col()
+      .child(
+        div().flex_1().overflow_hidden().child(
+          div()
+            .flex()
+            .gap(px(16.0 * zoom))
+            .p(px(16.0 * zoom))
+            .children(columns),
+        ),
+      )
+      .child(
+        // The scrub bar: click/drag anywhere along it to replay.
+        div()
+          .flex_none()
+          .h(px(44.0))
+          .px_4()
+          .flex()
+          .items_center()
+          .gap_3()
+          .bg(cx.theme().popover.opacity(0.9))
+          .border_t_1()
+          .border_color(cx.theme().border)
+          .child(
+            div()
+              .text_size(px(11.0))
+              .text_color(cx.theme().muted_foreground)
+              .whitespace_nowrap()
+              .child(label),
+          )
+          .child(
+            div()
+              .id("flow-scrub-bar")
+              .flex_1()
+              .h(px(10.0))
+              .rounded_full()
+              .bg(cx.theme().border.opacity(0.6))
+              .relative()
+              .child(
+                div()
+                  .absolute()
+                  .left_0()
+                  .top_0()
+                  .bottom_0()
+                  .w(gpui::relative(fraction))
+                  .rounded_full()
+                  .bg(cx.theme().primary),
+              )
+              .child(
+                canvas(
+                  {
+                    let weak = weak.clone();
+                    move |bounds, _, cx| {
+                      let _ = weak.update(cx, |editor, _| editor.scrub_bar_bounds = Some(bounds));
+                    }
+                  },
+                  |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+              )
+              .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|editor, event: &MouseDownEvent, _, cx| {
+                  editor.scrub_to_position(event.position.x, cx);
+                  cx.stop_propagation();
+                }),
+              )
+              .on_mouse_move(cx.listener(|editor, event: &MouseMoveEvent, _, cx| {
+                if event.pressed_button == Some(MouseButton::Left) && editor.scrubber.is_some() {
+                  editor.scrub_to_position(event.position.x, cx);
+                }
+              })),
+          ),
+      )
+      .into_any_element()
   }
 
   /// Test-only view of an open cell editor (headless presence assertions).
@@ -1050,7 +1258,17 @@ impl FlowEditor {
     cx.spawn(async move |editor, cx| {
       let write_result = cx
         .background_executor()
-        .spawn(async move { io.save_to(path).await.map_err(std::io::Error::other) })
+        .spawn(async move {
+          io.save_to(path.clone())
+            .await
+            .map_err(std::io::Error::other)?;
+          // S12: a Dropbox-bound flow mirrors its raw .fl0 after every save.
+          if crate::app_settings::load_dropbox_document_binding(&path).is_some() {
+            let bytes = io.encode_bytes().await.map_err(std::io::Error::other)?;
+            crate::collab::dropbox_checkpoint::sync_bound_flow_file(&path, &io, bytes).await?;
+          }
+          Ok::<(), std::io::Error>(())
+        })
         .await;
       if write_result.is_ok() {
         let _ = editor.update(cx, |editor, cx| {
@@ -1824,6 +2042,9 @@ impl Render for FlowEditor {
             .size_full(),
           )
           .child(match self.active_sheet {
+            // R6: replay mode swaps the live board for the read-only
+            // historical view (no editors, no drags — replay only).
+            Some(_) if self.scrubber.is_some() => self.render_history_view(cx),
             Some(sheet) => self.render_sheet(sheet, cx).into_any_element(),
             None => div()
               .size_full()

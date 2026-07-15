@@ -59,6 +59,7 @@ pub enum NetCommand {
     session: SessionId,
     document_fingerprint: [u8; 32],
     title: String,
+    document: crate::ticket::DocumentKind,
     identities: Vec<PublicKey>,
   },
   RequestDiscoveredTicket {

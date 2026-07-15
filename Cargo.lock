@@ -3300,6 +3300,7 @@ dependencies = [
  "flowstate-collab",
  "flowstate-document",
  "flowstate-docx",
+ "flowstate-flow",
  "hotpath",
  "loro",
  "postcard",

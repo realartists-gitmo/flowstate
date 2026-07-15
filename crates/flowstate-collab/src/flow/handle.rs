@@ -162,6 +162,18 @@ impl FlowDocHandle {
     std::sync::Arc::new(super::FlowCellAuthority::new(std::sync::Arc::clone(&self.core), cell_id))
   }
 
+  /// R6 scrubber: a read-only historical board at `fraction` of the change
+  /// timeline (fork under the gate; checkout + materialize on the fork).
+  pub fn history_board_at(&self, fraction: f32) -> Result<(FlowBoardProjection, usize, usize), FlowWriteRejected> {
+    let guard = self
+      .core
+      .lock(GateHolder::LocalIntent)
+      .map_err(|_| FlowWriteRejected::GatePoisoned)?;
+    guard
+      .history_board_at(fraction)
+      .map_err(|error| FlowWriteRejected::Invalid(error.to_string()))
+  }
+
   pub fn document_id(&self) -> Result<Option<Uuid>, FlowWriteRejected> {
     let guard = self
       .core

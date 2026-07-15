@@ -147,10 +147,11 @@ async fn net_main(cmd_rx: async_channel::Receiver<NetCommand>, evt_tx: async_cha
         session,
         document_fingerprint,
         title,
+        document,
         identities,
       } => {
         direct_state
-          .configure_standing_access(session, document_fingerprint, title, identities.into_iter().collect())
+          .configure_standing_access(session, document_fingerprint, title, document, identities.into_iter().collect())
           .await;
       },
       NetCommand::RequestDiscoveredTicket {

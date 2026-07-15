@@ -29,6 +29,8 @@ use std::{
 };
 
 use clap::Parser;
+
+mod flow_soak;
 use flowstate_collab::{
   crdt_runtime::CrdtRuntime,
   local_write::{
@@ -64,6 +66,10 @@ struct Cli {
   /// Cap the select-all-restyle phase at N paragraphs (default: all).
   #[arg(long)]
   restyle_cap: Option<usize>,
+  /// S12: run the two-peer FLOW soak for N rounds instead of the document
+  /// soak (`input` is ignored; pass any placeholder).
+  #[arg(long)]
+  flow: Option<usize>,
 }
 
 /// Release-audit sampling requested on the CLI.
@@ -76,6 +82,10 @@ enum AuditSampling {
 #[hotpath::main(functions_limit = 60)]
 fn main() {
   let cli = Cli::parse();
+  if let Some(rounds) = cli.flow {
+    flow_soak::run(rounds);
+    return;
+  }
   if cli.loro_micro {
     loro_micro();
     return;

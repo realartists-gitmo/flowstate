@@ -181,6 +181,15 @@ impl Render for FlowRibbon {
           .disabled(!has_active_sheet)
           .on_click(move |_, _, cx| next_sheet_editor.update(cx, |editor, cx| editor.move_active_sheet(1, cx))),
       )
+      .child({
+        let editor = self.editor.clone();
+        let scrubbing = self.editor.read(cx).history_scrubbing();
+        Button::new("flow-history-scrubber")
+          .label(if scrubbing { "Exit history" } else { "History" })
+          .small()
+          .disabled(!has_active_sheet)
+          .on_click(move |_, _, cx| editor.update(cx, |editor, cx| editor.toggle_history_scrubber(cx)))
+      })
       .child(
         Button::new("flow-delete-sheet")
           .label("Delete sheet")

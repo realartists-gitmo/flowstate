@@ -138,7 +138,7 @@ impl CollabManager {
       self.unregister_session(session);
       return Err(error).context("registering collaboration direct handler failed");
     }
-    self.configure_standing_access(session);
+    self.configure_standing_access_with_kind(session, flowstate_collab::DocumentKind::Flow);
     let (reply_tx, reply_rx) = async_channel::bounded(1);
     if let Err(error) = commands.try_send(NetCommand::CreateSession { session, reply: reply_tx }) {
       tracing::error!(%panel_id, %session, error = %error, "queueing flow collaboration create-session command failed");
@@ -207,7 +207,7 @@ impl CollabManager {
       return Err(error).context("registering collaboration direct handler failed");
     }
     tracing::debug!(%panel_id, %session, "registered collaboration direct handler for local session");
-    self.configure_standing_access(session);
+    self.configure_standing_access_with_kind(session, flowstate_collab::DocumentKind::RichText);
 
     let (reply_tx, reply_rx) = async_channel::bounded(1);
     if let Err(error) = commands.try_send(NetCommand::CreateSession { session, reply: reply_tx }) {
@@ -593,12 +593,17 @@ impl CollabManager {
       discovery.upsert(publication);
     }
     self.discovery = Some(discovery);
-    for session in self.sessions_by_id.keys().copied() {
-      self.configure_standing_access(session);
+    let kinds: Vec<(SessionId, flowstate_collab::DocumentKind)> = self
+      .sessions_by_id
+      .iter()
+      .map(|(id, entity)| (*id, entity.read(cx.borrow_mut()).kind()))
+      .collect();
+    for (session, kind) in kinds {
+      self.configure_standing_access_with_kind(session, kind);
     }
   }
 
-  fn configure_standing_access(&self, session: SessionId) {
+  fn configure_standing_access_with_kind(&self, session: SessionId, kind: flowstate_collab::DocumentKind) {
     let Some(runtime) = &self.runtime else { return };
     let Some(document_fingerprint) = self.discovery_documents.get(&session).copied() else {
       return;
@@ -616,6 +621,7 @@ impl CollabManager {
         session,
         document_fingerprint,
         title,
+        document: kind,
         identities,
       })
     {

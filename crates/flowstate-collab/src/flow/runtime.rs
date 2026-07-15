@@ -177,6 +177,50 @@ impl FlowRuntime {
     self.doc.fork()
   }
 
+  /// R6 scrubber: a READ-ONLY historical board at `fraction` (0..=1) of the
+  /// lamport-ordered change timeline. Works on a fork — the live doc, its
+  /// undo stacks, and its subscriptions are untouched. Returns the board plus
+  /// (ops shown, total ops) for the slider annotation.
+  pub fn history_board_at(&self, fraction: f32) -> anyhow::Result<(FlowBoardProjection, usize, usize)> {
+    let fork = self.doc.fork();
+    let heads = fork.oplog_frontiers();
+    let mut changes: Vec<(u32, loro::ID, usize)> = Vec::new();
+    let head_ids: Vec<loro::ID> = heads.iter().collect();
+    fork
+      .travel_change_ancestors(&head_ids, &mut |meta| {
+        changes.push((meta.lamport, meta.id, meta.len));
+        std::ops::ControlFlow::Continue(())
+      })
+      .map_err(|error| anyhow::anyhow!("traversing flow history failed: {error}"))?;
+    // Lamport order respects causality: any prefix is causally closed.
+    changes.sort_by_key(|(lamport, id, _)| (*lamport, id.peer));
+    let total_ops: usize = changes.iter().map(|(_, _, len)| *len).sum();
+    let target_ops = (f64::from(fraction.clamp(0.0, 1.0)) * total_ops as f64).round() as usize;
+    let mut vv = VersionVector::default();
+    let mut included = 0_usize;
+    for (_, id, len) in &changes {
+      if included >= target_ops {
+        break;
+      }
+      // Loro merges consecutive same-peer commits into one storage Change, so
+      // commit-level scrubbing must cut INSIDE a change: ops within a change
+      // are sequential, so a per-op prefix stays causally sound (checkout
+      // closes over the frontier heads' causal past anyway).
+      let take = (*len).min(target_ops - included);
+      included += take;
+      let end = id.counter + i32::try_from(take).unwrap_or(i32::MAX);
+      if vv.get(&id.peer).copied().unwrap_or(0) < end {
+        vv.insert(id.peer, end);
+      }
+    }
+    let frontiers = fork.vv_to_frontiers(&vv);
+    fork
+      .checkout(&frontiers)
+      .map_err(|error| anyhow::anyhow!("checking out flow history failed: {error}"))?;
+    let board = flowstate_flow::board_from_loro(&fork)?;
+    Ok((board.board, included.min(total_ops), total_ops))
+  }
+
   pub fn cell_projection(&self, cell_id: CellId) -> anyhow::Result<flowstate_document::DocumentProjection> {
     flowstate_flow::cell_document(&self.doc, cell_id)
   }

@@ -8,6 +8,7 @@ publish.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 flowstate-collab.workspace = true
+flowstate-flow.workspace = true
 flowstate-document.workspace = true
 flowstate-docx.workspace = true
 hotpath.workspace = true

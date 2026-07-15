@@ -710,3 +710,48 @@ mod cell_authority_tests {
     );
   }
 }
+
+#[test]
+fn history_scrubber_replays_the_lamport_prefix() {
+  let runtime = FlowRuntime::new_empty();
+  let sheet_type = runtime.board().format.sheet_types[0].id;
+  let (handle, _gate) = FlowDocHandle::new(runtime);
+  let sheet = Uuid::from_u128(0x51);
+  handle
+    .apply(&FlowIntent::CreateSheet {
+      sheet_id: sheet,
+      name: "History".into(),
+      sheet_type_id: sheet_type,
+    })
+    .unwrap();
+  for index in 0..6_u128 {
+    handle
+      .apply(&FlowIntent::AddCell {
+        sheet_id: sheet,
+        cell_id: Uuid::from_u128(0x100 + index),
+        placement: CellPlacement::SheetEnd { column_index: 0 },
+        seed: CellSeed::Empty,
+      })
+      .unwrap();
+  }
+  let live = handle.board_projection().unwrap();
+  assert_eq!(live.sheets[0].cells.len(), 6);
+
+  // Full replay equals the live board's structure.
+  let (full, shown, total) = handle.history_board_at(1.0).unwrap();
+  assert_eq!(shown, total);
+  assert_eq!(full.sheets.len(), 1);
+  assert_eq!(full.sheets[0].cells.len(), 6, "fraction 1.0 replays everything");
+
+  // A mid-timeline replay shows a strict prefix of the cells — and the LIVE
+  // board is untouched by the checkout (it ran on a fork).
+  let (half, shown_half, _) = handle.history_board_at(0.5).unwrap();
+  let half_cells = half.sheets.first().map_or(0, |sheet| sheet.cells.len());
+  assert!(half_cells < 6, "fraction 0.5 must replay a strict prefix (saw {half_cells} cells)");
+  assert!(shown_half < total);
+  assert_eq!(
+    handle.board_projection().unwrap().sheets[0].cells.len(),
+    6,
+    "the live board is untouched by history checkouts"
+  );
+}
