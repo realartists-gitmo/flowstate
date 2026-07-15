@@ -605,3 +605,230 @@ impl FlowRuntime {
     }
   }
 }
+
+// ---- C-S2: flow comments (the .db8 shape, cell-anchored) -------------------
+
+/// A flow comment thread: general (no anchor) or anchored to a durable
+/// [`CellId`]. Cell moves/re-parenting never orphan (the id survives); only
+/// cell deletion does, and `cell_alive` reports it while the quoted text and
+/// birth frontier keep the thread readable + history-jumpable (C-S6).
+#[derive(Clone, Debug, PartialEq)]
+pub struct FlowCommentThread {
+  pub comment_id: u128,
+  pub author_user_id: Option<u128>,
+  pub cell_id: Option<CellId>,
+  pub cell_alive: bool,
+  pub general: bool,
+  pub quoted_text: String,
+  pub resolved: bool,
+  pub created_at_unix_secs: i64,
+  pub updated_at_unix_secs: i64,
+  pub created_frontier: Option<Vec<u8>>,
+  pub messages: Vec<crate::crdt_runtime::RuntimeCommentMessage>,
+}
+
+impl FlowRuntime {
+  fn comments_map(&self) -> loro::LoroMap {
+    self.doc.get_map(flowstate_flow::loro_schema::COMMENTS_BY_ID)
+  }
+
+  pub fn flow_comments(&self) -> Vec<FlowCommentThread> {
+    use loro::{Container, ValueOrContainer};
+    let comments = self.doc.get_map(flowstate_flow::loro_schema::COMMENTS_BY_ID);
+    let live_cells: std::collections::HashSet<CellId> = self
+      .board
+      .sheets
+      .iter()
+      .flat_map(|sheet| sheet.cells.iter().map(|cell| cell.id))
+      .collect();
+    let mut threads = Vec::new();
+    comments.for_each(|key, value| {
+      let ValueOrContainer::Container(Container::Map(thread)) = value else {
+        return;
+      };
+      let Ok(comment_id) = key.parse::<u128>() else {
+        return;
+      };
+      let cell_id = crate::crdt_runtime::map_string_opt(&thread, "cell_id").and_then(|id| id.parse::<CellId>().ok());
+      let mut messages = Vec::new();
+      if let Some(ValueOrContainer::Container(Container::Map(message_map))) = thread.get("messages_by_id") {
+        message_map.for_each(|message_key, value| {
+          let ValueOrContainer::Container(Container::Map(message)) = value else {
+            return;
+          };
+          let Ok(message_id) = message_key.parse() else {
+            return;
+          };
+          let Some(author_user_id) = crate::crdt_runtime::map_string_opt(&message, "author_user_id").and_then(|id| id.parse().ok())
+          else {
+            return;
+          };
+          messages.push(crate::crdt_runtime::RuntimeCommentMessage {
+            message_id,
+            author_user_id,
+            author_display_name: crate::crdt_runtime::map_string_opt(&message, "author_display_name")
+              .unwrap_or_else(|| "Unknown author".into()),
+            body: crate::crdt_runtime::map_string_opt(&message, "body").unwrap_or_default(),
+            created_at_unix_secs: crate::crdt_runtime::map_i64_opt(&message, "created_at").unwrap_or_default(),
+            updated_at_unix_secs: crate::crdt_runtime::map_i64_opt(&message, "updated_at").unwrap_or_default(),
+            deleted: crate::crdt_runtime::map_bool_opt(&message, "deleted").unwrap_or(false),
+          });
+        });
+      }
+      messages.sort_by_key(|message| (message.created_at_unix_secs, message.message_id));
+      threads.push(FlowCommentThread {
+        comment_id,
+        author_user_id: crate::crdt_runtime::comment_thread_author(&thread),
+        cell_id,
+        cell_alive: cell_id.is_some_and(|cell| live_cells.contains(&cell)),
+        general: crate::crdt_runtime::map_bool_opt(&thread, "general").unwrap_or(false),
+        quoted_text: crate::crdt_runtime::map_string_opt(&thread, "quoted_text").unwrap_or_default(),
+        resolved: crate::crdt_runtime::map_bool_opt(&thread, "resolved").unwrap_or(false),
+        created_at_unix_secs: crate::crdt_runtime::map_i64_opt(&thread, "created_at").unwrap_or_default(),
+        updated_at_unix_secs: crate::crdt_runtime::map_i64_opt(&thread, "updated_at").unwrap_or_default(),
+        created_frontier: crate::crdt_runtime::map_binary_opt(&thread, "created_frontier"),
+        messages,
+      });
+    });
+    threads.sort_by_key(|thread| (thread.resolved, thread.created_at_unix_secs, thread.comment_id));
+    threads
+  }
+
+  /// `cell: None` = a general note (F3). Anchored comments quote the cell's
+  /// summary text at creation.
+  pub fn create_flow_comment(
+    &mut self,
+    cell: Option<CellId>,
+    body: &str,
+    author_user_id: u128,
+    author_display_name: &str,
+  ) -> anyhow::Result<u128> {
+    let body = crate::crdt_runtime::validated_comment_body(body)?;
+    let quoted_text = match cell {
+      Some(cell_id) => {
+        let cell = self
+          .board
+          .sheets
+          .iter()
+          .flat_map(|sheet| sheet.cells.iter())
+          .find(|candidate| candidate.id == cell_id)
+          .ok_or_else(|| anyhow::anyhow!("cell {cell_id:?} does not exist"))?;
+        cell.summary.summary_text.to_string()
+      },
+      None => String::new(),
+    };
+    let comment_id = Uuid::new_v4().as_u128();
+    let message_id = Uuid::new_v4().as_u128();
+    let now = crate::crdt_runtime::unix_time_secs();
+    let vv_before = self.doc.oplog_vv();
+    let created_frontier = self.doc.state_frontiers().encode();
+    let comments = self.comments_map();
+    let thread = comments
+      .ensure_mergeable_map(&comment_id.to_string())
+      .map_err(|error| anyhow::anyhow!("creating flow comment thread failed: {error}"))?;
+    thread.insert("id", comment_id.to_string())?;
+    thread.insert("author_user_id", author_user_id.to_string())?;
+    match cell {
+      Some(cell_id) => {
+        thread.insert("cell_id", cell_id.to_string())?;
+      },
+      None => {
+        thread.insert("general", true)?;
+      },
+    }
+    thread.insert("quoted_text", quoted_text)?;
+    thread.insert("created_frontier", loro::LoroValue::Binary(created_frontier.into()))?;
+    thread.insert("resolved", false)?;
+    thread.insert("created_at", now)?;
+    thread.insert("updated_at", now)?;
+    let messages = thread
+      .ensure_mergeable_map("messages_by_id")?;
+    crate::crdt_runtime::write_comment_message(&messages, message_id, &body, author_user_id, author_display_name, now)?;
+    self.finish_flow_comment_mutation(&vv_before, "comment-create")?;
+    Ok(comment_id)
+  }
+
+  pub fn reply_to_flow_comment(&mut self, comment_id: u128, body: &str, author_user_id: u128, author_display_name: &str) -> anyhow::Result<u128> {
+    let body = crate::crdt_runtime::validated_comment_body(body)?;
+    let message_id = Uuid::new_v4().as_u128();
+    let now = crate::crdt_runtime::unix_time_secs();
+    let vv_before = self.doc.oplog_vv();
+    let thread = self.existing_flow_thread(comment_id)?;
+    let messages = thread.ensure_mergeable_map("messages_by_id")?;
+    crate::crdt_runtime::write_comment_message(&messages, message_id, &body, author_user_id, author_display_name, now)?;
+    thread.insert("updated_at", now)?;
+    self.finish_flow_comment_mutation(&vv_before, "comment-reply")?;
+    Ok(message_id)
+  }
+
+  pub fn set_flow_comment_resolved(&mut self, comment_id: u128, resolved: bool) -> anyhow::Result<()> {
+    let vv_before = self.doc.oplog_vv();
+    let thread = self.existing_flow_thread(comment_id)?;
+    thread.insert("resolved", resolved)?;
+    thread.insert("updated_at", crate::crdt_runtime::unix_time_secs())?;
+    self.finish_flow_comment_mutation(&vv_before, if resolved { "comment-resolve" } else { "comment-reopen" })
+  }
+
+  pub fn edit_flow_comment_message(&mut self, comment_id: u128, message_id: u128, body: &str, actor_user_id: u128) -> anyhow::Result<()> {
+    let body = crate::crdt_runtime::validated_comment_body(body)?;
+    let vv_before = self.doc.oplog_vv();
+    let thread = self.existing_flow_thread(comment_id)?;
+    let messages = crate::crdt_runtime::existing_child_map(&thread, "messages_by_id")?;
+    let message = crate::crdt_runtime::existing_child_map(&messages, &message_id.to_string())?;
+    anyhow::ensure!(
+      crate::crdt_runtime::map_string_opt(&message, "author_user_id").and_then(|id| id.parse().ok()) == Some(actor_user_id),
+      "Only the message author can edit it"
+    );
+    message.insert("body", body.as_str())?;
+    message.insert("updated_at", crate::crdt_runtime::unix_time_secs())?;
+    thread.insert("updated_at", crate::crdt_runtime::unix_time_secs())?;
+    self.finish_flow_comment_mutation(&vv_before, "comment-edit")
+  }
+
+  pub fn delete_flow_comment_message(&mut self, comment_id: u128, message_id: u128, actor_user_id: u128) -> anyhow::Result<()> {
+    let vv_before = self.doc.oplog_vv();
+    let thread = self.existing_flow_thread(comment_id)?;
+    let messages = crate::crdt_runtime::existing_child_map(&thread, "messages_by_id")?;
+    let message = crate::crdt_runtime::existing_child_map(&messages, &message_id.to_string())?;
+    anyhow::ensure!(
+      crate::crdt_runtime::map_string_opt(&message, "author_user_id").and_then(|id| id.parse().ok()) == Some(actor_user_id),
+      "Only the message author can delete it"
+    );
+    message.insert("deleted", true)?;
+    message.insert("body", "")?;
+    message.insert("updated_at", crate::crdt_runtime::unix_time_secs())?;
+    thread.insert("updated_at", crate::crdt_runtime::unix_time_secs())?;
+    self.finish_flow_comment_mutation(&vv_before, "comment-message-delete")
+  }
+
+  pub fn delete_flow_comment(&mut self, comment_id: u128, actor_user_id: u128) -> anyhow::Result<()> {
+    let vv_before = self.doc.oplog_vv();
+    let comments = self.comments_map();
+    let thread = self.existing_flow_thread(comment_id)?;
+    anyhow::ensure!(
+      crate::crdt_runtime::comment_thread_author(&thread) == Some(actor_user_id),
+      "Only the thread author can delete it"
+    );
+    comments.delete(&comment_id.to_string())?;
+    self.finish_flow_comment_mutation(&vv_before, "comment-delete")
+  }
+
+  fn existing_flow_thread(&self, comment_id: u128) -> anyhow::Result<loro::LoroMap> {
+    let comments = self.comments_map();
+    crate::crdt_runtime::existing_child_map(&comments, &comment_id.to_string())
+  }
+
+  /// One commit (origin `comment`), modified-meta touch, publish — the same
+  /// tail the intent path uses, minus board refresh (comments never change
+  /// the board projection).
+  fn finish_flow_comment_mutation(&mut self, vv_before: &VersionVector, message: &str) -> anyhow::Result<()> {
+    self.doc.set_next_commit_origin("comment");
+    self.doc.set_next_commit_message(message);
+    self.doc.commit();
+    if !self.undo_group_active {
+      self.touch_modified_meta();
+    }
+    self.queue_local_update(vv_before)?;
+    Ok(())
+  }
+}

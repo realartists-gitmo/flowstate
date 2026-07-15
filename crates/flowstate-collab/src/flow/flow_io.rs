@@ -10,8 +10,10 @@
 //! * update/snapshot exports (snapshots fork under the gate, export off it);
 //! * `.fl0` persistence: atomic saves and recovery-file encodes.
 //!
-//! Package/checkpoint/revision/comment/asset services are `.db8`-only and
-//! deliberately absent — a flow document IS its snapshot.
+//! Package/checkpoint/revision/asset services are `.db8`-only and
+//! deliberately absent — a flow document IS its snapshot. Comments joined in
+//! C-S2 (the formats-are-peers law): they live in the flow doc itself
+//! (`flow.comments_by_id`), so no package machinery is needed.
 
 use std::io;
 use std::path::PathBuf;
@@ -22,7 +24,8 @@ use async_channel::{Receiver, Sender};
 use flowstate_flow::FlowBoardProjection;
 use loro::{ExportMode, VersionVector};
 
-use super::runtime::{FlowPublishEvent, FlowRuntime};
+use super::runtime::{FlowCommentThread, FlowPublishEvent, FlowRuntime};
+use flowstate_flow::CellId;
 use crate::io_util::{gate_call, send_reply};
 use crate::local_write::{GateHolder, WriteGate};
 
@@ -65,6 +68,46 @@ pub enum FlowIoRequest {
   EncodeBytes {
     reply: ReplySender<Vec<u8>>,
   },
+  Comments {
+    reply: ReplySender<Vec<FlowCommentThread>>,
+  },
+  CreateComment {
+    cell: Option<CellId>,
+    body: String,
+    author_user_id: u128,
+    author_display_name: String,
+    reply: ReplySender<u128>,
+  },
+  ReplyToComment {
+    comment_id: u128,
+    body: String,
+    author_user_id: u128,
+    author_display_name: String,
+    reply: ReplySender<u128>,
+  },
+  SetCommentResolved {
+    comment_id: u128,
+    resolved: bool,
+    reply: ReplySender<()>,
+  },
+  EditCommentMessage {
+    comment_id: u128,
+    message_id: u128,
+    body: String,
+    actor_user_id: u128,
+    reply: ReplySender<()>,
+  },
+  DeleteCommentMessage {
+    comment_id: u128,
+    message_id: u128,
+    actor_user_id: u128,
+    reply: ReplySender<()>,
+  },
+  DeleteComment {
+    comment_id: u128,
+    actor_user_id: u128,
+    reply: ReplySender<()>,
+  },
 }
 
 fn io_request_kind(request: &FlowIoRequest) -> &'static str {
@@ -77,6 +120,13 @@ fn io_request_kind(request: &FlowIoRequest) -> &'static str {
     FlowIoRequest::SnapshotBytes { .. } => "snapshot-bytes",
     FlowIoRequest::SaveTo { .. } => "save-to",
     FlowIoRequest::EncodeBytes { .. } => "encode-bytes",
+    FlowIoRequest::Comments { .. } => "comments",
+    FlowIoRequest::CreateComment { .. } => "create-comment",
+    FlowIoRequest::ReplyToComment { .. } => "reply-to-comment",
+    FlowIoRequest::SetCommentResolved { .. } => "set-comment-resolved",
+    FlowIoRequest::EditCommentMessage { .. } => "edit-comment-message",
+    FlowIoRequest::DeleteCommentMessage { .. } => "delete-comment-message",
+    FlowIoRequest::DeleteComment { .. } => "delete-comment",
   }
 }
 
@@ -156,6 +206,79 @@ impl FlowIoHandle {
   pub async fn encode_bytes(&self) -> Result<Vec<u8>> {
     self
       .request(|reply| FlowIoRequest::EncodeBytes { reply })
+      .await
+  }
+
+  pub async fn comments(&self) -> Result<Vec<FlowCommentThread>> {
+    self.request(|reply| FlowIoRequest::Comments { reply }).await
+  }
+
+  pub async fn create_comment(
+    &self,
+    cell: Option<CellId>,
+    body: String,
+    author_user_id: u128,
+    author_display_name: String,
+  ) -> Result<u128> {
+    self
+      .request(|reply| FlowIoRequest::CreateComment {
+        cell,
+        body,
+        author_user_id,
+        author_display_name,
+        reply,
+      })
+      .await
+  }
+
+  pub async fn reply_to_comment(&self, comment_id: u128, body: String, author_user_id: u128, author_display_name: String) -> Result<u128> {
+    self
+      .request(|reply| FlowIoRequest::ReplyToComment {
+        comment_id,
+        body,
+        author_user_id,
+        author_display_name,
+        reply,
+      })
+      .await
+  }
+
+  pub async fn set_comment_resolved(&self, comment_id: u128, resolved: bool) -> Result<()> {
+    self
+      .request(|reply| FlowIoRequest::SetCommentResolved { comment_id, resolved, reply })
+      .await
+  }
+
+  pub async fn edit_comment_message(&self, comment_id: u128, message_id: u128, body: String, actor_user_id: u128) -> Result<()> {
+    self
+      .request(|reply| FlowIoRequest::EditCommentMessage {
+        comment_id,
+        message_id,
+        body,
+        actor_user_id,
+        reply,
+      })
+      .await
+  }
+
+  pub async fn delete_comment_message(&self, comment_id: u128, message_id: u128, actor_user_id: u128) -> Result<()> {
+    self
+      .request(|reply| FlowIoRequest::DeleteCommentMessage {
+        comment_id,
+        message_id,
+        actor_user_id,
+        reply,
+      })
+      .await
+  }
+
+  pub async fn delete_comment(&self, comment_id: u128, actor_user_id: u128) -> Result<()> {
+    self
+      .request(|reply| FlowIoRequest::DeleteComment {
+        comment_id,
+        actor_user_id,
+        reply,
+      })
       .await
   }
 }
@@ -283,6 +406,84 @@ fn io_loop(core: &Arc<WriteGate<FlowRuntime>>, receiver: &Receiver<FlowIoRequest
           })
           .and_then(|snapshot| flowstate_flow::persistence::encode_snapshot(&snapshot));
         send_reply(&reply, result);
+      },
+      FlowIoRequest::Comments { reply } => {
+        send_reply(&reply, gate_call(core, GateHolder::DocumentService, |runtime| Ok(runtime.flow_comments())));
+      },
+      FlowIoRequest::CreateComment {
+        cell,
+        body,
+        author_user_id,
+        author_display_name,
+        reply,
+      } => {
+        send_reply(
+          &reply,
+          gate_call(core, GateHolder::DocumentService, |runtime| {
+            runtime.create_flow_comment(cell, &body, author_user_id, &author_display_name)
+          }),
+        );
+      },
+      FlowIoRequest::ReplyToComment {
+        comment_id,
+        body,
+        author_user_id,
+        author_display_name,
+        reply,
+      } => {
+        send_reply(
+          &reply,
+          gate_call(core, GateHolder::DocumentService, |runtime| {
+            runtime.reply_to_flow_comment(comment_id, &body, author_user_id, &author_display_name)
+          }),
+        );
+      },
+      FlowIoRequest::SetCommentResolved { comment_id, resolved, reply } => {
+        send_reply(
+          &reply,
+          gate_call(core, GateHolder::DocumentService, |runtime| {
+            runtime.set_flow_comment_resolved(comment_id, resolved)
+          }),
+        );
+      },
+      FlowIoRequest::EditCommentMessage {
+        comment_id,
+        message_id,
+        body,
+        actor_user_id,
+        reply,
+      } => {
+        send_reply(
+          &reply,
+          gate_call(core, GateHolder::DocumentService, |runtime| {
+            runtime.edit_flow_comment_message(comment_id, message_id, &body, actor_user_id)
+          }),
+        );
+      },
+      FlowIoRequest::DeleteCommentMessage {
+        comment_id,
+        message_id,
+        actor_user_id,
+        reply,
+      } => {
+        send_reply(
+          &reply,
+          gate_call(core, GateHolder::DocumentService, |runtime| {
+            runtime.delete_flow_comment_message(comment_id, message_id, actor_user_id)
+          }),
+        );
+      },
+      FlowIoRequest::DeleteComment {
+        comment_id,
+        actor_user_id,
+        reply,
+      } => {
+        send_reply(
+          &reply,
+          gate_call(core, GateHolder::DocumentService, |runtime| {
+            runtime.delete_flow_comment(comment_id, actor_user_id)
+          }),
+        );
       },
     }
     let elapsed_ms = started.elapsed().as_millis();

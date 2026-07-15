@@ -755,3 +755,65 @@ fn history_scrubber_replays_the_lamport_prefix() {
     "the live board is untouched by history checkouts"
   );
 }
+
+// ---- C-S2: flow comments converge like any other flow state ---------------
+
+#[test]
+fn flow_comments_converge_with_cell_anchors_tombstones_and_frontiers() {
+  let (a, sheet) = handle_with_sheet();
+  let cell = add_cell(&a, sheet, CellPlacement::SheetEnd { column_index: 0 }, "warrant here");
+  let snapshot = {
+    let guard = a.gate().lock(GateHolder::DocumentService).unwrap();
+    guard.snapshot_bytes().unwrap()
+  };
+  let (b, _gate_b) = FlowDocHandle::new(FlowRuntime::from_snapshot(&snapshot).unwrap());
+  {
+    let mut guard = a.gate().lock(GateHolder::DocumentService).unwrap();
+    let _ = guard.take_pending_publish();
+  }
+
+  // A: one anchored + one general comment; tombstone a reply (author-gated).
+  let (anchored_id, general_id, reply_id) = {
+    let mut guard = a.gate().lock(GateHolder::DocumentService).unwrap();
+    let anchored_id = guard.create_flow_comment(Some(cell), "This warrant is circular", 7, "Ada").unwrap();
+    let general_id = guard.create_flow_comment(None, "Overview: wrong layer", 7, "Ada").unwrap();
+    let reply_id = guard.reply_to_flow_comment(anchored_id, "fixing", 9, "Sol").unwrap();
+    assert!(guard.delete_flow_comment_message(anchored_id, reply_id, 7).is_err());
+    guard.delete_flow_comment_message(anchored_id, reply_id, 9).unwrap();
+    (anchored_id, general_id, reply_id)
+  };
+
+  // Publish A -> import into B.
+  let from_a: Vec<Vec<u8>> = {
+    let mut guard = a.gate().lock(GateHolder::DocumentService).unwrap();
+    guard
+      .take_pending_publish()
+      .into_iter()
+      .map(|FlowPublishEvent::LocalUpdate { bytes, .. }| bytes)
+      .collect()
+  };
+  {
+    let mut guard = b.gate().lock(GateHolder::DocumentService).unwrap();
+    let blobs: Vec<&[u8]> = from_a.iter().map(Vec::as_slice).collect();
+    guard.import_remote_updates(&blobs).unwrap();
+  }
+
+  for handle in [&a, &b] {
+    let guard = handle.gate().lock(GateHolder::DocumentService).unwrap();
+    let threads = guard.flow_comments();
+    let anchored = threads.iter().find(|thread| thread.comment_id == anchored_id).expect("anchored");
+    assert_eq!(anchored.cell_id, Some(cell));
+    assert!(anchored.cell_alive, "durable cell id resolves on both peers");
+    assert_eq!(anchored.author_user_id, Some(7));
+    assert_eq!(anchored.quoted_text, "warrant here");
+    let frontier = anchored.created_frontier.clone().expect("birth frontier");
+    // H-K0 flow mirror: the birth frontier is checkout-able on both peers.
+    let historical = guard.board_at_frontier(&frontier).unwrap();
+    assert!(historical.sheets.iter().any(|sheet| sheet.cells.iter().any(|c| c.id == cell)));
+    let tombstoned = anchored.messages.iter().find(|message| message.message_id == reply_id).expect("reply");
+    assert!(tombstoned.deleted);
+    let general = threads.iter().find(|thread| thread.comment_id == general_id).expect("general");
+    assert!(general.general);
+    assert!(general.cell_id.is_none());
+  }
+}

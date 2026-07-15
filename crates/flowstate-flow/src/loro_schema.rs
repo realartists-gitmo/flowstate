@@ -29,6 +29,9 @@ pub const SHEET_ORDER: &str = "flow.sheet_order";
 pub const SHEETS_BY_ID: &str = "flow.sheets_by_id";
 pub const CELLS_BY_ID: &str = "flow.cells_by_id";
 pub const ANNOTATIONS_MAP: &str = "flow.annotations";
+/// C-S2: flow comment threads (the .db8 `comments_by_id` shape, cell-anchored).
+/// `flow.annotations` was taken — it holds ink strokes.
+pub const COMMENTS_BY_ID: &str = "flow.comments_by_id";
 pub const CELL_ORDER_KEY: &str = "cell_order";
 pub const CELL_FLOW_KEY: &str = "flow";
 pub const CELL_PARAGRAPHS_KEY: &str = "paragraphs_by_id";

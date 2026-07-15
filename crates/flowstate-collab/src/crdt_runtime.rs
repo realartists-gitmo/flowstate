@@ -7098,14 +7098,14 @@ fn movable_list_strings(list: &LoroMovableList) -> Vec<String> {
     .collect()
 }
 
-fn map_string_opt(map: &LoroMap, key: &str) -> Option<String> {
+pub(crate) fn map_string_opt(map: &LoroMap, key: &str) -> Option<String> {
   map.get(key).and_then(|value| match value {
     ValueOrContainer::Value(LoroValue::String(value)) => Some(value.to_string()),
     _ => None,
   })
 }
 
-fn map_binary_opt(map: &LoroMap, key: &str) -> Option<Vec<u8>> {
+pub(crate) fn map_binary_opt(map: &LoroMap, key: &str) -> Option<Vec<u8>> {
   map.get(key).and_then(|value| match value {
     ValueOrContainer::Value(LoroValue::Binary(value)) => Some(value.to_vec()),
     _ => None,
@@ -7204,21 +7204,21 @@ fn install_undo_selection_callbacks(undo: &UndoManager, state: &Arc<Mutex<UndoSe
   })));
 }
 
-fn map_i64_opt(map: &LoroMap, key: &str) -> Option<i64> {
+pub(crate) fn map_i64_opt(map: &LoroMap, key: &str) -> Option<i64> {
   map.get(key).and_then(|value| match value {
     ValueOrContainer::Value(LoroValue::I64(value)) => Some(value),
     _ => None,
   })
 }
 
-fn map_bool_opt(map: &LoroMap, key: &str) -> Option<bool> {
+pub(crate) fn map_bool_opt(map: &LoroMap, key: &str) -> Option<bool> {
   map.get(key).and_then(|value| match value {
     ValueOrContainer::Value(LoroValue::Bool(value)) => Some(value),
     _ => None,
   })
 }
 
-fn existing_child_map(parent: &LoroMap, key: &str) -> Result<LoroMap> {
+pub(crate) fn existing_child_map(parent: &LoroMap, key: &str) -> Result<LoroMap> {
   match parent.get(key) {
     Some(ValueOrContainer::Container(Container::Map(map))) => Ok(map),
     _ => anyhow::bail!("Comment record `{key}` does not exist"),
@@ -7229,7 +7229,7 @@ fn existing_child_map(parent: &LoroMap, key: &str) -> Result<LoroMap> {
 /// (delete) and the materializer, so UI visibility can never diverge from
 /// what the server checks. Threads written before the author field existed
 /// fall back to the earliest message's author.
-fn comment_thread_author(thread: &LoroMap) -> Option<u128> {
+pub(crate) fn comment_thread_author(thread: &LoroMap) -> Option<u128> {
   map_string_opt(thread, "author_user_id")
     .and_then(|id| id.parse::<u128>().ok())
     .or_else(|| {
@@ -7252,7 +7252,7 @@ fn existing_comment_thread(doc: &LoroDoc, comment_id: u128) -> Result<LoroMap> {
   existing_child_map(&comments, &comment_id.to_string())
 }
 
-fn validated_comment_body(body: &str) -> Result<String> {
+pub(crate) fn validated_comment_body(body: &str) -> Result<String> {
   // Strip control characters (a pasted `\r\n` becomes `\n`) so a comment can
   // never smuggle escape sequences or zero-width control bytes into peers' UIs.
   let sanitized: String = body
@@ -7265,7 +7265,7 @@ fn validated_comment_body(body: &str) -> Result<String> {
   Ok(body.to_owned())
 }
 
-fn write_comment_message(
+pub(crate) fn write_comment_message(
   messages: &LoroMap,
   message_id: u128,
   body: &str,
@@ -7283,7 +7283,7 @@ fn write_comment_message(
   Ok(())
 }
 
-fn unix_time_secs() -> i64 {
+pub(crate) fn unix_time_secs() -> i64 {
   std::time::SystemTime::now()
     .duration_since(std::time::UNIX_EPOCH)
     .unwrap_or_default()
