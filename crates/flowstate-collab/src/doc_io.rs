@@ -150,6 +150,12 @@ pub enum IoRequest {
     revision_id: u128,
     reply: Sender<Result<Vec<RuntimeEvent>>>,
   },
+  /// H-K0: open a read-only view at an arbitrary encoded frontier (no named
+  /// revision required) — history preview/tape and comment history-jump.
+  OpenFrontier {
+    frontier: Vec<u8>,
+    reply: Sender<Result<Vec<RuntimeEvent>>>,
+  },
   /// Record fetched asset bytes into canonical state (joiner asset pulls).
   RecordAssets {
     assets: Vec<flowstate_document::AssetRecord>,
@@ -183,6 +189,7 @@ fn io_request_kind(request: &IoRequest) -> &'static str {
     IoRequest::ResolvePresenceCarets { .. } => "resolve-presence-carets",
     IoRequest::SetAuthorIdentity { .. } => "set-author-identity",
     IoRequest::OpenRevision { .. } => "open-revision",
+    IoRequest::OpenFrontier { .. } => "open-frontier",
     IoRequest::ForkRevision { .. } => "fork-revision",
     IoRequest::RecordAssets { .. } => "record-assets",
   }
@@ -389,6 +396,13 @@ impl DocIoHandle {
   pub async fn open_revision(&self, revision_id: u128) -> Result<Vec<RuntimeEvent>> {
     self
       .request(|reply| IoRequest::OpenRevision { revision_id, reply })
+      .await
+  }
+
+  /// H-K0: read-only historical view at `frontier` (encoded Frontiers blob).
+  pub async fn open_frontier(&self, frontier: Vec<u8>) -> Result<Vec<RuntimeEvent>> {
+    self
+      .request(|reply| IoRequest::OpenFrontier { frontier, reply })
       .await
   }
 
@@ -871,6 +885,14 @@ fn io_loop(core: &Arc<WriteGate<CrdtRuntime>>, receiver: &Receiver<IoRequest>) {
           &reply,
           gate_call(core, GateHolder::DocumentService, |runtime| {
             runtime.command(crate::crdt_runtime::SemanticCommand::ForkRevision { revision_id })
+          }),
+        );
+      },
+      IoRequest::OpenFrontier { frontier, reply } => {
+        send_reply(
+          &reply,
+          gate_call(core, GateHolder::DocumentService, |runtime| {
+            runtime.command(crate::crdt_runtime::SemanticCommand::OpenFrontier { frontier })
           }),
         );
       },

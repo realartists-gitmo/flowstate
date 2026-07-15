@@ -243,7 +243,10 @@ impl LocalDocHandle {
         // undo — pure waste, the editor never read it.
         RuntimeEvent::ProjectionUpdated { .. } | RuntimeEvent::ProjectionPatched { .. } => applied = true,
         RuntimeEvent::SelectionRestored { selection: restored } => selection = Some(restored),
-        RuntimeEvent::RevisionOpened { .. } | RuntimeEvent::RevisionForked { .. } | RuntimeEvent::HistoryRebaseRequired { .. } => {},
+        RuntimeEvent::RevisionOpened { .. }
+        | RuntimeEvent::RevisionForked { .. }
+        | RuntimeEvent::FrontierViewOpened { .. }
+        | RuntimeEvent::HistoryRebaseRequired { .. } => {},
         publishable @ (RuntimeEvent::LocalUpdate { .. } | RuntimeEvent::RemoteUpdateApplied { .. }) => publish.push(publishable),
       }
     }

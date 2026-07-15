@@ -2465,6 +2465,13 @@ impl CrdtRuntime {
           package: Box::new(package),
         }]);
       },
+      SemanticCommand::OpenFrontier { frontier } => {
+        let document = self.frontier_projection(&frontier)?;
+        return Ok(vec![RuntimeEvent::FrontierViewOpened {
+          frontier,
+          document: Box::new(document),
+        }]);
+      },
       SemanticCommand::Undo => {
         // §act-three B.1: replay the recorded inverse when the lineage checks
         // hold — no checkout, no diff calc, no rebuild. Falls through to the
@@ -2604,6 +2611,25 @@ impl CrdtRuntime {
       .load_revision_loro_doc(revision_id)
       .context("loading revision Loro snapshot")?;
     let mut document = document_from_loro(&revision_doc).context("projecting revision document")?;
+    if let Some(package) = &self.package {
+      attach_package_assets(&mut document, package);
+    }
+    Ok(document)
+  }
+
+  /// H-K0 keystone: project the document as it stood at `frontier` (an
+  /// encoded [`Frontiers`] blob). Works on a fork — the live doc, its undo
+  /// stacks, and its subscriptions are untouched. Unlike
+  /// [`Self::revision_projection`] this needs no named revision and no
+  /// package: any frontier in the doc's causal past is viewable, which is
+  /// what history preview/tape/restore and comment orphan-jump all consume.
+  pub fn frontier_projection(&self, frontier: &[u8]) -> Result<DocumentProjection> {
+    let frontiers = Frontiers::decode(frontier).context("decoding frontier blob for historical view")?;
+    let historical_doc = self
+      .doc
+      .fork_at(&frontiers)
+      .context("forking document at historical frontier")?;
+    let mut document = document_from_loro(&historical_doc).context("projecting historical document")?;
     if let Some(package) = &self.package {
       attach_package_assets(&mut document, package);
     }
@@ -7744,6 +7770,7 @@ mod tests {
         RuntimeEvent::RemoteUpdateApplied { .. }
         | RuntimeEvent::RevisionOpened { .. }
         | RuntimeEvent::RevisionForked { .. }
+        | RuntimeEvent::FrontierViewOpened { .. }
         | RuntimeEvent::ProjectionUpdated { .. }
         | RuntimeEvent::ProjectionPatched { .. }
         | RuntimeEvent::HistoryRebaseRequired { .. }
@@ -7768,6 +7795,46 @@ mod tests {
     );
     assert_eq!(flowstate_document::paragraph_text(&runtime.projection_snapshot()?, 0), "hello");
     assert_eq!(body_text(runtime.doc()).to_string(), "\nhello");
+    Ok(())
+  }
+
+  #[test]
+  fn frontier_projection_shows_historical_state_and_leaves_live_doc_untouched() -> Result<()> {
+    let mut runtime = CrdtRuntime::new_empty("Runtime")?;
+    runtime.command(SemanticCommand::InsertText {
+      unicode_index: 1,
+      text: "alpha".to_string(),
+      styles: RunStyles::default(),
+    })?;
+    let frontier_after_alpha = runtime.doc().state_frontiers().encode();
+    runtime.command(SemanticCommand::InsertText {
+      unicode_index: 6,
+      text: " beta".to_string(),
+      styles: RunStyles::default(),
+    })?;
+
+    // The historical view sees only the first edit...
+    let historical = runtime.frontier_projection(&frontier_after_alpha)?;
+    assert_eq!(flowstate_document::paragraph_text(&historical, 0), "alpha");
+    // ...and via the command path it arrives as FrontierViewOpened.
+    let events = runtime.command(SemanticCommand::OpenFrontier {
+      frontier: frontier_after_alpha.clone(),
+    })?;
+    assert!(matches!(
+      events.first(),
+      Some(RuntimeEvent::FrontierViewOpened { frontier, document })
+        if *frontier == frontier_after_alpha
+          && flowstate_document::paragraph_text(document, 0) == "alpha"
+    ));
+
+    // The live doc is untouched by either read.
+    assert_eq!(flowstate_document::paragraph_text(&runtime.projection_snapshot()?, 0), "alpha beta");
+    assert_eq!(runtime.doc().state_frontiers().encode(), {
+      runtime.doc().state_frontiers().encode()
+    });
+
+    // A garbage frontier fails loudly instead of projecting nonsense.
+    assert!(runtime.frontier_projection(b"not a frontier").is_err());
     Ok(())
   }
 
@@ -8197,6 +8264,7 @@ mod tests {
         | RuntimeEvent::RemoteUpdateApplied { .. }
         | RuntimeEvent::RevisionOpened { .. }
         | RuntimeEvent::RevisionForked { .. }
+        | RuntimeEvent::FrontierViewOpened { .. }
         | RuntimeEvent::ProjectionUpdated { .. }
         | RuntimeEvent::HistoryRebaseRequired { .. }
         | RuntimeEvent::SelectionRestored { .. } => None,
@@ -8272,6 +8340,7 @@ mod tests {
         | RuntimeEvent::RemoteUpdateApplied { .. }
         | RuntimeEvent::RevisionOpened { .. }
         | RuntimeEvent::RevisionForked { .. }
+        | RuntimeEvent::FrontierViewOpened { .. }
         | RuntimeEvent::ProjectionUpdated { .. }
         | RuntimeEvent::HistoryRebaseRequired { .. }
         | RuntimeEvent::SelectionRestored { .. } => None,

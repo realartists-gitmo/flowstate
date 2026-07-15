@@ -1094,6 +1094,7 @@ impl CollabSession {
           RuntimeEvent::RemoteUpdateApplied { .. } => "remote-update-applied",
           RuntimeEvent::RevisionOpened { .. } => "revision-opened",
           RuntimeEvent::RevisionForked { .. } => "revision-forked",
+          RuntimeEvent::FrontierViewOpened { .. } => "frontier-view-opened",
           RuntimeEvent::SelectionRestored { .. } => "selection-restored",
           RuntimeEvent::ProjectionUpdated { .. } => "projection-updated",
           RuntimeEvent::ProjectionPatched { .. } => "projection-patched",
@@ -1166,6 +1167,7 @@ impl CollabSession {
           }
         },
         RuntimeEvent::RevisionForked { .. }
+        | RuntimeEvent::FrontierViewOpened { .. }
         | RuntimeEvent::ProjectionUpdated { .. }
         | RuntimeEvent::ProjectionPatched { .. }
         | RuntimeEvent::RevisionOpened { .. }

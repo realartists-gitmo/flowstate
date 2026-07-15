@@ -128,6 +128,12 @@ pub enum SemanticCommand {
   ForkRevision {
     revision_id: u128,
   },
+  /// H-K0 keystone: a read-only projection of the document at an arbitrary
+  /// encoded frontier — serves history preview/tape/restore and comment
+  /// orphan history-jump. Unlike `OpenRevision` it needs no named revision.
+  OpenFrontier {
+    frontier: Vec<u8>,
+  },
   Undo,
   Redo,
 }
@@ -152,6 +158,10 @@ pub enum RuntimeEvent {
     revision_id: u128,
     document: Box<DocumentProjection>,
     package: Box<DocumentPackage>,
+  },
+  FrontierViewOpened {
+    frontier: Vec<u8>,
+    document: Box<DocumentProjection>,
   },
   SelectionRestored {
     selection: EditorSelection,
@@ -188,6 +198,9 @@ impl RuntimeEvent {
       },
       Self::ProjectionPatched { batch, .. } => Some(&batch.new_frontier),
       Self::RevisionOpened { document, .. } | Self::RevisionForked { document, .. } => Some(&document.frontier),
+      // A frontier view reports the HISTORICAL frontier it was opened at,
+      // which is exactly what its consumers key on.
+      Self::FrontierViewOpened { frontier, .. } => Some(frontier),
       // The merged frontier is the PACKAGE tip, not this runtime's — never
       // report it as a runtime frontier.
       Self::SelectionRestored { .. } | Self::HistoryRebaseRequired { .. } => None,

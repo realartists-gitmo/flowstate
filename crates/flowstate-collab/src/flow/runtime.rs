@@ -225,6 +225,20 @@ impl FlowRuntime {
     flowstate_flow::cell_document(&self.doc, cell_id)
   }
 
+  /// H-K0 keystone (flow mirror): a READ-ONLY board at an arbitrary encoded
+  /// frontier. Same fork-don't-touch-the-live-doc law as `history_board_at`,
+  /// but keyed by frontier instead of a timeline fraction — flow history pins,
+  /// restore preview, and flow comment orphan-jump all consume this.
+  pub fn board_at_frontier(&self, frontier: &[u8]) -> anyhow::Result<FlowBoardProjection> {
+    let frontiers =
+      loro::Frontiers::decode(frontier).map_err(|error| anyhow::anyhow!("decoding flow frontier blob failed: {error}"))?;
+    let fork = self.doc.fork();
+    fork
+      .checkout(&frontiers)
+      .map_err(|error| anyhow::anyhow!("checking out flow frontier failed: {error}"))?;
+    Ok(flowstate_flow::board_from_loro(&fork)?.board)
+  }
+
   // ---- the one write path ------------------------------------------------
 
   /// Resolve → mutate → ONE commit (origin `local`, message = class) →
