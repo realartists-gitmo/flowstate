@@ -52,6 +52,10 @@ impl CollabManager {
         tracing::warn!(%session, peer = %peer, "routing collaboration incompatible-version event");
         self.update_session(session, cx, |session, cx| session.handle_incompatible_version(peer, cx));
       },
+      NetEvent::AdmissionRefused { session, identity } => {
+        tracing::warn!(%session, %identity, "routing collaboration admission-refused event");
+        self.update_session(session, cx, |session, cx| session.handle_admission_refused(identity, cx));
+      },
       NetEvent::NeighborUp { session, peer } => {
         tracing::debug!(%session, peer = %peer, "routing collaboration neighbor-up event");
         self.update_session(session, cx, |session, cx| session.neighbor_up(peer, cx));

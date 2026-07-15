@@ -83,6 +83,12 @@ pub enum SessionNotice {
   Disconnected(String),
   ViewRebuilt,
   IncompatibleVersion(String),
+  /// CO-S1: an offline collaborator's below-root history was merged on disk;
+  /// this session must reopen the document to see it.
+  HistoryRebaseRequired,
+  /// CO-S1: an untrusted identity attempted a discovery join on a document we
+  /// host. Carries the portable identity key so the host can trust it.
+  AdmissionRefused(String),
 }
 
 impl EventEmitter<SessionNotice> for CollabSession {}
@@ -186,6 +192,7 @@ pub struct CollabSession {
   last_probe_failed: bool,
   join_neighbor_tx: Option<async_channel::Sender<JoinNeighborSignal>>,
   incompatible_version_peers: HashSet<PeerId>,
+  admission_refused_identities: HashSet<String>,
   last_document_activity: Instant,
   publish_pump_pending: bool,
 }
@@ -262,6 +269,7 @@ impl CollabSession {
       last_probe_failed: false,
       join_neighbor_tx: None,
       incompatible_version_peers: HashSet::new(),
+      admission_refused_identities: HashSet::new(),
       last_document_activity: now,
       publish_pump_pending: false,
     }
@@ -354,6 +362,7 @@ impl CollabSession {
       last_probe_failed: false,
       join_neighbor_tx: None,
       incompatible_version_peers: HashSet::new(),
+      admission_refused_identities: HashSet::new(),
       last_document_activity: now,
       publish_pump_pending: false,
     }
@@ -1118,6 +1127,9 @@ impl CollabSession {
             merged_frontier_len = merged_frontier.len(),
             "offline collaborator history merged on disk; reopen the document to see it"
           );
+          // CO-S1 (Law 2): the user hears it too — a silently-stale doc was
+          // the collab audit's worst finding.
+          cx.emit(SessionNotice::HistoryRebaseRequired);
         },
         RuntimeEvent::RemoteUpdateApplied { pending, version_vector, .. } => {
           self.update_runtime_vv(version_vector, "remote-update-applied", true);
@@ -1329,6 +1341,14 @@ impl CollabSession {
   pub fn handle_incompatible_version(&mut self, peer: PeerId, cx: &mut Context<Self>) {
     if self.incompatible_version_peers.insert(peer) {
       cx.emit(SessionNotice::IncompatibleVersion(peer.to_string()));
+    }
+  }
+
+  pub fn handle_admission_refused(&mut self, identity: String, cx: &mut Context<Self>) {
+    // Dedup per identity: a retrying joiner knocks repeatedly, the host
+    // hears it once.
+    if self.admission_refused_identities.insert(identity.clone()) {
+      cx.emit(SessionNotice::AdmissionRefused(identity));
     }
   }
 

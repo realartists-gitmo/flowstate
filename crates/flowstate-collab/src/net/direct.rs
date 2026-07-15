@@ -77,6 +77,8 @@ pub struct DirectServeState {
   inner: Arc<RwLock<DirectServeInner>>,
   auth: SessionAuthRegistry,
   standing_access: Arc<RwLock<HashMap<SessionId, StandingAccessGrant>>>,
+  /// Host-side notice channel (None in contexts that only join).
+  events: Option<async_channel::Sender<super::NetEvent>>,
 }
 
 #[derive(Clone, Debug)]
@@ -95,6 +97,13 @@ struct DirectServeInner {
 }
 
 impl DirectServeState {
+  /// Attach the host-side notice channel (admission refusals etc.).
+  #[must_use]
+  pub fn with_events(mut self, events: async_channel::Sender<super::NetEvent>) -> Self {
+    self.events = Some(events);
+    self
+  }
+
   /// Session admission state shared by all direct requests.
   #[must_use]
   pub fn auth(&self) -> &SessionAuthRegistry {
@@ -196,6 +205,14 @@ impl DirectServeState {
             .then(|| (grant.title.clone(), grant.document))
         });
       let Some((title, document)) = title else {
+        // CO-S1: tell the host someone knocked and wasn't on the list — the
+        // refusal itself stays exactly as strict as before.
+        if let Some(events) = &self.events {
+          let _ = events.try_send(super::NetEvent::AdmissionRefused {
+            session,
+            identity: request.identity.to_string(),
+          });
+        }
         return ServeOutcome::Header(DirectResponseHeader::Unauthorized);
       };
       let Some(admission) = self.auth.admission(session) else {

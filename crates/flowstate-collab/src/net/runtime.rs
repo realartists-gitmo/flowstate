@@ -122,7 +122,7 @@ async fn net_main(cmd_rx: async_channel::Receiver<NetCommand>, evt_tx: async_cha
   direct::install_endpoint(endpoint.clone());
 
   let gossip = Gossip::builder().spawn(endpoint.clone());
-  let direct_state = DirectServeState::default();
+  let direct_state = DirectServeState::default().with_events(evt_tx.clone());
   let _router = iroh::protocol::Router::builder(endpoint.clone())
     .accept(iroh_gossip::ALPN, gossip.clone())
     .accept(crate::DIRECT_ALPN, DirectProto::new(direct_state.clone()))

@@ -163,6 +163,11 @@ pub struct MintedTicket {
 pub enum NetEvent {
   Gossip { session: SessionId, from: EndpointId, msg: GossipMsg },
   IncompatibleVersion { session: SessionId, peer: EndpointId },
+  /// CO-S1 (Law 2): a discovery joiner presented a valid admission request
+  /// but their identity has no standing access — the HOST hears about it now
+  /// instead of refusing in silence. `identity` is the joiner's portable
+  /// identity key so the host can trust it directly.
+  AdmissionRefused { session: SessionId, identity: String },
   NeighborUp { session: SessionId, peer: EndpointId },
   NeighborDown { session: SessionId, peer: EndpointId },
   GossipLagged { session: SessionId },

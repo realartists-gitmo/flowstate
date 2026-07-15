@@ -17,11 +17,24 @@ pub fn show_session_notice(notice: &SessionNotice, window: &mut Window, cx: &mut
         cx,
       ));
     },
-    SessionNotice::ViewRebuilt => {
-      #[cfg(debug_assertions)]
-      push_info("Collaboration view rebuilt from remote state.", window, cx);
-    },
+    // CO-S1 (Law 2): visible in RELEASE builds too — a rebuilt view is a
+    // real event the user may have felt as a flicker or a caret jump.
+    SessionNotice::ViewRebuilt => push_info("Collaboration view rebuilt from remote state.", window, cx),
     SessionNotice::IncompatibleVersion(peer) => push_warning(format!("{peer} is using an incompatible collaboration version."), window, cx),
+    SessionNotice::HistoryRebaseRequired => {
+      std::mem::drop(window.prompt(
+        PromptLevel::Warning,
+        "Collaborator changes need a reopen",
+        Some("A collaborator's offline changes were merged into this document on disk, but the open session can't display them. Close and reopen the document to see their edits — nothing is lost."),
+        &[PromptButton::ok("Ok")],
+        cx,
+      ));
+    },
+    SessionNotice::AdmissionRefused(identity) => push_warning(
+      format!("Someone tried to join via discovery but isn't trusted for this document (identity {identity}). Add them under Settings > Collaboration > Trusted people to admit them."),
+      window,
+      cx,
+    ),
   }
 }
 

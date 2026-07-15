@@ -224,7 +224,29 @@ fn trusted_collaborators_item(workspace: WeakEntity<Workspace>) -> SettingItem {
           )
       })
       .child(
-        h_flex().justify_end().child(
+        h_flex()
+          .justify_end()
+          .items_center()
+          .gap_2()
+          .when(active_path.is_none(), |this| {
+            // CO-S1 (Law 2): the dead end explains itself instead of just
+            // graying out.
+            this.child(
+              div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child("Open and save a document first — trust is granted per document."),
+            )
+          })
+          .when(active_path.is_some() && remote_key.is_none(), |this| {
+            this.child(
+              div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child("Paste their portable identity key to continue."),
+            )
+          })
+          .child(
           Button::new("trusted-collaborator-add")
             .label("Trust for this document")
             .small()
@@ -386,7 +408,19 @@ fn collaboration_squads_item(workspace: WeakEntity<Workspace>) -> SettingItem {
           .child(Input::new(&member).w_full()),
       )
       .child(
-        h_flex().justify_end().child(
+        h_flex()
+          .justify_end()
+          .items_center()
+          .gap_2()
+          .when(active_folder.is_none(), |this| {
+            this.child(
+              div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child("Open a saved document first — a squad covers that document's folder."),
+            )
+          })
+          .child(
           Button::new("collaboration-squad-add")
             .label("Create folder squad")
             .small()
