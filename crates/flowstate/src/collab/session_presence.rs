@@ -220,49 +220,6 @@ impl CollabSession {
     .detach();
   }
 
-  pub(super) fn refresh_comment_annotations(&mut self, cx: &mut Context<Self>) {
-    if self.comment_annotation_refresh_pending {
-      return;
-    }
-    let Some(runtime) = self.doc_io() else { return };
-    let Some(editor) = self.rich_text_editor() else { return };
-    self.comment_annotation_refresh_pending = true;
-    self.comment_annotation_refresh_generation = self.comment_annotation_refresh_generation.wrapping_add(1);
-    let generation = self.comment_annotation_refresh_generation;
-    let session_id = self.session;
-    cx.spawn(async move |session, cx| {
-      Timer::after(EXTERNAL_CARET_REFRESH_DEBOUNCE).await;
-      let result = runtime.comments().await;
-      let _ = session.update(cx, |session, cx| {
-        if session.comment_annotation_refresh_generation != generation {
-          return;
-        }
-        session.comment_annotation_refresh_pending = false;
-        match result {
-          Ok(comments)
-            if session
-              .rich_text_editor()
-              .is_some_and(|current| current == editor) =>
-          {
-            let selections = comments
-              .into_iter()
-              .filter(|thread| !thread.resolved)
-              .filter_map(|thread| thread.anchor)
-              .map(|(start, end)| crate::rich_text_element::ExternalSelection {
-                selection: crate::rich_text_element::EditorSelection::range(start, end),
-                color_rgb: 0xd99a20,
-              })
-              .collect();
-            editor.update(cx, |editor, cx| editor.set_annotation_selections(selections, cx));
-          },
-          Ok(_) => {},
-          Err(error) => tracing::warn!(session = %session_id, error = %format_args!("{error:#}"), "refreshing comment annotations failed"),
-        }
-      });
-    })
-    .detach();
-  }
-
   fn refresh_external_carets_now(&mut self, cx: &mut Context<Self>) {
     if self.flow_editor().is_some() {
       self.refresh_flow_presences_now(cx);

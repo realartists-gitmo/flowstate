@@ -47,6 +47,14 @@ impl Workspace {
     let was_expanded = self.active_toolkit_tool.is_some();
     self.active_toolkit_tool = if self.active_toolkit_tool == Some(tool) { None } else { Some(tool) };
 
+    // C-S4: leaving the Comments tool ends review mode — the panel drops its
+    // editor observation and clears the review marks.
+    if self.active_toolkit_tool != Some(ToolkitTool::Comments)
+      && let Some(panel) = self.comments_panel.clone()
+    {
+      panel.update(cx, |panel, cx| panel.detach(cx));
+    }
+
     let is_expanded = self.active_toolkit_tool.is_some();
     if was_expanded != is_expanded {
       let delta = if is_expanded { px(40.0) - px(380.0) } else { px(380.0) - px(40.0) };

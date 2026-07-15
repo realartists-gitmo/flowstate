@@ -29,6 +29,10 @@ use crate::workspace::Workspace;
 /// panel only needs to settle once per burst.
 const REFRESH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(250);
 
+/// The review-mark color pushed onto the editor for unresolved anchored
+/// threads (C-S4). Peer-authored colors arrive with C-S5.
+const COMMENT_MARK_RGB: u32 = 0x00d9_9a20;
+
 pub struct CommentsPanel {
   /// Held for C-S5 (unread state persists workspace-side) and C-S6
   /// (history-jump opens a workspace view); unused until those land.
@@ -54,6 +58,10 @@ pub struct CommentsPanel {
   filter_mine: bool,
   refresh_generation: u64,
   refresh_pending: bool,
+  /// Review mode is ON exactly while the rail shows this panel (M3 decision:
+  /// marks exist only with the panel open). `detach` flips it off and clears
+  /// the editor's annotation overlay.
+  open: bool,
   _editor_observation: Option<Subscription>,
 }
 
@@ -84,6 +92,7 @@ impl CommentsPanel {
       filter_mine: false,
       refresh_generation: 0,
       refresh_pending: false,
+      open: false,
       _editor_observation: None,
     }
   }
@@ -99,22 +108,73 @@ impl CommentsPanel {
     cx: &mut Context<Self>,
   ) {
     let changed = self.panel_id != panel_id || self.io.is_some() != io.is_some();
+    let reopened = !self.open;
+    self.open = true;
     self.io = io;
-    self.panel_id = panel_id;
-    if let Some(editor) = &editor {
+    // A document switch orphans the previous editor's marks: clear them before
+    // letting go of the handle.
+    if changed && self.editor != editor {
+      self.clear_editor_marks(cx);
+    }
+    match &editor {
       // Law 6: the panel is live — every editor notify (local typing, peer
-      // imports, anchor motion) schedules a debounced reload.
-      let observed = editor.clone();
-      self._editor_observation = Some(cx.observe(&observed, |panel, _, cx| panel.schedule_refresh(cx)));
-    } else {
-      self._editor_observation = None;
+      // imports, anchor motion, the session's comment nudge) schedules a
+      // debounced reload. Re-observe only when the editor actually changes;
+      // set_context runs every rail frame.
+      Some(observed) if self.editor.as_ref() != Some(observed) => {
+        self._editor_observation = Some(cx.observe(observed, |panel, _, cx| panel.schedule_refresh(cx)));
+      },
+      Some(_) => {},
+      None => self._editor_observation = None,
     }
     self.editor = editor;
     if changed {
       self.threads.clear();
       self.error = None;
       self.reload(cx);
+    } else if reopened {
+      // Same document, panel re-shown: the cached threads are already right,
+      // but review marks were cleared on detach — reload to re-arm them.
+      self.reload(cx);
     }
+  }
+
+  /// The rail switched to another tool (or closed): review mode ends. Keeps
+  /// the thread cache for an instant reopen but stops observing the editor and
+  /// removes the marks (M3: marks exist only while the panel is open).
+  pub fn detach(&mut self, cx: &mut Context<Self>) {
+    if !self.open {
+      return;
+    }
+    self.open = false;
+    self._editor_observation = None;
+    self.clear_editor_marks(cx);
+  }
+
+  fn clear_editor_marks(&self, cx: &mut Context<Self>) {
+    if let Some(editor) = &self.editor {
+      editor.update(cx, |editor, cx| editor.set_annotation_selections(Vec::new(), cx));
+    }
+  }
+
+  /// Push the review marks for the current thread set: every unresolved
+  /// thread with a live anchor gets a dashed underline in the editor.
+  fn push_editor_marks(&self, cx: &mut Context<Self>) {
+    let Some(editor) = &self.editor else { return };
+    if !self.open {
+      return;
+    }
+    let marks: Vec<crate::rich_text_element::ExternalSelection> = self
+      .threads
+      .iter()
+      .filter(|thread| !thread.resolved)
+      .filter_map(|thread| thread.anchor)
+      .map(|(start, end)| crate::rich_text_element::ExternalSelection {
+        selection: crate::rich_text_element::EditorSelection::range(start, end),
+        color_rgb: COMMENT_MARK_RGB,
+      })
+      .collect();
+    editor.update(cx, |editor, cx| editor.set_annotation_selections(marks, cx));
   }
 
   pub fn focus_composer(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -155,6 +215,10 @@ impl CommentsPanel {
           Ok(threads) => {
             panel.threads = threads;
             panel.error = None;
+            // Review marks follow the thread set: every reload re-arms the
+            // editor overlay (this is also the solo-editing anchor refresh —
+            // no collab session required).
+            panel.push_editor_marks(cx);
           },
           Err(error) => panel.error = Some(format!("Loading comments failed: {error:#}").into()),
         }
@@ -262,6 +326,21 @@ impl Render for CommentsPanel {
         let selection = editor.read(cx).selection();
         selection.anchor != selection.head
       });
+    // C-S4 reverse link: caret inside a marked span → that thread lights up.
+    // Clicking a mark places the caret, so click-to-focus rides the same path.
+    let linked_thread = self.editor.as_ref().and_then(|editor| {
+      let caret = editor.read(cx).selection().head;
+      self
+        .threads
+        .iter()
+        .find(|thread| {
+          !thread.resolved
+            && thread
+              .anchor
+              .is_some_and(|(start, end)| start <= caret && caret <= end)
+        })
+        .map(|thread| thread.comment_id)
+    });
 
     v_flex()
       .size_full()
@@ -361,7 +440,11 @@ impl Render for CommentsPanel {
           .overflow_y_scrollbar()
           .p_2()
           .gap_2()
-          .children(open.iter().map(|thread| self.render_thread(thread, cx)))
+          .children(
+            open
+              .iter()
+              .map(|thread| self.render_thread(thread, linked_thread == Some(thread.comment_id), cx)),
+          )
           // ---- resolved accordion (the decided archive) ----
           .when(resolved_count > 0, |this| {
             this.child(
@@ -381,14 +464,14 @@ impl Render for CommentsPanel {
             )
           })
           .when(self.show_resolved, |this| {
-            this.children(resolved.iter().map(|thread| self.render_thread(thread, cx)))
+            this.children(resolved.iter().map(|thread| self.render_thread(thread, false, cx)))
           }),
       )
   }
 }
 
 impl CommentsPanel {
-  fn render_thread(&self, thread: &RuntimeCommentThread, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+  fn render_thread(&self, thread: &RuntimeCommentThread, linked: bool, cx: &mut Context<Self>) -> impl IntoElement + use<> {
     let comment_id = thread.comment_id;
     let busy = self.busy_threads.contains(&comment_id);
     let is_thread_author = thread.author_user_id == Some(self.author_user_id);
@@ -408,7 +491,7 @@ impl CommentsPanel {
       .gap_1()
       .rounded_md()
       .border_1()
-      .border_color(cx.theme().border)
+      .border_color(if linked { cx.theme().warning } else { cx.theme().border })
       .when(resolved, |this| this.opacity(0.75))
       // quote / jump target
       .child(

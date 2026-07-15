@@ -780,6 +780,7 @@ fn flow_comments_converge_with_cell_anchors_tombstones_and_frontiers() {
     let reply_id = guard.reply_to_flow_comment(anchored_id, "fixing", 9, "Sol").unwrap();
     assert!(guard.delete_flow_comment_message(anchored_id, reply_id, 7).is_err());
     guard.delete_flow_comment_message(anchored_id, reply_id, 9).unwrap();
+    drop(guard);
     (anchored_id, general_id, reply_id)
   };
 
@@ -792,11 +793,10 @@ fn flow_comments_converge_with_cell_anchors_tombstones_and_frontiers() {
       .map(|FlowPublishEvent::LocalUpdate { bytes, .. }| bytes)
       .collect()
   };
-  {
-    let mut guard = b.gate().lock(GateHolder::DocumentService).unwrap();
-    let blobs: Vec<&[u8]> = from_a.iter().map(Vec::as_slice).collect();
-    guard.import_remote_updates(&blobs).unwrap();
-  }
+  let mut import_guard = b.gate().lock(GateHolder::DocumentService).unwrap();
+  let blobs: Vec<&[u8]> = from_a.iter().map(Vec::as_slice).collect();
+  import_guard.import_remote_updates(&blobs).unwrap();
+  drop(import_guard);
 
   for handle in [&a, &b] {
     let guard = handle.gate().lock(GateHolder::DocumentService).unwrap();
@@ -809,6 +809,7 @@ fn flow_comments_converge_with_cell_anchors_tombstones_and_frontiers() {
     let frontier = anchored.created_frontier.clone().expect("birth frontier");
     // H-K0 flow mirror: the birth frontier is checkout-able on both peers.
     let historical = guard.board_at_frontier(&frontier).unwrap();
+    drop(guard);
     assert!(historical.sheets.iter().any(|sheet| sheet.cells.iter().any(|c| c.id == cell)));
     let tombstoned = anchored.messages.iter().find(|message| message.message_id == reply_id).expect("reply");
     assert!(tombstoned.deleted);

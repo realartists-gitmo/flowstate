@@ -17,6 +17,7 @@ mod support;
 
 mod actions;
 mod collab_glue;
+mod comments;
 mod dialogs;
 mod documents;
 mod flows_and_keystrokes;

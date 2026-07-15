@@ -105,7 +105,7 @@ pub(super) fn flow_card_visuals(
 #[cfg(test)]
 mod tests {
   use super::*;
-  use gpui::{px, rgba};
+  use gpui::px;
 
   #[test]
   fn flow_layout_metrics_scale_with_board_zoom() {

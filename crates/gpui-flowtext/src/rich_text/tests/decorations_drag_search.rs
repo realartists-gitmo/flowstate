@@ -201,3 +201,84 @@ fn find_text_ranges_returns_document_offsets_across_paragraphs() {
   );
 }
 
+
+// C-S4 headless coverage for the review-mark overlay model: the per-paragraph
+// filter, the hover flag, and hover reset on set replacement. The caret bug
+// taught us the decoration layer ships blind without model-level nets.
+#[gpui::test]
+fn annotation_marks_filter_per_paragraph_and_track_hover(cx: &mut gpui::TestAppContext) {
+  cx.update(gpui_component::init);
+  let document = document_from_input(
+    DocumentTheme::default(),
+    vec![
+      InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![plain("first paragraph carrying a comment span")],
+      },
+      InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![plain("second paragraph outside every span")],
+      },
+      InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![plain("third paragraph carrying another span")],
+      },
+    ],
+  );
+  let handle = cx.add_window(|_window, cx| RichTextEditor::new_with_path(document, None, cx));
+  handle
+    .update(cx, |editor, _window, cx| {
+      let spans = vec![
+        ExternalSelection {
+          selection: EditorSelection::range(
+            DocumentOffset { paragraph: 0, byte: 6 },
+            DocumentOffset { paragraph: 0, byte: 15 },
+          ),
+          color_rgb: 0x00d9_9a20,
+        },
+        ExternalSelection {
+          selection: EditorSelection::range(
+            DocumentOffset { paragraph: 2, byte: 0 },
+            DocumentOffset { paragraph: 2, byte: 5 },
+          ),
+          color_rgb: 0x00d9_9a20,
+        },
+      ];
+      editor.set_annotation_selections(spans.clone(), cx);
+      assert_eq!(editor.annotation_selections(), spans.as_slice());
+
+      let first = editor.annotation_selections_for_paragraph(0);
+      assert_eq!(first.len(), 1, "paragraph 0 intersects exactly one span");
+      assert!(!first[0].1, "nothing is hovered yet");
+      assert!(
+        editor.annotation_selections_for_paragraph(1).is_empty(),
+        "paragraph 1 has no marks"
+      );
+
+      editor.update_annotation_hover(DocumentOffset { paragraph: 2, byte: 3 }, cx);
+      let third = editor.annotation_selections_for_paragraph(2);
+      assert_eq!(third.len(), 1);
+      assert!(third[0].1, "the span under the pointer must carry the hover flag");
+      assert!(
+        !editor.annotation_selections_for_paragraph(0)[0].1,
+        "hover is exclusive to the hit span"
+      );
+
+      editor.update_annotation_hover(DocumentOffset { paragraph: 1, byte: 0 }, cx);
+      assert!(
+        !editor.annotation_selections_for_paragraph(2)[0].1,
+        "moving off the span drops the hover"
+      );
+
+      editor.update_annotation_hover(DocumentOffset { paragraph: 2, byte: 3 }, cx);
+      editor.set_annotation_selections(vec![spans[1].clone()], cx);
+      assert!(
+        !editor.annotation_selections_for_paragraph(2)[0].1,
+        "replacing the annotation set must reset the hover index"
+      );
+
+      editor.set_annotation_selections(Vec::new(), cx);
+      assert!(editor.annotation_selections().is_empty(), "clearing removes the overlay");
+    })
+    .unwrap();
+}

@@ -978,6 +978,9 @@ pub struct RichTextEditor {
   /// Kept separate from peer presence so either layer can refresh without
   /// erasing the other.
   annotation_selections: Vec<ExternalSelection>,
+  /// Index into `annotation_selections` under the pointer, painted with the
+  /// stronger hover underline (C-S4). Reset whenever the annotation set moves.
+  hovered_annotation: Option<usize>,
   /// Transient navigation flash (see [`JumpFlash`]); separate from
   /// annotations so comment refreshes never erase an in-flight flash.
   pub(super) jump_flash: Option<JumpFlash>,

@@ -22,7 +22,7 @@ pub(super) fn paint_layout(
   default_caret_color: Hsla,
   external_carets: &[ExternalCaret],
   external_selections: &[ExternalSelection],
-  annotation_selections: &[ExternalSelection],
+  annotation_selections: &[(ExternalSelection, bool)],
   jump_flash: Option<&ExternalSelection>,
   search_highlights: &[Range<DocumentOffset>],
   active_search_highlight: Option<usize>,
@@ -104,15 +104,18 @@ pub(super) fn paint_layout(
     );
   }
   // Durable annotations use their own overlay layer so presence refreshes do
-  // not make comment anchors blink or disappear.
-  for annotation in annotation_selections {
-    paint_text_range_fill(
+  // not make comment anchors blink or disappear. Review dress (C-S4/M3): a
+  // dashed underline, not a fill — the text stays exactly as it will read, the
+  // mark sits under it. The hovered span paints thicker and brighter.
+  for (annotation, hovered) in annotation_selections {
+    paint_text_range_dashed_underline(
       layout,
       &annotation.selection,
       bounds.origin,
       content_mask,
       visible_range.clone(),
-      annotation_selection_color(annotation.color_rgb),
+      annotation_underline_color(annotation.color_rgb, *hovered),
+      if *hovered { px(2.0) } else { px(1.0) },
       window,
     );
   }
@@ -722,8 +725,10 @@ fn remote_selection_color(color_rgb: u32) -> Hsla {
   Hsla::from(rgb(color_rgb)).opacity(0.30)
 }
 
-fn annotation_selection_color(color_rgb: u32) -> Hsla {
-  gpui::Hsla::from(rgb(color_rgb)).opacity(0.22)
+/// The comment-mark underline: strong enough to find, quiet enough to read
+/// over. Hover lifts it to full strength.
+fn annotation_underline_color(color_rgb: u32, hovered: bool) -> Hsla {
+  gpui::Hsla::from(rgb(color_rgb)).opacity(if hovered { 0.95 } else { 0.6 })
 }
 
 /// Stronger than the annotation fill: the flash must register as an event.
@@ -776,6 +781,73 @@ fn paint_text_range_fill(
         Bounds::new(origin + line.origin + point(x1, px(0.0)), size((x2 - x1).max(px(1.0)), line.line_height)),
         color.clone(),
       ));
+    }
+  }
+}
+
+/// The C-S4 review mark: a dashed underline along the baseline of every line
+/// segment a range covers. Same range→segment geometry as
+/// [`paint_text_range_fill`]; only the ink differs — short quads with gaps
+/// instead of a translucent block, so marked text reads exactly as it will
+/// read with the panel closed.
+#[allow(clippy::too_many_arguments, reason = "mirrors paint_text_range_fill, which shares this shape")]
+fn paint_text_range_dashed_underline(
+  layout: &LayoutState,
+  selection: &EditorSelection,
+  origin: Point<Pixels>,
+  content_mask: Bounds<Pixels>,
+  visible_range: Range<usize>,
+  color: Hsla,
+  thickness: Pixels,
+  window: &mut Window,
+) {
+  const DASH: f32 = 4.0;
+  const GAP: f32 = 3.0;
+  if selection.is_caret() {
+    return;
+  }
+  let range = selection.normalized();
+  for paragraph in &layout.paragraphs[visible_range] {
+    if paragraph.index < range.start.paragraph || paragraph.index > range.end.paragraph {
+      continue;
+    }
+    if !paragraph_intersects_mask(paragraph, origin, content_mask) {
+      continue;
+    }
+    let start = if paragraph.index == range.start.paragraph { range.start.byte } else { 0 };
+    let end = if paragraph.index == range.end.paragraph {
+      range.end.byte
+    } else {
+      paragraph.len
+    };
+    for line in &paragraph.lines {
+      if !line_intersects_mask(line, origin, content_mask) {
+        continue;
+      }
+      let line_start = start.max(line.start_byte);
+      let line_end = end.min(line.end_byte);
+      if line_start > line_end || (line_start == line_end && !(line.start_byte == line.end_byte && start <= line_start && end >= line_end)) {
+        continue;
+      }
+      let x1 = x_for_byte(line, line_start);
+      let x2 = if line_start == line_end {
+        x1 + px(8.0)
+      } else {
+        x_for_byte(line, line_end)
+      };
+      // Sit just under the baseline, clamped inside the line box so tight
+      // line heights never spill the mark into the next line.
+      let y = (line.baseline_y() + px(2.0)).min(line.line_height - thickness);
+      let mut x = x1;
+      let x2 = x2.max(x1 + px(DASH));
+      while x < x2 {
+        let dash_end = (x + px(DASH)).min(x2);
+        window.paint_quad(fill(
+          Bounds::new(origin + line.origin + point(x, y), size(dash_end - x, thickness)),
+          color,
+        ));
+        x = dash_end + px(GAP);
+      }
     }
   }
 }

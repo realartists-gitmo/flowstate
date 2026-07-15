@@ -118,6 +118,7 @@ impl RichTextEditor {
       external_carets: Vec::new(),
       external_selections: Vec::new(),
       annotation_selections: Vec::new(),
+      hovered_annotation: None,
       jump_flash: None,
       jump_flash_generation: 0,
       search_highlights: Vec::new(),
@@ -251,6 +252,7 @@ impl RichTextEditor {
     self.external_carets.clear();
     self.external_selections.clear();
     self.annotation_selections.clear();
+    self.hovered_annotation = None;
     self.jump_flash = None;
     self.last_text_input_at = None;
     self.ime_marked_range = None;
@@ -494,6 +496,29 @@ impl RichTextEditor {
   pub fn set_annotation_selections(&mut self, selections: Vec<ExternalSelection>, cx: &mut Context<Self>) {
     if self.annotation_selections != selections {
       self.annotation_selections = selections;
+      // The set moved under the pointer; a stale index would glow the wrong
+      // span until the next mouse move.
+      self.hovered_annotation = None;
+      cx.notify();
+    }
+  }
+
+  /// The installed annotation overlay, read-only (hosts and headless tests
+  /// assert on what would paint).
+  pub fn annotation_selections(&self) -> &[ExternalSelection] {
+    &self.annotation_selections
+  }
+
+  /// Track which annotation span the pointer is inside so its underline can
+  /// paint the hover emphasis. Called from the mouse-move path with an
+  /// already-computed hit-test offset (no extra hit test).
+  pub(super) fn update_annotation_hover(&mut self, offset: DocumentOffset, cx: &mut Context<Self>) {
+    let next = self
+      .annotation_selections
+      .iter()
+      .position(|annotation| !annotation.selection.is_caret() && offset_in_range(offset, annotation.selection.normalized()));
+    if self.hovered_annotation != next {
+      self.hovered_annotation = next;
       cx.notify();
     }
   }
@@ -513,15 +538,18 @@ impl RichTextEditor {
       .collect()
   }
 
-  pub(super) fn annotation_selections_for_paragraph(&self, paragraph_ix: usize) -> Vec<ExternalSelection> {
+  /// Annotation spans intersecting `paragraph_ix`, each tagged with whether it
+  /// is the hovered span (which paints the stronger underline).
+  pub(super) fn annotation_selections_for_paragraph(&self, paragraph_ix: usize) -> Vec<(ExternalSelection, bool)> {
     self
       .annotation_selections
       .iter()
-      .filter(|annotation| {
+      .enumerate()
+      .filter(|(_, annotation)| {
         let range = annotation.selection.normalized();
         range.start.paragraph <= paragraph_ix && range.end.paragraph >= paragraph_ix
       })
-      .cloned()
+      .map(|(ix, annotation)| (annotation.clone(), self.hovered_annotation == Some(ix)))
       .collect()
   }
 

@@ -178,8 +178,6 @@ pub struct CollabSession {
   presence_refresh_generation: u64,
   external_caret_refresh_pending: bool,
   external_caret_refresh_generation: u64,
-  comment_annotation_refresh_pending: bool,
-  comment_annotation_refresh_generation: u64,
   timers_started: bool,
   endpoint_online: bool,
   zero_neighbors_since: Option<Instant>,
@@ -255,8 +253,6 @@ impl CollabSession {
       presence_refresh_generation: 0,
       external_caret_refresh_pending: false,
       external_caret_refresh_generation: 0,
-      comment_annotation_refresh_pending: false,
-      comment_annotation_refresh_generation: 0,
       timers_started: false,
       endpoint_online: true,
       zero_neighbors_since: Some(now),
@@ -348,8 +344,6 @@ impl CollabSession {
       presence_refresh_generation: 0,
       external_caret_refresh_pending: false,
       external_caret_refresh_generation: 0,
-      comment_annotation_refresh_pending: false,
-      comment_annotation_refresh_generation: 0,
       timers_started: false,
       endpoint_online: true,
       zero_neighbors_since: Some(now),
@@ -646,6 +640,17 @@ impl CollabSession {
     }
   }
 
+  /// C-S4: comment marks are owned by the comments panel, which observes the
+  /// editor entity. A comment-only remote import changes no projection text and
+  /// so would never notify the editor — nudge it so comment observers reload.
+  /// GPUI coalesces notifies within a frame, so this is free when a projection
+  /// change already notified.
+  fn nudge_comment_observers(&mut self, cx: &mut Context<Self>) {
+    if let Some(editor) = self.rich_text_editor() {
+      editor.update(cx, |_, cx| cx.notify());
+    }
+  }
+
   pub(super) fn flow_editor(&self) -> Option<Entity<FlowEditor>> {
     match self.editor.as_ref()? {
       CollabEditor::Flow(editor) => Some(editor.clone()),
@@ -670,7 +675,6 @@ impl CollabSession {
     self.attach_direct_request_pump(cx);
     self.attach_timers(cx);
     self.refresh_runtime_version_vector(cx);
-    self.refresh_comment_annotations(cx);
     // Spec §6: pump once immediately so intents committed before the session
     // started (the publish queue is filled by gate-held local commits
     // regardless of any session existing) broadcast right away.
@@ -1187,7 +1191,7 @@ impl CollabSession {
       }
     }
     if event_count > 0 {
-      self.refresh_comment_annotations(cx);
+      self.nudge_comment_observers(cx);
     }
     let apply_ms = apply_started.elapsed().as_millis();
     if apply_ms > 150 {

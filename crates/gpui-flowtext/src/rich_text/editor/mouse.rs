@@ -94,9 +94,13 @@ impl RichTextEditor {
   fn on_mouse_move(&mut self, event: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
     self.last_drag_position = Some(event.position);
     if !event.dragging() {
-      let paragraph_ix = self
-        .hit_test_document_position(event.position, window, cx)
-        .paragraph;
+      let hover_offset = self.hit_test_document_position(event.position, window, cx);
+      let paragraph_ix = hover_offset.paragraph;
+      // C-S4: annotation hover reuses this hit test; only bothers when a
+      // comment overlay is actually installed.
+      if !self.annotation_selections().is_empty() || self.hovered_annotation.is_some() {
+        self.update_annotation_hover(hover_offset, cx);
+      }
       let next_hover = self.config.show_section_collapse_controls.then_some(paragraph_ix).filter(|paragraph_ix| {
         self.section_collapsed_at_heading(*paragraph_ix, &[0, 1, 2, 3]).is_some()
       });
