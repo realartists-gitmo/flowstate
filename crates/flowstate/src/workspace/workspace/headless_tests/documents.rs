@@ -79,6 +79,8 @@ fn temporary_session_file_lands_in_sandbox(cx: &mut TestAppContext) {
     outline_collapsed: false,
     pinned_entry_indices: vec![],
     speech_entry_index: None,
+    left_nav_tub: false,
+    nav_width: None,
   });
   let sandbox_session = support::sandbox_config_dir().join("flowstate-open-tabs-session.json");
   let path = super::super::temporary_workspace_session_path();

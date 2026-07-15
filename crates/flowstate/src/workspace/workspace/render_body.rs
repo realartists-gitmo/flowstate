@@ -55,7 +55,12 @@ impl Workspace {
     } else {
       px(240.0)
     };
-    let nav_width = panel_sizes.first().copied().unwrap_or(outline_width).max(outline_width);
+    let nav_width = panel_sizes
+      .first()
+      .copied()
+      .or(self.restored_nav_width)
+      .unwrap_or(outline_width)
+      .max(outline_width);
     let outline_range_end = if self.outline_collapsed {
       SIDE_PANEL_COLLAPSED_WIDTH
     } else {
@@ -66,12 +71,20 @@ impl Workspace {
       .with_state(&self.body_resizable_state)
       .child(
         resizable_panel()
-          .size(outline_width)
+          .size(if self.outline_collapsed { outline_width } else { nav_width })
           .size_range(outline_width..outline_range_end)
           .grow(false)
           .child(if self.outline_collapsed {
+            // The collapsed rail names what it actually reopens (Law 1).
+            let reopen_label = if self.left_nav_mode == LeftNavMode::Tub {
+              "Show tub"
+            } else if self.active_flow.is_some() {
+              "Show flow outline"
+            } else {
+              "Show outline"
+            };
             self
-              .render_collapsed_side_panel("Show outline", IconName::PanelLeftOpen, |workspace, cx| workspace.toggle_outline(cx), cx)
+              .render_collapsed_side_panel(reopen_label, IconName::PanelLeftOpen, |workspace, cx| workspace.toggle_outline(cx), cx)
               .into_any_element()
           } else {
             self.render_left_nav(nav_width, window, cx).into_any_element()

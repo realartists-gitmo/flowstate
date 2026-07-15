@@ -18,23 +18,16 @@ impl Workspace {
       .map(|cache| cache.row_guides.clone())
       .unwrap_or_else(|| Rc::new(Vec::new()));
     let search_match_outline_paragraphs = self.search_match_outline_paragraphs(cx);
-    let outline_levels: HashMap<usize, usize> = self
+    let outline_levels: Rc<HashMap<usize, usize>> = self
       .outline_cache
       .as_ref()
-      .map(|cache| {
-        let mut levels = HashMap::new();
-        fn collect_levels(node: &OutlineNode, levels: &mut HashMap<usize, usize>) {
-          levels.insert(node.paragraph_ix, node.level);
-          for child in &node.children {
-            collect_levels(child, levels);
-          }
-        }
-        for node in cache.nodes.iter() {
-          collect_levels(node, &mut levels);
-        }
-        levels
-      })
+      .map(|cache| cache.levels.clone())
       .unwrap_or_default();
+    let outline_is_empty = self
+      .outline_cache
+      .as_ref()
+      .is_none_or(|cache| cache.nodes.is_empty());
+    let has_document = self.active_editor.is_some();
     v_flex()
       .size_full()
       .h_full()
@@ -43,7 +36,23 @@ impl Workspace {
       .bg(cx.theme().sidebar)
       .text_color(cx.theme().sidebar_foreground)
       .child(self.render_left_nav_header("Outline", cx))
-      .child(
+      .when(outline_is_empty, |this| {
+        let message = if has_document {
+          "No sections yet — Pockets, Hats, Blocks and Tags appear here as you style paragraphs."
+        } else {
+          "No document open."
+        };
+        this.child(
+          div()
+            .flex_1()
+            .w_full()
+            .p_3()
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .child(message),
+        )
+      })
+      .when(!outline_is_empty, |this| this.child(
         div()
           .flex_1()
           .w_full()
@@ -72,15 +81,21 @@ impl Workspace {
                 }
               })
             };
-            let outline_level = paragraph_ix.and_then(|ix| outline_levels.get(&ix).copied()).unwrap_or(3);
-            let context_menu_action: Option<ContextMenuAction> = Some(Rc::new({
-              let workspace = workspace.clone();
-              move |position, window, cx| {
-                let _ = workspace.update(cx, |workspace, cx| {
-                  workspace.show_outline_context_menu(outline_level, position, window, cx);
-                });
-              }
-            }));
+            let outline_level = paragraph_ix.and_then(|ix| outline_levels.get(&ix).copied());
+            // No fabricated level: rows the cache cannot place get no menu.
+            let context_menu_action: Option<ContextMenuAction> = outline_level.map(|outline_level| -> ContextMenuAction {
+              Rc::new({
+                let workspace = workspace.clone();
+                move |position, window, cx| {
+                  let _ = workspace.update(cx, |workspace, cx| {
+                    workspace.show_outline_context_menu(outline_level, position, window, cx);
+                  });
+                }
+              })
+            });
+            // Color keys on the SEMANTIC level (matching the level names), not
+            // tree depth — a skipped-Hat block no longer wears Hat colors.
+            let hierarchy_color = outline_level.map(|level| outline_hierarchy_color(level, cx));
             render_sidebar_tree_row(
               SidebarTreeRow {
                 row_id: ("outline-tree-item", ix),
@@ -94,7 +109,7 @@ impl Workspace {
                 is_active: is_active_outline,
                 has_search_match,
                 guide,
-                hierarchy_color: None,
+                hierarchy_color,
                 label_color: None,
                 interaction_palette: None,
                 guide_colors: None,
@@ -111,7 +126,7 @@ impl Workspace {
               cx,
             )
           })),
-      )
+      ))
       .into_any_element()
   }
 

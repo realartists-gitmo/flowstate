@@ -6,6 +6,10 @@ struct OutlineCache {
   signature_scratch: Vec<OutlineEntry>,
   visible_revision: u64,
   nodes: Rc<Vec<OutlineNode>>,
+  /// `paragraph_ix` -> SEMANTIC level, rebuilt with the node tree (not per
+  /// render). Drives row color AND the context menu, so color always means
+  /// what the level name says — the depth/level divergence bug dies here.
+  levels: Rc<HashMap<usize, usize>>,
   visible_paragraphs: Vec<usize>,
   row_guides: Rc<Vec<OutlineRowGuides>>,
   tree_items: Vec<TreeItem>,
@@ -15,6 +19,7 @@ struct OutlineCache {
 impl OutlineCache {
   fn new(document_id: Uuid, edit_generation: u64, signature: OutlineSignature) -> Self {
     let nodes = outline_nodes_from_entries(&signature.entries);
+    let levels = outline_levels_from_entries(&signature.entries);
     Self {
       document_id,
       edit_generation,
@@ -22,6 +27,7 @@ impl OutlineCache {
       signature_scratch: Vec::new(),
       visible_revision: u64::MAX,
       nodes: Rc::new(nodes),
+      levels: Rc::new(levels),
       visible_paragraphs: Vec::new(),
       row_guides: Rc::new(Vec::new()),
       tree_items: Vec::new(),
@@ -53,9 +59,17 @@ impl OutlineCache {
     }
 
     self.nodes = Rc::new(outline_nodes_from_entries(&self.signature.entries));
+    self.levels = Rc::new(outline_levels_from_entries(&self.signature.entries));
     self.visible_revision = u64::MAX;
     true
   }
+}
+
+fn outline_levels_from_entries(entries: &[OutlineEntry]) -> HashMap<usize, usize> {
+  entries
+    .iter()
+    .map(|entry| (entry.paragraph_ix, entry.level))
+    .collect()
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -231,13 +245,13 @@ struct OutlineContextMenu {
   _subscription: Subscription,
 }
 
-fn outline_level_name(level: usize) -> &'static str {
+fn outline_level_plural(level: usize) -> &'static str {
   match level {
-    0 => "Pocket",
-    1 => "Hat",
-    2 => "Block",
-    3 => "Tag / Analytic",
-    _ => "Entry",
+    0 => "Pockets",
+    1 => "Hats",
+    2 => "Blocks",
+    3 => "Tags & Analytics",
+    _ => "Entries",
   }
 }
 
@@ -302,7 +316,7 @@ fn outline_paragraph_label_into(document: &DocumentProjection, paragraph_ix: usi
   if label.is_empty() {
     label.push_str("(empty)");
   } else if truncated {
-    label.push_str("...");
+    label.push('…');
   }
 }
 

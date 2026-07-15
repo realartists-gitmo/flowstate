@@ -190,6 +190,7 @@ impl Workspace {
       temporary_workspace_session_pending: None,
       temporary_workspace_session_persist_scheduled: false,
       left_nav_mode: LeftNavMode::Outline,
+      restored_nav_width: None,
       tab_bar_scroll_handle: ScrollHandle::new(),
       pinned_document_ids: Vec::new(),
       speech_document_id: None,
@@ -776,6 +777,13 @@ impl Workspace {
       outline_collapsed: self.outline_collapsed,
       pinned_entry_indices,
       speech_entry_index,
+      left_nav_tub: self.left_nav_mode == LeftNavMode::Tub,
+      nav_width: self
+        .body_resizable_state
+        .read(cx)
+        .sizes()
+        .first()
+        .map(|width| f32::from(*width)),
     });
     if self.temporary_workspace_session_persist_scheduled {
       return;
@@ -870,6 +878,8 @@ impl Workspace {
     }
     self.ribbon_collapsed = session.ribbon_collapsed;
     self.outline_collapsed = session.outline_collapsed;
+    self.left_nav_mode = if session.left_nav_tub { LeftNavMode::Tub } else { LeftNavMode::Outline };
+    self.restored_nav_width = session.nav_width.map(px);
     self.pinned_document_ids = pinned_ids;
     self.speech_document_id = speech_id;
 
@@ -1871,6 +1881,13 @@ struct TemporaryWorkspaceSession {
   pinned_entry_indices: Vec<usize>,
   #[serde(default)]
   speech_entry_index: Option<usize>,
+  /// O-S1: the left nav remembers its mode across launches (the audit's
+  /// always-resets-to-Outline amnesia).
+  #[serde(default)]
+  left_nav_tub: bool,
+  /// O-S1: the nav's resized width survives too.
+  #[serde(default)]
+  nav_width: Option<f32>,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]

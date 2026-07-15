@@ -91,6 +91,8 @@ pub struct Workspace {
   temporary_workspace_session_pending: Option<TemporaryWorkspaceSession>,
   temporary_workspace_session_persist_scheduled: bool,
   left_nav_mode: LeftNavMode,
+  /// O-S1: session-restored nav width, consumed as the panel's initial size.
+  restored_nav_width: Option<Pixels>,
   tab_bar_scroll_handle: ScrollHandle,
   pinned_document_ids: Vec<Uuid>,
   speech_document_id: Option<Uuid>,

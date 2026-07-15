@@ -199,7 +199,7 @@ impl Workspace {
     let workspace = cx.entity().downgrade();
     let menu = PopupMenu::build(window, cx, move |menu, _, _| {
       menu.min_w(px(180.0)).item(
-        PopupMenuItem::new(format!("Toggle all {}s", outline_level_name(level))).on_click(move |_, _, cx| {
+        PopupMenuItem::new(format!("Toggle all {}", outline_level_plural(level))).on_click(move |_, _, cx| {
           let _ = workspace.update(cx, |workspace, cx| {
             workspace.outline_context_menu = None;
             workspace.toggle_outline_level(level, cx);
