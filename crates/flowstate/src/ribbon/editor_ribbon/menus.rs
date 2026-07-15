@@ -656,7 +656,7 @@ fn modern_export_format(
         .ghost()
         .h(chip_height)
         .px(metrics.chip_padding_x)
-        .tooltip("Export as format")
+        .tooltip("Export a copy of this document (.docx)")
         .when_some(label.icon_path, |this, path| {
           this.child(
             Icon::default()
@@ -735,7 +735,7 @@ fn modern_export_send(
         .ghost()
         .h(chip_height)
         .px(metrics.chip_padding_x)
-        .tooltip("Copy without analytics")
+        .tooltip("Send a copy to the send directory (.db8)")
         .when_some(label.icon_path, |this, path| {
           this.child(
             Icon::default()

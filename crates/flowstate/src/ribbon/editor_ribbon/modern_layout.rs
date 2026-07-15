@@ -257,22 +257,8 @@ fn modern_command_chip(
     .when(show_shortcut(options), |this| {
       this.when_some(shortcut, |this, shortcut| this.child(keycap(shortcut, cx)))
     })
-    .on_click(move |_, window, cx| match command_id {
-      RibbonCommandId::ToggleSpeechDocument => {
-        if let (Some(workspace), Some(panel_id)) = (workspace.clone(), panel_id) {
-          let _ = workspace.update(cx, |workspace, cx| workspace.toggle_speech_document(panel_id, cx));
-        }
-      },
-      RibbonCommandId::Revisions => {
-        if let Some(workspace) = workspace.clone() {
-          let _ = workspace.update(cx, |workspace, cx| workspace.open_revision_dialog(window, cx));
-        }
-      },
-      _ => {
-        editor.update(cx, |editor, cx| {
-          perform_ribbon_command(editor, command_id, window, cx);
-        });
-      },
+    .on_click(move |_, window, cx| {
+      perform_ribbon_command_in_workspace(&editor, workspace.as_ref(), panel_id, command_id, window, cx);
     })
     .into_any_element()
 }

@@ -4,12 +4,11 @@ use gpui::{
 };
 use gpui_component::Size;
 use gpui_component::button::DropdownButton;
-use gpui_component::button::{Button, ButtonGroup, ButtonVariants as _, Toggle, ToggleVariants as _};
+use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::h_flex;
 use gpui_component::kbd::Kbd;
 use gpui_component::menu::PopupMenuItem;
 use gpui_component::{ActiveTheme as _, Disableable as _, Icon, IconName, PixelsExt as _, Selectable as _, Sizable as _};
-use serde::{Deserialize, Serialize};
 
 use crate::commands::{CommandId, action_for_command, active_first_key_for, context_for};
 use crate::ribbon::style_catalog::{HIGHLIGHT_STYLE_SPECS, PARAGRAPH_STYLE_SPECS, SEMANTIC_STYLE_SPECS};
@@ -23,16 +22,6 @@ use crate::rich_text_element::{
 
 /// User-selectable ribbon renderer.
 ///
-/// This enum is intentionally serializable so a future settings panel can save
-/// `editor.ribbon_mode` without touching the render implementations.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum RibbonMode {
-  Legacy,
-  #[default]
-  Modern,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RibbonDensity {
   Full,
@@ -63,13 +52,8 @@ impl Default for ModernRibbonOptions {
   }
 }
 
-/// Switching layer for the editor styles ribbon.
-///
-/// `LegacyStylesRibbon` and `ModernStylesRibbon` stay separate so the old
-/// ribbon can be restored by changing only this mode value.
 pub struct EditorRibbon {
   editor: Entity<RichTextEditor>,
-  mode: RibbonMode,
   modern_options: ModernRibbonOptions,
   height: gpui::Pixels,
   workspace: Option<WeakEntity<Workspace>>,
@@ -84,32 +68,14 @@ pub type StylesRibbon = EditorRibbon;
 #[hotpath::measure_all]
 impl EditorRibbon {
   pub fn new(editor: Entity<RichTextEditor>) -> Self {
-    Self::new_with_mode(editor, RibbonMode::default())
-  }
-
-  pub fn new_with_mode(editor: Entity<RichTextEditor>, mode: RibbonMode) -> Self {
     Self {
       editor,
-      mode,
       modern_options: ModernRibbonOptions::default(),
       height: default_ribbon_height(),
       workspace: None,
       panel_id: None,
       speech_active: false,
       speech_send_enabled: false,
-    }
-  }
-
-  pub fn mode(&self) -> RibbonMode {
-    self.mode
-  }
-
-  /// Future settings panels can call this after updating
-  /// `settings.editor.ribbon_mode`.
-  pub fn set_mode(&mut self, mode: RibbonMode, cx: &mut Context<Self>) {
-    if self.mode != mode {
-      self.mode = mode;
-      cx.notify();
     }
   }
 
@@ -159,8 +125,4 @@ impl EditorRibbon {
     matches!(armed_tool, Some(ArmedInlineTool::Strikethrough)) || matches!(state.strikethrough, SelectionState::Uniform(true))
   }
 
-  fn highlight_selected(state: &RichTextEditorStyleState, armed_tool: Option<ArmedInlineTool>, style: HighlightStyle) -> bool {
-    matches!(armed_tool, Some(ArmedInlineTool::Highlight(current)) if current == style)
-      || matches!(state.highlight, SelectionState::Uniform(Some(current)) if current == style)
-  }
 }

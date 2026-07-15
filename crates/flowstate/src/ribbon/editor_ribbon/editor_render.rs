@@ -13,9 +13,8 @@ impl Render for EditorRibbon {
       )
     };
 
-    match self.mode {
-      RibbonMode::Legacy => LegacyStylesRibbon::render(self.editor.clone(), &style_state, armed_tool, cx),
-      RibbonMode::Modern => ModernStylesRibbon::render(
+    {
+      ModernStylesRibbon::render(
         self.editor.clone(),
         &style_state,
         armed_tool,
@@ -33,7 +32,7 @@ impl Render for EditorRibbon {
         window.viewport_size().width,
         window,
         cx,
-      ),
+      )
     }
   }
 }

@@ -1,6 +1,5 @@
 include!("core.rs");
 include!("editor_render.rs");
-include!("legacy.rs");
 include!("modern_types.rs");
 include!("modern_impl.rs");
 include!("metrics.rs");

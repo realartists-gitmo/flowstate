@@ -179,10 +179,6 @@ pub fn load_document_theme() -> DocumentTheme {
 }
 
 #[hotpath::measure]
-pub fn load_ribbon_mode() -> RibbonMode {
-  load_app_settings().editor.ribbon_mode
-}
-
 #[hotpath::measure]
 pub fn load_smart_word_selection() -> bool {
   load_app_settings().editor.smart_word_selection
@@ -476,12 +472,6 @@ pub fn save_document_theme(theme: &DocumentTheme) -> io::Result<()> {
 }
 
 #[hotpath::measure]
-pub fn save_ribbon_mode(ribbon_mode: RibbonMode) -> io::Result<()> {
-  let mut settings = load_app_settings();
-  settings.editor.ribbon_mode = ribbon_mode;
-  save_app_settings(settings)
-}
-
 #[hotpath::measure]
 pub fn save_smart_word_selection(enabled: bool) -> io::Result<()> {
   let mut settings = load_app_settings();

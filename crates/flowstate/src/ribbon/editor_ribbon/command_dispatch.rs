@@ -17,8 +17,67 @@ fn command_sort_key(command_id: Option<CommandId>) -> u16 {
   }
 }
 
+/// P4-S1: THE dispatch path. Every ribbon command — editor-level and
+/// workspace-level alike — executes here, so keybindings and the omni
+/// palette reach the same behavior the chips do. (The old shape was hollow
+/// for Revisions/Speech/Export/Invisibility, with the real behavior hiding
+/// in per-chip click handlers — the audit's split-brain defect.)
 #[hotpath::measure]
-fn perform_ribbon_command(editor: &mut RichTextEditor, command_id: RibbonCommandId, window: &Window, cx: &mut Context<RichTextEditor>) {
+pub(crate) fn perform_ribbon_command_in_workspace(
+  editor: &Entity<RichTextEditor>,
+  workspace: Option<&WeakEntity<Workspace>>,
+  panel_id: Option<Uuid>,
+  command_id: RibbonCommandId,
+  window: &mut Window,
+  cx: &mut App,
+) {
+  match command_id {
+    RibbonCommandId::Revisions => {
+      if let Some(workspace) = workspace {
+        let _ = workspace.update(cx, |workspace, cx| workspace.open_revision_dialog(window, cx));
+      }
+    },
+    RibbonCommandId::ToggleSpeechDocument => {
+      if let (Some(workspace), Some(panel_id)) = (workspace, panel_id) {
+        let _ = workspace.update(cx, |workspace, cx| workspace.toggle_speech_document(panel_id, cx));
+      }
+    },
+    RibbonCommandId::SendToSpeechDocument => {
+      if let Some(workspace) = workspace {
+        let _ = workspace.update(cx, |workspace, cx| {
+          workspace.send_selection_to_speech_document(window, cx);
+        });
+      }
+    },
+    RibbonCommandId::SendToSpeechDocumentEnd => {
+      if let Some(workspace) = workspace {
+        let _ = workspace.update(cx, |workspace, cx| {
+          workspace.send_selection_to_speech_document_end(window, cx);
+        });
+      }
+    },
+    RibbonCommandId::ExportFormat => {
+      export_format_from_ribbon(editor.clone(), DocumentExportFormat::Docx, workspace.cloned(), cx);
+    },
+    RibbonCommandId::ExportSend => {
+      send_format_from_ribbon(
+        editor.clone(),
+        DocumentExportFormat::NativeWithExtension(flowstate_document::FLOWSTATE_EXTENSION),
+        workspace.cloned(),
+        cx,
+      );
+    },
+    RibbonCommandId::ToggleInvisibility => {
+      editor.update(cx, |editor, cx| editor.toggle_invisibility_mode(cx));
+    },
+    _ => {
+      editor.update(cx, |editor, cx| perform_editor_ribbon_command(editor, command_id, window, cx));
+    },
+  }
+}
+
+#[hotpath::measure]
+fn perform_editor_ribbon_command(editor: &mut RichTextEditor, command_id: RibbonCommandId, window: &Window, cx: &mut Context<RichTextEditor>) {
   match command_id {
     RibbonCommandId::Paragraph(style) => {
       editor.set_paragraph_style_for_selection(style, cx);
@@ -28,6 +87,7 @@ fn perform_ribbon_command(editor: &mut RichTextEditor, command_id: RibbonCommand
         editor.toggle_inline_tool(ArmedInlineTool::Semantic(style), cx);
       }
     },
+    // Handled by the workspace-level dispatch above; unreachable through it.
     RibbonCommandId::ToggleSpeechDocument | RibbonCommandId::SendToSpeechDocument | RibbonCommandId::SendToSpeechDocumentEnd => {},
     RibbonCommandId::CondenseMenu | RibbonCommandId::CondensedMenu => {
       if editor_has_selected_text_or_focused_caret(editor, window, cx) {

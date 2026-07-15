@@ -4,7 +4,6 @@ use gpui::{Hsla, px};
 use gpui_component::PixelsExt;
 use serde::{Deserialize, Serialize};
 
-use crate::ribbon::RibbonMode;
 use crate::rich_text_element::{
   CustomParagraphBorder, CustomParagraphStyle, CustomSemanticStyle, DocumentTheme, ThemeUnderline, flowstate_document_theme,
 };
@@ -143,7 +142,6 @@ mod local_user_id_serde {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct EditorSettings {
-  pub ribbon_mode: RibbonMode,
   pub smart_word_selection: bool,
   pub autosave: bool,
   pub send_to_document_directory: bool,
@@ -160,7 +158,6 @@ pub struct ToolkitSettings {
 impl Default for EditorSettings {
   fn default() -> Self {
     Self {
-      ribbon_mode: RibbonMode::default(),
       smart_word_selection: true,
       autosave: false,
       send_to_document_directory: true,

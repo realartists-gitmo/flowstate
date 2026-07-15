@@ -9,7 +9,6 @@ use gpui_component::dock::{Panel, PanelControl, PanelEvent, PanelInfo, PanelStat
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::app_settings::load_ribbon_mode;
 use crate::commands::FindInDocumentAction;
 use crate::ribbon::EditorRibbon;
 use crate::rich_text_element::{DocumentOffset, RichTextEditor};
@@ -46,8 +45,7 @@ impl DocumentPanel {
     window: &mut Window,
     cx: &mut Context<Self>,
   ) -> Self {
-    let ribbon_mode = load_ribbon_mode();
-    let ribbon = cx.new(|_| EditorRibbon::new_with_mode(editor.clone(), ribbon_mode));
+    let ribbon = cx.new(|_| EditorRibbon::new(editor.clone()));
     let search_bar = cx.new(|cx| DocumentSearchBar::new(window, cx));
     let _search_bar_subscription = cx.subscribe(&search_bar, |panel, _, event: &DocumentSearchBarEvent, cx| match event {
       DocumentSearchBarEvent::QueryChanged
