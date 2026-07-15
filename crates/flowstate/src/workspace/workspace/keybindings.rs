@@ -78,6 +78,33 @@ impl Workspace {
           flow.update(cx, |editor, cx| editor.strike_selected(cx));
           true
         },
+        CommandId::FlowNewFamily => {
+          flow.update(cx, |editor, cx| {
+            editor.add_new_family(cx);
+            editor.focus_active_cell(window, cx);
+          });
+          true
+        },
+        CommandId::FlowNavigateUp | CommandId::FlowNavigateDown | CommandId::FlowNavigateLeft | CommandId::FlowNavigateRight => {
+          let direction = match command {
+            CommandId::FlowNavigateUp => crate::flow::editor::GridDirection::Up,
+            CommandId::FlowNavigateDown => crate::flow::editor::GridDirection::Down,
+            CommandId::FlowNavigateLeft => crate::flow::editor::GridDirection::Left,
+            _ => crate::flow::editor::GridDirection::Right,
+          };
+          flow.update(cx, |editor, cx| editor.navigate(direction, cx));
+          true
+        },
+        CommandId::FlowMoveUp | CommandId::FlowMoveDown | CommandId::FlowMoveLeft | CommandId::FlowMoveRight => {
+          let direction = match command {
+            CommandId::FlowMoveUp => crate::flow::editor::GridDirection::Up,
+            CommandId::FlowMoveDown => crate::flow::editor::GridDirection::Down,
+            CommandId::FlowMoveLeft => crate::flow::editor::GridDirection::Left,
+            _ => crate::flow::editor::GridDirection::Right,
+          };
+          flow.update(cx, |editor, cx| editor.move_active_cell(direction, cx));
+          true
+        },
         _ => false,
       };
       if handled {

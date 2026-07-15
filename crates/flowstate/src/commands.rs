@@ -111,6 +111,15 @@ pub enum CommandId {
   FlowAddSiblingAbove,
   FlowDeleteSelected,
   FlowStrike,
+  FlowNewFamily,
+  FlowNavigateUp,
+  FlowNavigateDown,
+  FlowNavigateLeft,
+  FlowNavigateRight,
+  FlowMoveUp,
+  FlowMoveDown,
+  FlowMoveLeft,
+  FlowMoveRight,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -245,6 +254,15 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
   CommandSpec::new(CommandId::FlowAddSiblingAbove, "Flow: Add Sibling Above", APP, &["alt-enter"]),
   CommandSpec::new(CommandId::FlowDeleteSelected, "Flow: Delete Selected", APP, &["cmd-delete"]),
   CommandSpec::new(CommandId::FlowStrike, "Flow: Strike", APP, &["cmd-shift-x", "ctrl-shift-x"]),
+  CommandSpec::new(CommandId::FlowNewFamily, "Flow: New Family", APP, &["cmd-enter", "ctrl-enter"]),
+  CommandSpec::new(CommandId::FlowNavigateUp, "Flow: Navigate Up", APP, &["ctrl-up"]),
+  CommandSpec::new(CommandId::FlowNavigateDown, "Flow: Navigate Down", APP, &["ctrl-down"]),
+  CommandSpec::new(CommandId::FlowNavigateLeft, "Flow: Navigate Left", APP, &["ctrl-left"]),
+  CommandSpec::new(CommandId::FlowNavigateRight, "Flow: Navigate Right", APP, &["ctrl-right"]),
+  CommandSpec::new(CommandId::FlowMoveUp, "Flow: Move Up", APP, &["shift-alt-up"]),
+  CommandSpec::new(CommandId::FlowMoveDown, "Flow: Move Down", APP, &["shift-alt-down"]),
+  CommandSpec::new(CommandId::FlowMoveLeft, "Flow: Move Left", APP, &["shift-alt-left"]),
+  CommandSpec::new(CommandId::FlowMoveRight, "Flow: Move Right", APP, &["shift-alt-right"]),
 ];
 
 #[hotpath::measure]

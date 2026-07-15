@@ -104,6 +104,7 @@ impl FlowEditor {
     });
   }
 
+  #[allow(dead_code, reason = "cell-zone sampling retired by slot capture; kept for the intent-log field round")]
   pub(super) fn log_drag_over_cell(&mut self, over: CellId, cursor: Point<Pixels>, bounds: Bounds<Pixels>, intent: FlowDropIntent) {
     if self.drag_log.is_none() {
       return;
@@ -177,7 +178,7 @@ impl FlowEditor {
     }));
   }
 
-  fn cell_label(&self, id: CellId) -> String {
+  pub(super) fn cell_label(&self, id: CellId) -> String {
     self
       .board()
       .sheets

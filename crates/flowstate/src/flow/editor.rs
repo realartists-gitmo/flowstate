@@ -28,13 +28,16 @@ mod annotation;
 mod cell_editing;
 mod connector;
 mod drag_drop;
+mod grid_nav;
 mod layout;
 mod telemetry;
 mod zoom;
 
+pub use grid_nav::GridDirection;
+
 use annotation::paint_stroke;
 use connector::paint_connector_family;
-use drag_drop::{DropEdge, FlowCellDrag, FlowCellDragPreview};
+use drag_drop::{DragSession, FlowCellDrag, FlowCellDragPreview, WirePlugDrag, WirePlugPreview};
 use layout::{CellMeasurement, sheet_cell_layout};
 use zoom::grid_dot_metrics;
 
@@ -51,6 +54,13 @@ pub enum AnnotationTool {
   None,
   Marker,
   Eraser,
+}
+
+/// A spoken refusal (spec §3.1 F3): message toast + optional cell shake.
+struct RefusalNotice {
+  message: String,
+  cell: Option<CellId>,
+  at: std::time::Instant,
 }
 
 struct PanDragState {
@@ -90,6 +100,16 @@ pub struct FlowEditor {
   cell_editor_subscriptions: std::collections::HashMap<CellId, Subscription>,
   pending_cell_drop: Option<FlowDropIntent>,
   dragging_cell: Option<CellId>,
+  /// Live drag bookkeeping (frozen slot baseline, pads, fling samples).
+  drag: Option<DragSession>,
+  /// W2 multi-select: the set every op applies to (always contains the
+  /// active cell while non-empty).
+  selected_cells: HashSet<CellId>,
+  refusal: Option<RefusalNotice>,
+  /// G5 wire re-plug: the cell whose plug is being dragged to a new parent.
+  replug_cell: Option<CellId>,
+  /// `FLOWSTATE_INTENT_LOG` debug overlay: the last few intents + outcomes.
+  intent_log: std::collections::VecDeque<SharedString>,
   drag_autoscroll: Option<gpui::Point<gpui::Pixels>>,
   drag_autoscroll_scheduled: bool,
   drag_log: Option<telemetry::DragLogSession>,
@@ -146,6 +166,11 @@ impl FlowEditor {
       cell_editor_subscriptions: std::collections::HashMap::new(),
       pending_cell_drop: None,
       dragging_cell: None,
+      drag: None,
+      selected_cells: HashSet::new(),
+      refusal: None,
+      replug_cell: None,
+      intent_log: std::collections::VecDeque::new(),
       drag_autoscroll: None,
       drag_autoscroll_scheduled: false,
       drag_log: None,
@@ -197,10 +222,33 @@ impl FlowEditor {
     Some(document)
   }
 
+  /// The `FLOWSTATE_INTENT_LOG` debug overlay (spec Part 5): alpha field
+  /// calibration wants to SEE what each gesture committed.
+  fn intent_log_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("FLOWSTATE_INTENT_LOG").is_ok_and(|value| !matches!(value.trim(), "" | "0" | "false")))
+  }
+
+  fn log_intent(&mut self, entry: String) {
+    if !Self::intent_log_enabled() {
+      return;
+    }
+    self.intent_log.push_back(entry.into());
+    while self.intent_log.len() > 10 {
+      self.intent_log.pop_front();
+    }
+  }
+
   /// Apply one structural intent through the authority and integrate the
   /// synchronous outcome (board copy, stream drains, undo state, publish).
   fn apply_intent(&mut self, intent: &FlowIntent, cx: &mut Context<Self>) -> Result<FlowLocalOutcome, FlowWriteRejected> {
-    let outcome = self.handle.apply(intent)?;
+    let class = intent.class();
+    let outcome = self.handle.apply(intent);
+    self.log_intent(match &outcome {
+      Ok(_) => format!("{class} ✓"),
+      Err(error) => format!("{class} ✗ {error}"),
+    });
+    let outcome = outcome?;
     self.board = outcome.board.clone();
     for cell in &outcome.content_cells {
       self.cell_documents.borrow_mut().remove(cell);
@@ -673,8 +721,96 @@ impl FlowEditor {
       .is_some_and(|cell| cell.summary.is_empty)
   }
 
+  /// W2: the set an op applies to — the multi-selection when one exists,
+  /// else the active cell alone. Returned in sheet order.
+  fn operation_set(&self, sheet_id: SheetId) -> Vec<CellId> {
+    if self.selected_cells.is_empty() {
+      return self.active_cell.into_iter().collect();
+    }
+    self
+      .board
+      .sheets
+      .iter()
+      .find(|sheet| sheet.id == sheet_id)
+      .map(|sheet| {
+        sheet
+          .cells
+          .iter()
+          .map(|cell| cell.id)
+          .filter(|id| self.selected_cells.contains(id))
+          .collect()
+      })
+      .unwrap_or_default()
+  }
+
+  pub fn selected_cells(&self) -> &HashSet<CellId> {
+    &self.selected_cells
+  }
+
+  pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
+    if !self.selected_cells.is_empty() {
+      self.selected_cells.clear();
+      cx.notify();
+    }
+  }
+
+  /// W2 shift-click: toggle a cell in the multi-selection (the active cell
+  /// joins the set the first time a second cell is added).
+  pub fn toggle_select_cell(&mut self, cell_id: CellId, cx: &mut Context<Self>) {
+    if self.selected_cells.is_empty()
+      && let Some(active) = self.active_cell
+      && active != cell_id
+    {
+      self.selected_cells.insert(active);
+    }
+    if !self.selected_cells.remove(&cell_id) {
+      self.selected_cells.insert(cell_id);
+    }
+    cx.notify();
+  }
+
+  /// W2 double-click on a parent: select its whole thread.
+  pub fn select_thread(&mut self, cell_id: CellId, cx: &mut Context<Self>) {
+    let Some(sheet) = self
+      .active_sheet
+      .and_then(|sheet_id| self.board.sheets.iter().find(|sheet| sheet.id == sheet_id))
+    else {
+      return;
+    };
+    self.selected_cells = flowstate_flow::board_ops::subtree_cell_ids(sheet, cell_id)
+      .into_iter()
+      .collect();
+    cx.notify();
+  }
+
+  /// Run one set-op as ONE undo group (W2 law).
+  fn grouped<T>(&mut self, count: usize, apply: impl FnOnce(&mut Self) -> T) -> T {
+    if count > 1 {
+      let _ = self.handle.undo_group_start();
+      let result = apply(self);
+      let _ = self.handle.undo_group_end();
+      result
+    } else {
+      apply(self)
+    }
+  }
+
   pub fn delete_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-    let Some((sheet_id, cell_id)) = self.active_sheet.zip(self.active_cell) else {
+    let Some(sheet_id) = self.active_sheet else {
+      return;
+    };
+    let set = self.operation_set(sheet_id);
+    if set.len() > 1 {
+      self.grouped(set.len(), |editor| {
+        for cell_id in set {
+          let _ = editor.apply_intent(&FlowIntent::DeleteCell { sheet_id, cell_id }, cx);
+        }
+      });
+      self.selected_cells.clear();
+      self.changed(None, cx);
+      return;
+    }
+    let Some(cell_id) = self.active_cell else {
       return;
     };
     let fallback = self
@@ -711,16 +847,30 @@ impl FlowEditor {
   }
 
   pub fn strike_selected(&mut self, cx: &mut Context<Self>) {
-    let Some((sheet_id, cell_id)) = self.active_sheet.zip(self.active_cell) else {
+    let Some(sheet_id) = self.active_sheet else {
       return;
     };
-    let struck = !self.active_cell_is_struck();
-    if self
-      .apply_intent(&FlowIntent::SetCellStruck { sheet_id, cell_id, struck }, cx)
-      .is_ok()
-    {
-      self.changed(Some(cell_id), cx);
+    let set = self.operation_set(sheet_id);
+    if set.is_empty() {
+      return;
     }
+    // The set converges to one state: struck unless EVERY member already is.
+    let struck = !set.iter().all(|cell_id| {
+      self
+        .board
+        .sheets
+        .iter()
+        .find(|sheet| sheet.id == sheet_id)
+        .and_then(|sheet| sheet.cells.iter().find(|cell| cell.id == *cell_id))
+        .is_some_and(|cell| cell.summary.struck)
+    });
+    let active = self.active_cell;
+    self.grouped(set.len(), |editor| {
+      for cell_id in set {
+        let _ = editor.apply_intent(&FlowIntent::SetCellStruck { sheet_id, cell_id, struck }, cx);
+      }
+    });
+    self.changed(active, cx);
   }
 
   pub fn can_undo(&self) -> bool {
@@ -798,14 +948,22 @@ impl FlowEditor {
     let Some(real_sheet) = self.board.sheets.iter().find(|sheet| sheet.id == sheet_id) else {
       return div().child("Select a sheet").into_any_element();
     };
-    // During a drag the layout stays stable (no reflow) so drop locations don't move under the pointer:
-    // the dragged cell holds its slot as a faded placeholder, its children stay put, and the landing is
-    // shown by a directional accent on the target cell. The real subtree move still happens on drop.
-    let sheet = real_sheet;
-    let drop_target = self.drag_drop_target(real_sheet);
-    let Some(definition) = self.board.format.sheet_type(sheet.sheet_type_id) else {
+    // §3.1: the live make-room reflow IS the preview — while a drag has a
+    // pending landing, render the board AS IF the move had committed (the
+    // dragged thread appears translucent at its previewed slot). Slot CAPTURE
+    // runs against the baseline frozen at drag start, so the reflow never
+    // moves a drop target out from under the pointer.
+    let Some(definition) = self.board.format.sheet_type(real_sheet.sheet_type_id) else {
       return div().child("Invalid sheet type").into_any_element();
     };
+    let preview_sheet: Option<flowstate_flow::Sheet> = self
+      .dragging_cell
+      .zip(self.pending_cell_drop)
+      .and_then(|(dragged, intent)| {
+        let column_ids: Vec<_> = definition.columns.iter().map(|column| column.id).collect();
+        flowstate_flow::board_ops::preview_move_cell_subtree(real_sheet, &column_ids, dragged, intent)
+      });
+    let sheet = preview_sheet.as_ref().unwrap_or(real_sheet);
     let active = self.active_cell;
     let strokes: Vec<_> = if !self.hidden_annotation_sheets.contains(&sheet_id) {
       sheet
@@ -827,30 +985,7 @@ impl FlowEditor {
     let control_size = px(20.0 * zoom);
     let control_icon_size = px(12.0 * zoom);
     let cell_layout = sheet_cell_layout(sheet, &self.cell_measurements, zoom);
-    // The drop preview marks the target with a thin, non-displacing landing bar. A full-card-height
-    // gap used to be inserted here, which shoved the target — and everything below it — down by a
-    // whole card; for a Before landing that slid the very cell you were aiming at out from under the
-    // pointer (making fine placement feel like chasing a moving target, and silently handing the drop
-    // off to the column handler at family boundaries). A slim bar keeps the pointer over its target.
-    // Tuple: (column index, top in layout space, bar height).
-    let column_gap: Option<(usize, f32, f32)> = drop_target.and_then(|(target, edge)| {
-      let target_cell = sheet.cells.iter().find(|cell| cell.id == target)?;
-      let target_layout = cell_layout.get(&target)?;
-      let target_column = definition
-        .columns
-        .iter()
-        .position(|column| column.id == target_cell.column_id)?;
-      // Keep well under a card's half-height (min card is 54px) so opening the bar never displaces the
-      // target far enough for the pointer to fall off it.
-      let height = 5.0 * zoom;
-      Some(match edge {
-        DropEdge::Before => (target_column, target_layout.top, height),
-        DropEdge::After => (target_column, target_layout.top + target_layout.height, height),
-        DropEdge::Child => (target_column + 1, target_layout.top, height),
-      })
-    });
     let board_width = px((32.0 + definition.columns.len() as f32 * 280.0 + definition.columns.len().saturating_sub(1) as f32 * 16.0) * zoom);
-    let column_count = definition.columns.len();
     let weak_editor = cx.entity().downgrade();
     let weak_connector_editor = weak_editor.clone();
     let mut children_by_parent: std::collections::HashMap<CellId, Vec<CellId>> = std::collections::HashMap::new();
@@ -877,12 +1012,9 @@ impl FlowEditor {
       .flex()
       .gap(px(16.0 * zoom))
       .p(px(16.0 * zoom))
-      // Board-level fallback so the landing preview never freezes in a dead zone. The per-column
-      // handlers only act inside a column div, but the 16px inter-column flex gaps and the outer
-      // padding lie outside every column, so a pointer crossing between columns would otherwise stop
-      // updating the drop. This runs first (capture phase, parent-before-child), so a real column or
-      // cell handler still overrides it whenever the pointer is genuinely inside one; it only "wins"
-      // in the strips no column covers.
+      // THE slot-capture handler (§3.1): pointer → column (full-height x
+      // capture) → frozen-baseline slot → meaning set + pads. One handler,
+      // board-wide — per-cell drop zones are gone.
       .on_drag_move(cx.listener(move |editor, event: &DragMoveEvent<FlowCellDrag>, window, cx| {
         let bounds = event.bounds;
         let position = event.event.position;
@@ -890,27 +1022,9 @@ impl FlowEditor {
           return;
         }
         editor.update_drag_autoscroll(position, window, cx);
-        if editor.cursor_over_live_cell(position) {
-          return;
-        }
-        let zoom = editor.board_zoom;
-        let column_width = 280.0 * zoom;
-        let stride = (280.0 + 16.0) * zoom;
-        let relative = (position.x - bounds.left()).as_f32() - 16.0 * zoom;
-        if relative < 0.0 {
-          editor.update_column_drop(0, position.y, cx);
-          return;
-        }
-        let raw_index = (relative / stride).floor();
-        let within = relative - raw_index * stride;
-        let index = raw_index as usize;
-        if within <= column_width && index < column_count {
-          // Inside a real column — its own handler already covers this point, so don't fight it.
-          return;
-        }
-        // In the gap after `index` (or the trailing padding) — snap to the nearest real column.
-        editor.update_column_drop(index.min(column_count.saturating_sub(1)), position.y, cx);
+        editor.update_drag_slot(bounds, position, cx);
       }))
+      .on_drop(cx.listener(|editor, drag: &FlowCellDrag, _, cx| editor.finish_cell_drop(drag.cell_id, cx)))
       .children(definition.columns.iter().enumerate().map(|(column_index, column)| {
         let side_palette = flow_side_palette(column.side, cx);
         let side_color = side_palette.base;
@@ -920,22 +1034,9 @@ impl FlowEditor {
           .w(px(280.0 * zoom))
           .flex_none()
           .flex_col()
-          .on_drag_move(cx.listener(move |editor, event: &DragMoveEvent<FlowCellDrag>, window, cx| {
-            // Same as the cell handler: `on_drag_move` is not hit-tested, so gate on this column's own
-            // bounds, and defer to the cell handler whenever the pointer is actually over a live cell.
-            if !event.bounds.contains(&event.event.position) {
-              return;
-            }
-            editor.update_drag_autoscroll(event.event.position, window, cx);
-            if editor.cursor_over_live_cell(event.event.position) {
-              return;
-            }
-            editor.update_column_drop(column_index, event.event.position.y, cx);
-            if let Some(intent) = editor.pending_cell_drop {
-              editor.log_drag_over_column(column_index, event.event.position, intent);
-            }
-          }))
-          .on_drop(cx.listener(|editor, drag: &FlowCellDrag, _, cx| editor.finish_cell_drop(drag.cell_id, cx)))
+          // Part 4: column wash — the side's identity at ambient strength.
+          .bg(side_color.opacity(0.035))
+          .rounded(px(9.0 * zoom))
           .child(
             div()
               .flex()
@@ -986,27 +1087,22 @@ impl FlowEditor {
               let top = |id| cell_layout.get(id).map(|layout| layout.top).unwrap_or(0.0);
               top(&a.id).partial_cmp(&top(&b.id)).unwrap_or(std::cmp::Ordering::Equal)
             });
-            // Open the landing gap (if it belongs to this column) before the first cell at/after its
-            // top, shifting the rest of the column down by the gap's height. Everything else stays put.
-            let mut gap_pending = column_gap.filter(|(gap_column, _, _)| *gap_column == column_index).map(|(_, top, height)| (top, height));
+
+            // §3.1 F3: a refused move SHAKES the named card (decaying
+            // oscillation) while the toast states the reason.
+            let shake = self.refusal.as_ref().and_then(|notice| {
+              let age = notice.at.elapsed().as_secs_f32();
+              (age < 0.45).then_some(())?;
+              notice.cell.map(|cell| (cell, 6.0 * (age * 35.0).sin() * (1.0 - age / 0.45)))
+            });
             let mut previous_bottom = 0.0;
-            let mut shift = 0.0;
             let mut elements: Vec<AnyElement> = column_cells.into_iter().map(|cell| {
             let id = cell.id;
-            let is_ghost = self.dragging_cell == Some(id);
+            // The previewed thread renders translucent at its landing slot —
+            // the make-room reflow IS the preview (§3.1).
+            let is_ghost = self.drag_subtree_contains(id) || self.dragging_cell == Some(id);
             let layout = cell_layout.get(&id).copied().unwrap_or_default();
-            let gap_slot = if let Some((gap_top, gap_height)) = gap_pending
-              && layout.top >= gap_top - 0.5
-            {
-              let gap_spacer = px((gap_top - previous_bottom).max(0.0));
-              previous_bottom = gap_top + gap_height;
-              shift = gap_height;
-              gap_pending = None;
-              Some((gap_spacer, px(gap_height)))
-            } else {
-              None
-            };
-            let cell_top = layout.top + shift;
+            let cell_top = layout.top;
             let spacer_height = px((cell_top - previous_bottom).max(0.0));
             previous_bottom = cell_top + layout.height;
             let label: SharedString = cell.summary.summary_text.to_string().into();
@@ -1035,15 +1131,6 @@ impl FlowEditor {
             div()
               .w_full()
               .flex_col()
-              .when_some(gap_slot, |this, (gap_spacer, gap_height)| {
-                this.child(div().h(gap_spacer).flex_none()).child(
-                  div()
-                    .w_full()
-                    .h(gap_height)
-                    .rounded(px(2.0 * zoom))
-                    .bg(side_palette.active),
-                )
-              })
               .when(spacer_height > px(0.0), |this| this.child(div().h(spacer_height).flex_none()))
               .on_children_prepainted({
                 let weak_editor = weak_editor.clone();
@@ -1053,25 +1140,56 @@ impl FlowEditor {
                   }
                 }
               })
-              .child(
+              .child({
+              // Part 4 visual system: soft-fill borderless card composited at
+              // paint time; contrast-guard hairline; light-theme shadow /
+              // dark-theme fill lift. Active/selected read as accent rings.
+              let visuals = crate::flow::cell_theme::flow_card_visuals(
+                side_color,
+                cx.theme().background,
+                cx.theme().foreground,
+                cx.theme().border,
+                cx.theme().is_dark(),
+                if active == Some(id) { 0.08 } else { 0.0 },
+              );
+              let replug_candidate = self.replug_cell.is_some() && self.replug_candidate(id);
+              let ring = if replug_candidate {
+                // G5: valid re-plug parents HIGHLIGHT while the plug rides.
+                Some(cx.theme().primary)
+              } else if active == Some(id) {
+                Some(side_palette.active)
+              } else if self.selected_cells.contains(&id) {
+                Some(side_palette.base.opacity(0.7))
+              } else {
+                visuals.hairline
+              };
+              // F3: while a drag is live, targets that cannot accept the drop
+              // (the dragged thread itself) DIM instead of silently refusing.
+              let drag_dimmed = (!is_ghost
+                && self.dragging_cell.is_some_and(|dragged| {
+                  dragged != id && flowstate_flow::board_ops::is_descendant_of(sheet, id, dragged)
+                }))
+                || (self.replug_cell.is_some_and(|replug| replug != id) && !replug_candidate);
+              let shake_offset = shake.and_then(|(cell, offset)| (cell == id).then_some(offset));
               div()
                 .id(("flow-cell", id.as_u128() as u64))
                 .relative()
                 .w_full()
                 .min_h(px(54.0 * zoom))
                 .p(px(10.0 * zoom))
-                .rounded(px(6.0 * zoom))
-                .border(px(1.0 * zoom))
-                .border_color(if active == Some(id) {
-                  side_palette.active
-                } else {
-                  side_color.opacity(0.56)
+                .rounded(px(9.0 * zoom))
+                .bg(visuals.fill)
+                .when_some(ring, |this, color| this.border(px(1.0)).border_color(color))
+                .when(visuals.shadow, |this| {
+                  this.shadow(vec![gpui::BoxShadow {
+                    color: gpui::hsla(0.0, 0.0, 0.0, 0.12),
+                    offset: point(px(0.0), px(2.0)),
+                    blur_radius: px(6.0),
+                    spread_radius: px(0.0),
+                  }])
                 })
-                .bg(if active == Some(id) {
-                  side_palette.active.opacity(0.14)
-                } else {
-                  cx.theme().background
-                })
+                .when(drag_dimmed, |this| this.opacity(0.45))
+                .when_some(shake_offset, |this, offset| this.ml(px(offset)))
                 .hover(|style| style.bg(side_palette.hover.opacity(0.12)))
                 .cursor_pointer()
                 .when(active != Some(id) && !is_ghost, |this| {
@@ -1081,7 +1199,14 @@ impl FlowEditor {
                   let drag_label = label.clone();
                   this.on_drag(FlowCellDrag { cell_id: id }, move |drag, _, _, cx| {
                     let _ = weak.update(cx, |editor, cx| editor.begin_cell_drag(drag.cell_id, cx));
-                    cx.new(|_| FlowCellDragPreview { label: drag_label.clone() })
+                    let census = weak.update(cx, |editor, _| editor.drag_census(drag.cell_id)).unwrap_or(0);
+                    let preview = cx.new(|_| FlowCellDragPreview {
+                      label: drag_label.clone(),
+                      census,
+                      meaning: SharedString::default(),
+                    });
+                    let _ = weak.update(cx, |editor, _| editor.set_drag_preview_entity(preview.downgrade()));
+                    preview
                   })
                 })
                 .on_mouse_down(MouseButton::Left, cx.listener(|editor, _, _, cx| {
@@ -1090,54 +1215,55 @@ impl FlowEditor {
                   }
                   cx.stop_propagation();
                 }))
-                .on_click(cx.listener(move |editor, _, window, cx| {
+                .on_click(cx.listener(move |editor, event: &gpui::ClickEvent, window, cx| {
+                  // W2: shift-click grows the multi-selection; double-click a
+                  // parent selects its whole thread; a plain click collapses
+                  // the set back to a single active cell.
+                  if event.modifiers().shift {
+                    editor.toggle_select_cell(id, cx);
+                    return;
+                  }
+                  if event.click_count() >= 2 {
+                    editor.select_thread(id, cx);
+                    editor.activate_cell(id, cx);
+                    return;
+                  }
+                  editor.clear_selection(cx);
                   editor.activate_cell(id, cx);
                   if let Some(cell_editor) = editor.cell_editors.get(&id) {
                     cell_editor.read(cx).focus_handle(cx).focus(window);
                   }
                 }))
-                // Ghost cells (the dragged subtree drawn in its previewed drop position) must not be drop
-                // targets. Otherwise the ghost sits under the cursor, captures the drag, resolves to a
-                // self-referential intent, and the placement oscillates and pins near the source/parent.
-                .when(!is_ghost, |this| {
-                  this
-                    .on_drag_move(cx.listener(move |editor, event: &DragMoveEvent<FlowCellDrag>, window, cx| {
-                      // `on_drag_move` is dispatched in the CAPTURE phase to every registered element
-                      // (not hit-tested), parent-before-child — so the column handler above has already
-                      // run this frame. Each handler hit-tests itself against its own bounds; the actual
-                      // column-vs-cell arbitration is the `cursor_over_live_cell` guard in the column
-                      // handler, NOT the `stop_propagation` below (which fires too late to gate the
-                      // already-executed column handler and only suppresses later-painted siblings).
-                      if !event.bounds.contains(&event.event.position) {
-                        return;
-                      }
-                      // Left 60% reorders siblings (before/after by vertical half); right 40% nests as a
-                      // child (first/last by vertical half). The wider child zone is far easier to hit
-                      // than the old 28% strip, and top/bottom finally makes "first child" reachable.
-                      let in_child_zone = event.event.position.x >= event.bounds.left() + event.bounds.size.width * 0.6;
-                      let upper_half = event.event.position.y < event.bounds.top() + event.bounds.size.height / 2.0;
-                      let destination = if in_child_zone && can_receive_child {
-                        if upper_half {
-                          FlowDropIntent::FirstChildOf(id)
-                        } else {
-                          FlowDropIntent::LastChildOf(id)
-                        }
-                      } else if upper_half {
-                        FlowDropIntent::BeforeSibling(id)
-                      } else {
-                        FlowDropIntent::AfterSibling(id)
-                      };
-                      editor.update_cell_drop(destination, cx);
-                      editor.update_drag_autoscroll(event.event.position, window, cx);
-                      editor.log_drag_over_cell(id, event.event.position, event.bounds, destination);
-                      cx.stop_propagation();
-                    }))
-                    .on_drop(cx.listener(|editor, drag: &FlowCellDrag, _, cx| {
-                      editor.finish_cell_drop(drag.cell_id, cx);
-                      cx.stop_propagation();
-                    }))
+                // §3.1: cells carry NO drop zones — the board-level slot
+                // capture owns landing semantics; the previewed thread renders
+                // as a translucent in-slot ghost.
+                .when(is_ghost, |this| this.opacity(0.5).border_1().border_dashed().border_color(side_palette.active))
+                // G5: the fat plug — a parented card's incoming wire ends in a
+                // draggable grip at its left edge; drag it to a highlighted
+                // candidate to re-plug the thread.
+                .when(cell.parent_id.is_some(), |this| {
+                  let weak = weak_editor.clone();
+                  this.child(
+                    div()
+                      .id(("flow-wire-plug", id.as_u128() as u64))
+                      .absolute()
+                      .left(px(-7.0 * zoom))
+                      .top_1_2()
+                      .size(px(11.0 * zoom))
+                      .rounded_full()
+                      .bg(cx.theme().muted_foreground.opacity(if active == Some(id) { 0.9 } else { 0.45 }))
+                      .hover(|style| style.bg(cx.theme().primary))
+                      .cursor_grab()
+                      .on_drag(WirePlugDrag { cell_id: id }, move |drag, _, _, cx| {
+                        let _ = weak.update(cx, |editor, cx| editor.begin_wire_replug(drag.cell_id, cx));
+                        cx.new(|_| WirePlugPreview)
+                      }),
+                  )
                 })
-                .when(is_ghost, |this| this.opacity(0.5).border_dashed().border_color(side_palette.active))
+                .on_drop(cx.listener(move |editor, drag: &WirePlugDrag, _, cx| {
+                  editor.finish_wire_replug(drag.cell_id, id, cx);
+                  cx.stop_propagation();
+                }))
                 .child(
                   div()
                     .id(("flow-cell-drag-handle", id.as_u128() as u64))
@@ -1154,7 +1280,14 @@ impl FlowEditor {
                       let drag_label = label.clone();
                       move |drag, _, _, cx| {
                         let _ = weak.update(cx, |editor, cx| editor.begin_cell_drag(drag.cell_id, cx));
-                        cx.new(|_| FlowCellDragPreview { label: drag_label.clone() })
+                        let census = weak.update(cx, |editor, _| editor.drag_census(drag.cell_id)).unwrap_or(0);
+                        let preview = cx.new(|_| FlowCellDragPreview {
+                          label: drag_label.clone(),
+                          census,
+                          meaning: SharedString::default(),
+                        });
+                        let _ = weak.update(cx, |editor, _| editor.set_drag_preview_entity(preview.downgrade()));
+                        preview
                       }
                     }),
                 )
@@ -1185,27 +1318,10 @@ impl FlowEditor {
                     || div().child(label).into_any_element(),
                     |document| RichTextDocumentElement::new(document).with_invisibility_mode(uses_summary_projection).into_any_element(),
                   )
-                }),
-            )
+                })
+            })
             .into_any_element()
-          }).collect();
-            if let Some((gap_top, gap_height)) = gap_pending {
-              let gap_spacer = px((gap_top - previous_bottom).max(0.0));
-              elements.push(
-                div()
-                  .w_full()
-                  .flex_col()
-                  .child(div().h(gap_spacer).flex_none())
-                  .child(
-                    div()
-                      .w_full()
-                      .h(px(gap_height))
-                      .rounded(px(2.0 * zoom))
-                      .bg(side_palette.active),
-                  )
-                  .into_any_element(),
-              );
-            }
+          }).collect::<Vec<AnyElement>>();
             elements
           })
       }))
@@ -1216,7 +1332,9 @@ impl FlowEditor {
             let Some(editor) = weak_connector_editor.upgrade() else {
               return;
             };
-            let connector_bounds = &editor.read(cx).cell_bounds;
+            let editor_read = editor.read(cx);
+            let connector_bounds = &editor_read.cell_bounds;
+            let focused_cell = editor_read.active_cell;
             for (parent_id, child_ids) in &connector_families {
               let Some(parent) = connector_bounds.get(parent_id) else {
                 continue;
@@ -1225,12 +1343,75 @@ impl FlowEditor {
                 .iter()
                 .filter_map(|id| connector_bounds.get(id).copied())
                 .collect::<Vec<_>>();
-              paint_connector_family(*parent, &children, cx.theme().foreground, window);
+              // Part 4 wires: always-on muted (~40%); the focused cell's
+              // family thickens with an accent (spec G5 hover/focus).
+              let focused = focused_cell.is_some_and(|cell| cell == *parent_id || child_ids.contains(&cell));
+              let (color, emphasis) = if focused {
+                (cx.theme().primary.opacity(0.75), 1.15)
+              } else {
+                (cx.theme().muted_foreground.opacity(0.4), 0.55)
+              };
+              paint_connector_family(*parent, &children, color, emphasis, window);
             }
           },
         )
         .absolute()
         .inset_0(),
+      )
+      // R1/R5 landing pads: unfold at the gap when a spot plausibly means
+      // more than one parentage. gpui always paints the cursor ghost last, so
+      // the row is OFFSET below the grab point (and the ghost is translucent)
+      // to honor the never-obscure-the-options law.
+      .when_some(
+        self
+          .drag
+          .as_ref()
+          .filter(|drag| !drag.pads.is_empty())
+          .and_then(|drag| drag.pad_origin.map(|origin| (drag.pads.clone(), origin, drag.hovered_pad))),
+        |this, (pads, origin, hovered)| {
+          let local_x = px(origin.x.as_f32() - self.viewport_origin.x);
+          let local_y = px(origin.y.as_f32() - self.viewport_origin.y + 34.0);
+          this.child(
+            div()
+              .absolute()
+              .left(local_x)
+              .top(local_y)
+              .flex()
+              .gap_1()
+              .children(pads.into_iter().enumerate().map(|(pad_ix, pad)| {
+                let selected = hovered == Some(pad_ix);
+                div()
+                  .id(("flow-pad", pad_ix))
+                  .px_2()
+                  .py_1()
+                  .rounded_full()
+                  .bg(if selected {
+                    cx.theme().primary
+                  } else {
+                    cx.theme().popover.opacity(0.95)
+                  })
+                  .text_color(if selected {
+                    cx.theme().primary_foreground
+                  } else {
+                    cx.theme().popover_foreground
+                  })
+                  .border_1()
+                  .border_color(cx.theme().primary.opacity(0.6))
+                  .text_size(px(12.0))
+                  .whitespace_nowrap()
+                  .child(pad.label.clone())
+                  .on_drag_move(cx.listener(move |editor, event: &DragMoveEvent<FlowCellDrag>, _, cx| {
+                    if event.bounds.contains(&event.event.position) {
+                      editor.hover_pad(pad_ix, event.bounds, cx);
+                    }
+                  }))
+                  .on_drop(cx.listener(|editor, drag: &FlowCellDrag, _, cx| {
+                    editor.finish_cell_drop(drag.cell_id, cx);
+                    cx.stop_propagation();
+                  }))
+              })),
+          )
+        },
       )
       .child(
         div()
@@ -1277,9 +1458,18 @@ impl Render for FlowEditor {
   fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     self.apply_pending_camera_center();
     self.refresh_active_cell_theme(cx);
+    // Refusal voice: keep frames coming while the toast/shake animates.
+    let refusal_toast = self.refusal_toast();
+    if self.refusal.is_some() {
+      cx.on_next_frame(window, |_, _, cx| cx.notify());
+    }
+    if !cx.has_active_drag() && self.replug_cell.is_some() {
+      self.replug_cell = None;
+    }
     if !cx.has_active_drag() && (self.pending_cell_drop.is_some() || self.dragging_cell.is_some()) {
       self.pending_cell_drop = None;
       self.dragging_cell = None;
+      self.drag = None;
       self.drag_autoscroll = None;
       // A drag that ended without an accepted drop (released over empty space) still flushes, tagged
       // as an uncommitted attempt.
@@ -1439,5 +1629,54 @@ impl Render for FlowEditor {
           .child(Scrollbar::vertical(&self.board_scroll).scrollbar_show(ScrollbarShow::Always))
           .child(Scrollbar::horizontal(&self.board_scroll).scrollbar_show(ScrollbarShow::Always)),
       )
+      // FLOWSTATE_INTENT_LOG: the alpha-calibration overlay — every gesture's
+      // committed intent, newest last.
+      .when(Self::intent_log_enabled() && !self.intent_log.is_empty(), |this| {
+        this.child(
+          div()
+            .absolute()
+            .top(px(8.0))
+            .right(px(16.0))
+            .flex()
+            .flex_col()
+            .gap_0p5()
+            .px_2()
+            .py_1()
+            .rounded(cx.theme().radius)
+            .bg(cx.theme().popover.opacity(0.85))
+            .border_1()
+            .border_color(cx.theme().border)
+            .text_size(px(11.0))
+            .text_color(cx.theme().muted_foreground)
+            .font_family("monospace")
+            .children(self.intent_log.iter().cloned()),
+        )
+      })
+      // §3.1 F3: the refusal SPEAKS — a transient toast naming the reason,
+      // fading out over its last half-second.
+      .when_some(refusal_toast, |this, (message, _, age)| {
+        let fade = ((2.4 - age) / 0.5).clamp(0.0, 1.0);
+        this.child(
+          div()
+            .absolute()
+            .bottom(px(20.0))
+            .left_0()
+            .right_0()
+            .flex()
+            .justify_center()
+            .child(
+              div()
+                .px_3()
+                .py_1p5()
+                .rounded(cx.theme().radius)
+                .bg(cx.theme().popover.opacity(0.92 * fade))
+                .border_1()
+                .border_color(cx.theme().border.opacity(fade))
+                .text_color(cx.theme().popover_foreground.opacity(fade))
+                .text_size(px(13.0))
+                .child(message),
+            ),
+        )
+      })
   }
 }

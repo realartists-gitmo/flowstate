@@ -182,6 +182,15 @@ pub(crate) fn action_for_command(command: CommandId) -> Option<Box<dyn Action>> 
     | CommandId::SwitchToTab10
     | CommandId::ScrollToParagraph => return None,
     CommandId::FlowAddSiblingAbove | CommandId::FlowDeleteSelected | CommandId::FlowStrike => return None,
+    CommandId::FlowNewFamily
+    | CommandId::FlowNavigateUp
+    | CommandId::FlowNavigateDown
+    | CommandId::FlowNavigateLeft
+    | CommandId::FlowNavigateRight
+    | CommandId::FlowMoveUp
+    | CommandId::FlowMoveDown
+    | CommandId::FlowMoveLeft
+    | CommandId::FlowMoveRight => return None,
   };
   Some(action)
 }

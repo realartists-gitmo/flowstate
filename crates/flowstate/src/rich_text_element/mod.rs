@@ -97,6 +97,15 @@ pub fn flowstate_command_to_rich_text(command: CommandId) -> Option<RichTextEdit
     | CommandId::ScrollToParagraph
     | CommandId::FlowAddSiblingAbove
     | CommandId::FlowDeleteSelected
-    | CommandId::FlowStrike => return None,
+    | CommandId::FlowStrike
+    | CommandId::FlowNewFamily
+    | CommandId::FlowNavigateUp
+    | CommandId::FlowNavigateDown
+    | CommandId::FlowNavigateLeft
+    | CommandId::FlowNavigateRight
+    | CommandId::FlowMoveUp
+    | CommandId::FlowMoveDown
+    | CommandId::FlowMoveLeft
+    | CommandId::FlowMoveRight => return None,
   })
 }

@@ -60,6 +60,63 @@ fn scale_flow_layout_metrics(theme: &mut DocumentTheme, zoom: f32) {
   }
 }
 
+/// Part 4 visual system: the soft-fill borderless card, DERIVED from the
+/// active theme at paint time (no stored colors anywhere).
+pub(super) struct FlowCardVisuals {
+  /// Composited card fill (side wash over the theme surface).
+  pub fill: Hsla,
+  /// Contrast guard: a 1px `theme().border` hairline when the fill-vs-canvas
+  /// contrast collapses under the active theme.
+  pub hairline: Option<Hsla>,
+  /// Light themes elevate with a shadow; dark themes lift the fill instead.
+  pub shadow: bool,
+}
+
+pub(super) fn flow_card_visuals(
+  side_base: Hsla,
+  background: Hsla,
+  foreground: Hsla,
+  border: Hsla,
+  is_dark: bool,
+  emphasis: f32,
+) -> FlowCardVisuals {
+  let mut fill = composite_over(side_base.opacity(0.08 + emphasis), background);
+  if is_dark {
+    // Elevation on dark themes: lift the fill ~4% toward the foreground.
+    fill = mix_srgb(fill, foreground, 0.04);
+  }
+  let hairline = (contrast_ratio(fill, background) < 1.02).then_some(border);
+  FlowCardVisuals {
+    fill,
+    hairline,
+    shadow: !is_dark,
+  }
+}
+
+/// Straight alpha-over compositing in encoded sRGB (UI-surface math).
+fn composite_over(over: Hsla, under: Hsla) -> Hsla {
+  let over_rgb = over.to_rgb();
+  let under_rgb = under.to_rgb();
+  let alpha = over_rgb.a;
+  Hsla::from(gpui::Rgba {
+    r: over_rgb.r * alpha + under_rgb.r * (1.0 - alpha),
+    g: over_rgb.g * alpha + under_rgb.g * (1.0 - alpha),
+    b: over_rgb.b * alpha + under_rgb.b * (1.0 - alpha),
+    a: 1.0,
+  })
+}
+
+fn mix_srgb(base: Hsla, toward: Hsla, amount: f32) -> Hsla {
+  let base_rgb = base.to_rgb();
+  let toward_rgb = toward.to_rgb();
+  Hsla::from(gpui::Rgba {
+    r: base_rgb.r + (toward_rgb.r - base_rgb.r) * amount,
+    g: base_rgb.g + (toward_rgb.g - base_rgb.g) * amount,
+    b: base_rgb.b + (toward_rgb.b - base_rgb.b) * amount,
+    a: 1.0,
+  })
+}
+
 fn transform_color(source: Hsla, source_default: Hsla, target_default: Hsla, background: Hsla, enforce_text_contrast: bool) -> Hsla {
   let source = to_oklch(source);
   let source_default = to_oklch(source_default);

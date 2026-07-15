@@ -50,3 +50,132 @@ fn find_keystroke_is_absorbed_without_panic(cx: &mut TestAppContext) {
   cx.simulate_keystrokes(h.window, "ctrl-f");
   cx.run_until_parked();
 }
+
+/// Living Grid keyboard layer (spec §3.2): the new-family / navigation /
+/// movement grammar drives the FLOW authority end to end, and refused moves
+/// SPEAK instead of silently failing.
+#[gpui::test]
+fn grid_keyboard_grammar_builds_navigates_and_moves(cx: &mut TestAppContext) {
+  let h = support::open_workspace(cx);
+  h.update(cx, |ws, window, cx| ws.new_flow(window, cx));
+  cx.run_until_parked();
+  let flow = h
+    .read(cx, |ws| ws.active_flow.clone())
+    .expect("active flow");
+
+  // Seed a sheet with two families in column 0 via the editor API.
+  flow.update(cx, |editor, cx| {
+    editor.create_sheet(cx);
+    editor.add_first_argument(cx);
+    editor.add_new_family(cx);
+  });
+  cx.run_until_parked();
+  let (sheet_id, cells) = flow.read_with(cx, |editor, _cx| {
+    let sheet = &editor.board().sheets[0];
+    (sheet.id, sheet.cells.iter().map(|cell| cell.id).collect::<Vec<_>>())
+  });
+  assert_eq!(cells.len(), 2, "first-argument + new-family = two roots");
+
+  // Give both cells text (an empty cell can never read struck).
+  flow.update(cx, |editor, cx| {
+    use crate::rich_text_element::LocalWriteAuthority as _;
+    for (index, &cell) in cells.iter().enumerate() {
+      let projection = editor
+        .handle()
+        .cell_projection(cell)
+        .expect("cell projection");
+      editor
+        .handle()
+        .cell_authority(cell)
+        .apply(crate::rich_text_element::LocalIntent::InsertText(
+          crate::rich_text_element::InsertTextIntent {
+            at: crate::rich_text_element::TextAnchor::new(projection.ids.paragraph_ids[0], 0),
+            text: format!("root {index}"),
+            style_override: None,
+          },
+        ))
+        .expect("cell text applies");
+    }
+    cx.notify();
+  });
+  cx.run_until_parked();
+
+  // Answer the second root, then Shift-Alt-Left promotes the answer back to
+  // a root, Shift-Alt-Left again refuses WITH WORDS.
+  flow.update(cx, |editor, cx| {
+    editor.activate_cell(cells[1], cx);
+    editor.add_response(cx);
+  });
+  cx.run_until_parked();
+  let answer = flow.read_with(cx, |editor, _cx| editor.active_cell().expect("answer cell"));
+  flow.update(cx, |editor, cx| {
+    editor.move_active_cell(crate::flow::editor::GridDirection::Left, cx);
+  });
+  cx.run_until_parked();
+  flow.read_with(cx, |editor, _cx| {
+    let sheet = editor
+      .board()
+      .sheets
+      .iter()
+      .find(|sheet| sheet.id == sheet_id)
+      .expect("sheet");
+    let cell = sheet
+      .cells
+      .iter()
+      .find(|cell| cell.id == answer)
+      .expect("promoted cell");
+    assert_eq!(cell.parent_id, None, "Shift-Alt-Left promotes to root");
+  });
+  flow.update(cx, |editor, cx| {
+    editor.move_active_cell(crate::flow::editor::GridDirection::Left, cx);
+  });
+  flow.read_with(cx, |editor, _cx| {
+    assert!(
+      editor.board().sheets[0]
+        .cells
+        .iter()
+        .any(|cell| cell.id == answer && cell.parent_id.is_none()),
+      "cell still a root after the refused promote"
+    );
+  });
+
+  // Multi-select strike: both roots strike as ONE undo group.
+  flow.update(cx, |editor, cx| {
+    editor.activate_cell(cells[0], cx);
+    editor.toggle_select_cell(cells[1], cx);
+    editor.strike_selected(cx);
+  });
+  cx.run_until_parked();
+  flow.read_with(cx, |editor, _cx| {
+    let sheet = &editor.board().sheets[0];
+    for id in [cells[0], cells[1]] {
+      assert!(
+        sheet
+          .cells
+          .iter()
+          .find(|cell| cell.id == id)
+          .expect("cell")
+          .summary
+          .struck,
+        "set-op strike hit every member"
+      );
+    }
+  });
+  flow.update(cx, |editor, cx| editor.undo(cx));
+  cx.run_until_parked();
+  flow.read_with(cx, |editor, _cx| {
+    let sheet = &editor.board().sheets[0];
+    for id in [cells[0], cells[1]] {
+      assert!(
+        !sheet
+          .cells
+          .iter()
+          .find(|cell| cell.id == id)
+          .expect("cell")
+          .summary
+          .struck,
+        "ONE undo reverts the whole set-op (W2 law)"
+      );
+    }
+  });
+}

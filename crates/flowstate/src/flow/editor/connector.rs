@@ -8,14 +8,17 @@ struct ConnectorGeometry {
   children: Vec<Point<Pixels>>,
 }
 
-pub(super) fn paint_connector_family(parent: Bounds<Pixels>, children: &[Bounds<Pixels>], color: Hsla, window: &mut Window) {
+/// Part 4 wires: tapered two-pass stroke — the parent half carries the
+/// thicker gauge (2.2px), the answer half thins to 1px; `emphasis` is the
+/// hover/focus thickening multiplier (spec G5: ~2.5px accent when focused).
+pub(super) fn paint_connector_family(parent: Bounds<Pixels>, children: &[Bounds<Pixels>], color: Hsla, emphasis: f32, window: &mut Window) {
   let Some(geometry) = connector_geometry(parent, children, window.scale_factor()) else {
     return;
   };
-  let mut path = PathBuilder::stroke(px(1.0));
-  path.move_to(geometry.start);
-  path.line_to(point(geometry.midpoint_x, geometry.start.y));
-
+  // Pass 1 (thick): parent stub + trunk.
+  let mut trunk = PathBuilder::stroke(px(2.2 * emphasis));
+  trunk.move_to(geometry.start);
+  trunk.line_to(point(geometry.midpoint_x, geometry.start.y));
   let min_y = geometry
     .children
     .iter()
@@ -27,16 +30,34 @@ pub(super) fn paint_connector_family(parent: Bounds<Pixels>, children: &[Bounds<
     .map(|child| child.y)
     .fold(geometry.start.y, Pixels::max);
   if min_y != max_y {
-    path.move_to(point(geometry.midpoint_x, min_y));
-    path.line_to(point(geometry.midpoint_x, max_y));
+    trunk.move_to(point(geometry.midpoint_x, min_y));
+    trunk.line_to(point(geometry.midpoint_x, max_y));
   }
-  for child in geometry.children {
-    path.move_to(point(geometry.midpoint_x, child.y));
-    path.line_to(child);
-  }
-  if let Ok(path) = path.build() {
+  if let Ok(path) = trunk.build() {
     window.paint_path(path, color);
   }
+  // Pass 2 (thin): the answer-side branches.
+  let mut branches = PathBuilder::stroke(px(1.0 * emphasis));
+  let mut any = false;
+  for child in geometry.children {
+    branches.move_to(point(geometry.midpoint_x, child.y));
+    branches.line_to(child);
+    any = true;
+  }
+  if any && let Ok(path) = branches.build() {
+    window.paint_path(path, color);
+  }
+  // G5: the fat plug at the parent end — the future re-plug drag handle
+  // grows with emphasis so a focused wire advertises its grip.
+  let plug = px(2.6 * emphasis);
+  window.paint_quad(gpui::quad(
+    Bounds::centered_at(geometry.start, gpui::size(plug * 2.0, plug * 2.0)),
+    plug,
+    color,
+    px(0.0),
+    color,
+    gpui::BorderStyle::default(),
+  ));
 }
 
 fn connector_geometry(parent: Bounds<Pixels>, children: &[Bounds<Pixels>], device_scale: f32) -> Option<ConnectorGeometry> {

@@ -72,6 +72,10 @@ pub struct FlowRuntime {
   /// Batched-import calls served (a coalesced chunk of N blobs counts once) —
   /// the §6.4 coalescing observability counter, mirroring `CrdtRuntime`'s.
   import_batches_served: u64,
+  /// True between `undo_group_start`/`undo_group_end`: the excluded "meta"
+  /// modified-stamp commit is deferred to group end so grouped members stay
+  /// counter-contiguous (the group-merge law).
+  undo_group_active: bool,
   _root_subscription: Subscription,
 }
 
@@ -124,6 +128,7 @@ impl FlowRuntime {
       touched,
       repair_attempts: HashMap::new(),
       import_batches_served: 0,
+      undo_group_active: false,
       _root_subscription: root_subscription,
     };
     runtime.refresh(None)?;
@@ -217,9 +222,14 @@ impl FlowRuntime {
     self.doc.set_next_commit_origin("local");
     self.doc.set_next_commit_message(intent.class());
     self.doc.commit();
-    self.doc.set_next_commit_origin("meta");
-    let _ = loro_schema::touch_modified(&self.doc);
-    self.doc.commit();
+    // Undo-group law: the group merges by COUNTER CONTIGUITY, so the excluded
+    // "meta" modified-stamp commit must never land between grouped members —
+    // it would open a counter gap exactly when the wall clock ticks a new
+    // timestamp value (a once-per-millisecond heisenbug caught by the S8
+    // grouped-strike probe). Inside a group the touch defers to `group_end`.
+    if !self.undo_group_active {
+      self.touch_modified_meta();
+    }
 
     let dirty: HashSet<CellId> = report.content_cells.iter().copied().collect();
     self.refresh(Some(&dirty))?;
@@ -419,11 +429,27 @@ impl FlowRuntime {
 
   pub fn undo_group_start(&mut self) -> anyhow::Result<bool> {
     self.undo.group_start()?;
+    self.undo_group_active = true;
     Ok(true)
   }
 
   pub fn undo_group_end(&mut self) {
     self.undo.group_end();
+    if self.undo_group_active {
+      self.undo_group_active = false;
+      // The deferred modified-stamp for the whole group (see `apply_intent`).
+      // It lands AFTER the group members' publishes, so it must publish its
+      // own delta — an unpublished local commit is a permanent causal gap.
+      let vv_before = self.doc.oplog_vv();
+      self.touch_modified_meta();
+      let _ = self.queue_local_update(&vv_before);
+    }
+  }
+
+  fn touch_modified_meta(&mut self) {
+    self.doc.set_next_commit_origin("meta");
+    let _ = loro_schema::touch_modified(&self.doc);
+    self.doc.commit();
   }
 
   // ---- streams & publish ---------------------------------------------------
