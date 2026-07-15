@@ -65,6 +65,13 @@ pub struct FlowRuntime {
   /// Container ids touched since the last drain (fed by the root
   /// subscription; consumed by the import classifier).
   touched: Arc<Mutex<Vec<ContainerID>>>,
+  /// Attempt counts for the cell-registry repair pass, keyed by repaired
+  /// record key — a defect the repair cannot clear is quarantined after the
+  /// cap instead of looping (the body's per-`stable_key` discipline).
+  repair_attempts: HashMap<String, u8>,
+  /// Batched-import calls served (a coalesced chunk of N blobs counts once) —
+  /// the §6.4 coalescing observability counter, mirroring `CrdtRuntime`'s.
+  import_batches_served: u64,
   _root_subscription: Subscription,
 }
 
@@ -115,6 +122,8 @@ impl FlowRuntime {
       pending_publish: Vec::new(),
       undo,
       touched,
+      repair_attempts: HashMap::new(),
+      import_batches_served: 0,
       _root_subscription: root_subscription,
     };
     runtime.refresh(None)?;
@@ -123,6 +132,10 @@ impl FlowRuntime {
 
   pub fn doc(&self) -> &LoroDoc {
     &self.doc
+  }
+
+  pub fn import_batches_served(&self) -> u64 {
+    self.import_batches_served
   }
 
   pub fn board(&self) -> &FlowBoardProjection {
@@ -178,7 +191,29 @@ impl FlowRuntime {
       });
     }
     let vv_before = self.doc.oplog_vv();
-    let report = mutate::execute_intent(&self.doc, &self.board, intent)?;
+    let frontier_before = self.doc.state_frontiers();
+    let report = match mutate::execute_intent(&self.doc, &self.board, intent) {
+      Ok(report) => report,
+      Err(rejection) => {
+        // I-10 compensation: a compound structural intent may have partially
+        // applied before the failure — never let uncommitted partials leak
+        // into the NEXT commit. Converge back to the pre-intent frontier.
+        self.doc.set_next_commit_origin("repair");
+        self.doc.commit();
+        if self.doc.state_frontiers() != frontier_before {
+          let _ = self.doc.revert_to(&frontier_before);
+          self.doc.set_next_commit_origin("repair");
+          self.doc.commit();
+          let _ = self.refresh(None);
+          // The partial + revert ops entered the oplog; later exports start
+          // AFTER them, so an unpublished compensation is a permanent causal
+          // gap on every peer. Publish it like any local commit.
+          let _ = self.queue_local_update(&vv_before);
+        }
+        let _ = self.take_touched();
+        return Err(rejection);
+      },
+    };
     self.doc.set_next_commit_origin("local");
     self.doc.set_next_commit_message(intent.class());
     self.doc.commit();
@@ -217,6 +252,9 @@ impl FlowRuntime {
         self.doc.set_next_commit_origin("repair");
         self.doc.commit();
         let _ = self.refresh(None);
+        // Publish the compensation: later exports start after these ops, so
+        // leaving them unpublished is a permanent causal gap on every peer.
+        let _ = self.queue_local_update(&vv_before);
       }
       return Err(rejection);
     }
@@ -256,6 +294,7 @@ impl FlowRuntime {
     if blobs.is_empty() {
       return Ok(());
     }
+    self.import_batches_served += 1;
     // Drain any pre-existing touch noise so classification sees only this
     // import batch.
     let _ = self.take_touched();
@@ -274,12 +313,57 @@ impl FlowRuntime {
       // container name when possible; otherwise treat as structural (cheap —
       // structure rebuilds reuse the summary cache).
     }
+    // The import itself never writes repairs; a follow-up LOCAL canonicalization
+    // commit re-mints registry records the merge left unresolvable. Imports
+    // publish nothing themselves, so the repair commit exports its own delta.
+    let vv_pre_repair = self.doc.oplog_vv();
+    if self.repair_cell_registries(&dirty) {
+      self.queue_local_update(&vv_pre_repair)?;
+    }
     self.refresh(Some(&dirty))?;
     self.push_board_stream();
     for cell in dirty {
       self.push_cell_replace(cell);
     }
     Ok(())
+  }
+
+  /// The spec's capped, `repair`-origin cell-registry canonicalization pass:
+  /// after an import or undo/redo, a cell text can contain boundaries whose
+  /// registry records no longer resolve (an undo restores a record whose
+  /// cursors point at the tombstoned `\n`, not the re-inserted one). Re-mint
+  /// durable records under the projection's own fabricated-key law so every
+  /// peer writes the identical keys and Loro map LWW converges the
+  /// concurrent repairs. Commits (never queues — the caller decides whether
+  /// the repair delta needs its own publish or rides an enclosing export
+  /// window) and returns whether anything was written.
+  fn repair_cell_registries(&mut self, cells: &HashSet<CellId>) -> bool {
+    if cells.is_empty() {
+      return false;
+    }
+    const MAX_REPAIR_ATTEMPTS: u8 = 3;
+    let mut wrote = false;
+    for &cell in cells {
+      let attempts = &mut self.repair_attempts;
+      let written = super::cell_text::repair_missing_paragraph_records(&self.doc, cell, |key| {
+        let count = attempts.entry(format!("{cell}/{key}")).or_insert(0);
+        if *count >= MAX_REPAIR_ATTEMPTS {
+          return false; // quarantined: the fabricated id keeps the cell editable
+        }
+        *count += 1;
+        true
+      });
+      wrote |= !written.is_empty();
+    }
+    if wrote {
+      self.doc.set_next_commit_origin("repair");
+      self.doc.set_next_commit_message("cell.registry-repair");
+      self.doc.commit();
+    }
+    // Repair touches are registry children, never text containers — drain
+    // them so the next classification pass sees only real work.
+    let _ = self.take_touched();
+    wrote
   }
 
   // ---- undo (through the gate, streamed, published) -----------------------
@@ -320,6 +404,10 @@ impl FlowRuntime {
         dirty.insert(*cell);
       }
     }
+    // An undo re-inserts text under NEW op ids; restored registry records
+    // still point at the tombstones. Re-mint before materializing; the
+    // repair delta rides the `vv_before` export below (no separate publish).
+    self.repair_cell_registries(&dirty);
     self.refresh(Some(&dirty))?;
     self.push_board_stream();
     for cell in dirty {

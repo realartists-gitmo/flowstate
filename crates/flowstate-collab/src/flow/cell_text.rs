@@ -35,10 +35,20 @@ impl CellTextContext {
       .ensure_mergeable_text(flowstate_document::FLOW_TEXT_KEY)
       .map_err(|_| WriteRejected::StructureViolation("flow cell text container unavailable"))?;
     let boundary_map = flowstate_document::paragraph_ids_by_boundary_in(doc, &registry, &text);
-    let boundaries_by_key = boundary_map
+    let mut boundaries_by_key: FxHashMap<String, usize> = boundary_map
       .into_iter()
       .map(|(pos, key)| (key, pos))
       .collect();
+    // A boundary without a resolvable registry record (an undo can restore a
+    // record whose cursors point at the tombstoned `\n`, not the re-inserted
+    // one) is projected under a FABRICATED id — stable, derived from the
+    // boundary's OpID (`stable_boundary_metadata_keys`). Resolve those ids
+    // here under the same law, so an editor anchored in such a paragraph
+    // keeps typing while the runtime's repair pass re-mints the durable
+    // record.
+    for (boundary, fabricated_key) in fabricated_boundary_keys(&text, boundaries_by_key.values().copied().collect()) {
+      boundaries_by_key.insert(fabricated_key, boundary);
+    }
     let text_len = text.len_unicode();
     Ok(Self {
       doc: doc.clone(),
@@ -134,6 +144,76 @@ pub fn execute_cell_text(doc: &LoroDoc, cell_id: CellId, intent: &LocalIntent) -
 
 fn loro_err(_: loro::LoroError) -> WriteRejected {
   WriteRejected::StructureViolation("flow cell text op failed")
+}
+
+/// Every `\n` boundary in `text` NOT covered by `covered`, paired with its
+/// projection-fabricated record key in u128 form (`paragraph.{u128}` of the
+/// stable anchor-derived key) — the exact ids `materialize_single_flow` emits
+/// for record-less boundaries, inverted the same way registry keys are.
+fn fabricated_boundary_keys(text: &LoroText, covered: rustc_hash::FxHashSet<usize>) -> Vec<(usize, String)> {
+  let mut keys = Vec::new();
+  for (pos, ch) in text.to_string().chars().enumerate() {
+    if ch != '\n' || covered.contains(&pos) {
+      continue;
+    }
+    if let Some((paragraph_key, _)) = flowstate_document::loro_projection::stable_boundary_metadata_keys(text, pos) {
+      keys.push((
+        pos,
+        format!("paragraph.{}", flowstate_document::loro_projection::loro_id_u128(&paragraph_key)),
+      ));
+    }
+  }
+  keys
+}
+
+/// The spec's cell-registry repair pass (mirrors the body's
+/// `MissingParagraphMetadata` repair): write a durable paragraph record for
+/// every boundary the registry no longer resolves, keyed under the SAME
+/// stable derivation the projection fabricates — so the repaired record's id
+/// equals the fabricated id on every peer and Loro map LWW converges the
+/// concurrent repairs. Check-before-write: coverage is re-derived live.
+/// Never commits; the caller owns the `repair`-origin commit.
+///
+/// `should_attempt` is the caller's per-key quarantine gate (attempt caps);
+/// a refused key is skipped without writing. Returns the record keys written
+/// (empty = nothing to repair).
+pub(super) fn repair_missing_paragraph_records(doc: &LoroDoc, cell_id: CellId, mut should_attempt: impl FnMut(&str) -> bool) -> Vec<String> {
+  let Some(record) = loro_schema::cell_record(doc, cell_id) else {
+    return Vec::new(); // cell deleted since classification: nothing to repair
+  };
+  let Some(flow) = loro_schema::cell_flow(&record) else {
+    return Vec::new();
+  };
+  let Some(registry) = loro_schema::cell_paragraph_registry(&flow) else {
+    return Vec::new();
+  };
+  let Ok(text) = flow.ensure_mergeable_text(flowstate_document::FLOW_TEXT_KEY) else {
+    return Vec::new();
+  };
+  let covered = flowstate_document::paragraph_ids_by_boundary_in(doc, &registry, &text)
+    .into_keys()
+    .collect();
+  let mut written = Vec::new();
+  for (boundary, key) in fabricated_boundary_keys(&text, covered) {
+    if !should_attempt(&key) {
+      continue;
+    }
+    let Ok(paragraph_record) = registry.ensure_mergeable_map(&key) else {
+      continue;
+    };
+    if paragraph_record.insert("id", key.as_str()).is_err() {
+      continue;
+    }
+    if let Some(cursor) = text.get_cursor(boundary, Side::Left) {
+      let _ = paragraph_record.insert("start_cursor", cursor.encode());
+    }
+    if let Some(cursor) = text.get_cursor(boundary, Side::Right) {
+      let _ = paragraph_record.insert("boundary_cursor", cursor.encode());
+    }
+    let _ = paragraph_record.ensure_mergeable_map("attrs");
+    written.push(key);
+  }
+  written
 }
 
 fn insert_text(ctx: &mut CellTextContext, intent: &InsertTextIntent) -> Result<(), WriteRejected> {

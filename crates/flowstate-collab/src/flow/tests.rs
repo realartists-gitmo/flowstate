@@ -642,4 +642,71 @@ mod cell_authority_tests {
     assert_eq!(after.text.to_string(), "seext");
     assert_eq!(after.ids.paragraph_ids[0], paragraph, "surviving identity is the first paragraph");
   }
+
+  /// I-10 compensation + publish law. A rich fragment whose SECOND block is
+  /// an object fails mid-apply (the first paragraph's runs are already in the
+  /// text). The compensation must (a) restore the local projection exactly
+  /// and (b) PUBLISH the partial+revert ops — later exports start after them,
+  /// so an unpublished compensation is a permanent causal gap: every
+  /// subsequent update from this peer would stall as a pending import on
+  /// every other peer.
+  #[test]
+  fn mid_apply_failure_compensates_and_publishes_no_causal_gap() {
+    let (a, _sheet, cell) = cell_fixture();
+    let snapshot = {
+      let guard = a.gate().lock(GateHolder::DocumentService).unwrap();
+      guard.snapshot_bytes().unwrap()
+    };
+    let (b, _gb) = FlowDocHandle::new(FlowRuntime::from_snapshot(&snapshot).unwrap());
+    let authority = a.cell_authority(cell);
+    let paragraph = first_paragraph_id(&projection_of(&a, cell));
+    let before = projection_of(&a, cell).text.to_string();
+
+    let error = authority
+      .apply(LocalIntent::InsertRichFragment(InsertRichFragmentIntent {
+        at: TextAnchor::new(paragraph, 0),
+        blocks: vec![
+          FragmentBlock::Paragraph(gpui_flowtext::InputParagraph {
+            style: gpui_flowtext::ParagraphStyle::Normal,
+            runs: vec![gpui_flowtext::InputRun {
+              text: "leaked".into(),
+              styles: RunStyles::default(),
+            }],
+          }),
+          FragmentBlock::Object(gpui_flowtext::InputBlock::Equation(gpui_flowtext::InputEquationBlock {
+            source: "x".into(),
+            syntax: gpui_flowtext::InputEquationSyntax::Latex,
+            display: gpui_flowtext::InputEquationDisplay::Display,
+          })),
+        ],
+      }))
+      .unwrap_err();
+    assert!(matches!(error, WriteRejected::StructureViolation(_)));
+    assert_eq!(projection_of(&a, cell).text.to_string(), before, "compensation restored the cell");
+
+    // A later successful edit must reach a peer cleanly: if the compensation
+    // ops were never published, this import would dead-letter on missing deps.
+    authority
+      .apply(LocalIntent::InsertText(InsertTextIntent {
+        at: TextAnchor::new(paragraph, 0),
+        text: "after ".into(),
+        style_override: None,
+      }))
+      .unwrap();
+    let updates: Vec<Vec<u8>> = {
+      let mut guard = a.gate().lock(GateHolder::DocumentService).unwrap();
+      guard
+        .take_pending_publish()
+        .into_iter()
+        .map(|FlowPublishEvent::LocalUpdate { bytes, .. }| bytes)
+        .collect()
+    };
+    b.import_remote_updates(&updates.iter().map(Vec::as_slice).collect::<Vec<_>>())
+      .unwrap();
+    assert_eq!(
+      projection_of(&b, cell).text.to_string(),
+      "after seed text",
+      "peer received the post-failure edit (no causal gap)"
+    );
+  }
 }

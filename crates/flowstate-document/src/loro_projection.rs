@@ -1626,7 +1626,11 @@ fn map_keys(map: &LoroMap) -> Vec<String> {
   keys
 }
 
-fn loro_id_u128(id: &str) -> u128 {
+/// The id law: a record key's last dot-segment parsed as u128 wins, else the
+/// blake3 hash of the whole key. Public because it is the SINGLE derivation
+/// shared by projections (fabricated ids), repair writers, and executors that
+/// must invert projection ids back to record keys.
+pub fn loro_id_u128(id: &str) -> u128 {
   if let Some(value) = id
     .rsplit('.')
     .next()
