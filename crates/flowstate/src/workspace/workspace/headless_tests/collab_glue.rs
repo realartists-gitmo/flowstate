@@ -160,3 +160,70 @@ fn joined_flow_panel_attachment_and_recovery_round_trip(cx: &mut TestAppContext)
   editor.update(cx, |editor, _| editor.discard_recovery_file());
   assert!(!recovery.exists(), "discard_recovery_file removes the file");
 }
+
+/// Flow architecture S11 gate: a synthetic remote hand lands on the board —
+/// the presence registers on the right cell, and the peer's exact caret
+/// (encoded Loro cursors) forwards into the OPEN cell editor.
+#[gpui::test]
+fn flow_external_presence_hand_and_cell_caret(cx: &mut TestAppContext) {
+  use crate::rich_text_element::LocalWriteAuthority as _;
+  let h = support::open_workspace(cx);
+  h.update(cx, |ws, window, cx| ws.new_flow(window, cx));
+  cx.run_until_parked();
+  let editor = h
+    .read(cx, |ws| ws.active_flow.clone())
+    .expect("active flow");
+  editor.update(cx, |editor, cx| {
+    editor.create_sheet(cx);
+    editor.add_first_argument(cx);
+  });
+  cx.run_until_parked();
+  let (sheet, cell) = editor.read_with(cx, |editor, _cx| {
+    let sheet = &editor.board().sheets[0];
+    (sheet.id, sheet.cells[0].id)
+  });
+  // Give the cell text and encode a "remote" caret inside it via the same
+  // cursor law a real peer would use.
+  let (head, anchor) = editor.update(cx, |editor, _cx| {
+    let authority = editor.handle().cell_authority(cell);
+    let projection = editor.handle().cell_projection(cell).expect("projection");
+    authority
+      .apply(crate::rich_text_element::LocalIntent::InsertText(
+        crate::rich_text_element::InsertTextIntent {
+          at: crate::rich_text_element::TextAnchor::new(projection.ids.paragraph_ids[0], 0),
+          text: "hands on".into(),
+          style_override: None,
+        },
+      ))
+      .expect("cell text applies");
+    let projection = editor.handle().cell_projection(cell).expect("projection");
+    let selection = crate::rich_text_element::EditorSelection::collapsed(crate::rich_text_element::DocumentOffset { paragraph: 0, byte: 3 });
+    authority
+      .encode_selection_anchor(&selection, &projection.frontier)
+      .expect("caret encodes")
+  });
+
+  let hand = crate::flow::FlowExternalPresence {
+    key: "peer-a".into(),
+    name: "Sol".into(),
+    color_rgb: 0x00e0_7a5f,
+    sheet: Some(sheet),
+    cell: Some(cell),
+    editing: true,
+  };
+  editor.update(cx, |editor, cx| {
+    editor.activate_cell(cell, cx); // open the cell editor so the caret can land
+    editor.set_external_presences(vec![hand], vec![(cell, 0x00e0_7a5f, head, anchor)], cx);
+  });
+  cx.run_until_parked();
+
+  editor.read_with(cx, |editor, cx| {
+    assert_eq!(editor.external_presences().len(), 1, "the remote hand registered");
+    assert_eq!(editor.external_presences()[0].cell, Some(cell), "the hand rests on the right cell");
+    let cell_editor = editor.cell_editor_for_test(cell).expect("open cell editor");
+    let carets = cell_editor.read(cx).external_carets_for_paragraph(0);
+    assert_eq!(carets.len(), 1, "the peer caret forwarded into the open cell editor");
+    assert_eq!(carets[0].offset.byte, 3, "the caret resolved to the exact typed position");
+    assert_eq!(carets[0].color_rgb, 0x00e0_7a5f);
+  });
+}

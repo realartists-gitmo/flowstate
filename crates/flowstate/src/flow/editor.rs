@@ -56,6 +56,28 @@ pub enum AnnotationTool {
   Eraser,
 }
 
+/// This replica's own board focus (spec S11) as published into presence.
+pub struct FlowPresenceSnapshot {
+  pub sheet: Option<SheetId>,
+  pub cell: Option<CellId>,
+  pub editing: bool,
+  /// (head, anchor) encoded Loro cursors within the focused cell's text.
+  pub caret: Option<(Vec<u8>, Vec<u8>)>,
+}
+
+/// A peer's hand on the board (spec S11): rendered as a presence ring +
+/// name chip on their focused cell, and as a colored dot on the sheet
+/// switcher when they're on another sheet.
+#[derive(Clone, Debug)]
+pub struct FlowExternalPresence {
+  pub key: String,
+  pub name: SharedString,
+  pub color_rgb: u32,
+  pub sheet: Option<SheetId>,
+  pub cell: Option<CellId>,
+  pub editing: bool,
+}
+
 /// A spoken refusal (spec §3.1 F3): message toast + optional cell shake.
 struct RefusalNotice {
   message: String,
@@ -117,6 +139,8 @@ pub struct FlowEditor {
   /// here so a crash never loses a joined flow.
   recovery_path: Option<PathBuf>,
   recovery_write_pending: bool,
+  /// S11: remote hands on the board.
+  external_presences: Vec<FlowExternalPresence>,
   drag_autoscroll: Option<gpui::Point<gpui::Pixels>>,
   drag_autoscroll_scheduled: bool,
   drag_log: Option<telemetry::DragLogSession>,
@@ -181,6 +205,7 @@ impl FlowEditor {
       session_attached: false,
       recovery_path: None,
       recovery_write_pending: false,
+      external_presences: Vec::new(),
       drag_autoscroll: None,
       drag_autoscroll_scheduled: false,
       drag_log: None,
@@ -309,6 +334,74 @@ impl FlowEditor {
   pub fn on_remote_updates_applied(&mut self, cx: &mut Context<Self>) {
     self.resync_from_runtime(cx);
     cx.notify();
+  }
+
+  /// S11: this replica's own presence focus — active sheet/cell, whether a
+  /// cell editor is live, and the exact caret as encoded Loro cursors within
+  /// that cell's text (resolved under the flow gate).
+  pub fn presence_focus(&self, cx: &App) -> FlowPresenceSnapshot {
+    let editing = self
+      .active_cell
+      .is_some_and(|cell| self.cell_editors.contains_key(&cell));
+    let caret = self.active_cell.and_then(|cell| {
+      use crate::rich_text_element::LocalWriteAuthority as _;
+      let editor = self.cell_editors.get(&cell)?.read(cx);
+      let selection = editor.selection().clone();
+      let frontier = editor.document().frontier.clone();
+      self
+        .handle
+        .cell_authority(cell)
+        .encode_selection_anchor(&selection, &frontier)
+    });
+    FlowPresenceSnapshot {
+      sheet: self.active_sheet,
+      cell: self.active_cell,
+      editing,
+      caret,
+    }
+  }
+
+  /// S11: install remote hands + forward exact peer carets into any OPEN cell
+  /// editors (resolved from Loro cursor bytes under the flow gate).
+  pub fn set_external_presences(
+    &mut self,
+    hands: Vec<FlowExternalPresence>,
+    carets: Vec<(CellId, u32, Vec<u8>, Vec<u8>)>,
+    cx: &mut Context<Self>,
+  ) {
+    use crate::rich_text_element::LocalWriteAuthority as _;
+    self.external_presences = hands;
+    let mut by_cell: std::collections::HashMap<CellId, Vec<crate::rich_text_element::ExternalCaret>> = std::collections::HashMap::new();
+    for (cell, color_rgb, head, anchor) in carets {
+      if let Some((head_offset, _)) = self
+        .handle
+        .cell_authority(cell)
+        .resolve_selection_anchor(&head, &anchor)
+      {
+        by_cell
+          .entry(cell)
+          .or_default()
+          .push(crate::rich_text_element::ExternalCaret {
+            offset: head_offset,
+            visual_gravity: crate::rich_text_element::VisualGravity::Downstream,
+            color_rgb,
+          });
+      }
+    }
+    for (cell, editor) in &self.cell_editors {
+      let carets = by_cell.remove(cell).unwrap_or_default();
+      editor.update(cx, |editor, cx| editor.set_external_carets(carets, cx));
+    }
+    cx.notify();
+  }
+
+  pub fn external_presences(&self) -> &[FlowExternalPresence] {
+    &self.external_presences
+  }
+
+  /// Test-only view of an open cell editor (headless presence assertions).
+  pub fn cell_editor_for_test(&self, cell_id: CellId) -> Option<&Entity<RichTextEditor>> {
+    self.cell_editors.get(&cell_id)
   }
 
   /// Drop editors/caches for cells that no longer exist on the board.
@@ -1240,6 +1333,12 @@ impl FlowEditor {
                 if active == Some(id) { 0.08 } else { 0.0 },
               );
               let replug_candidate = self.replug_cell.is_some() && self.replug_candidate(id);
+              // S11: a peer's hand on this cell paints its presence ring.
+              let presence_ring = self
+                .external_presences
+                .iter()
+                .find(|presence| presence.cell == Some(id))
+                .map(|presence| gpui::Hsla::from(rgba((presence.color_rgb << 8) | 0xff)));
               let ring = if replug_candidate {
                 // G5: valid re-plug parents HIGHLIGHT while the plug rides.
                 Some(cx.theme().primary)
@@ -1247,6 +1346,8 @@ impl FlowEditor {
                 Some(side_palette.active)
               } else if self.selected_cells.contains(&id) {
                 Some(side_palette.base.opacity(0.7))
+              } else if let Some(peer) = presence_ring {
+                Some(peer)
               } else {
                 visuals.hairline
               };
@@ -1445,6 +1546,31 @@ impl FlowEditor {
         .absolute()
         .inset_0(),
       )
+      // S11: peer name chips ride their focused cells' top-right corner.
+      .children(self.external_presences.iter().filter_map(|presence| {
+        let cell = presence.cell.filter(|_| presence.sheet == self.active_sheet)?;
+        let bounds = self.cell_bounds.get(&cell)?;
+        let color = gpui::Hsla::from(rgba((presence.color_rgb << 8) | 0xff));
+        let local_x = px(bounds.right().as_f32() - self.viewport_origin.x - 8.0);
+        let local_y = px(bounds.top().as_f32() - self.viewport_origin.y - 9.0);
+        Some(
+          div()
+            .absolute()
+            .left(local_x)
+            .top(local_y)
+            .px(px(5.0))
+            .rounded_full()
+            .bg(color)
+            .text_color(gpui::white())
+            .text_size(px(10.0))
+            .whitespace_nowrap()
+            .child(SharedString::from(format!(
+              "{}{}",
+              presence.name,
+              if presence.editing { " ✎" } else { "" }
+            ))),
+        )
+      }))
       // R1/R5 landing pads: unfold at the gap when a spot plausibly means
       // more than one parentage. gpui always paints the cursor ghost last, so
       // the row is OFFSET below the grab point (and the ghost is translucent)

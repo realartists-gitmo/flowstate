@@ -25,6 +25,21 @@ pub struct PresenceState {
   pub name: String,
   pub color_rgb: u32,
   pub selection: Option<PresenceSelection>,
+  /// Flow-session focus (spec S11): board hands + real cell carets. `None`
+  /// on rich-text sessions.
+  pub flow_focus: Option<FlowPresenceFocus>,
+}
+
+/// Where a peer is on the flow board (spec S11): which sheet/cell their hand
+/// rests on, whether they're typing, and — because cells are real CRDT text —
+/// their exact caret as encoded Loro cursors inside that cell's text.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct FlowPresenceFocus {
+  pub sheet: Option<u128>,
+  pub cell: Option<u128>,
+  pub editing: bool,
+  /// (head, anchor) Loro cursor bytes within the focused cell.
+  pub caret: Option<(Vec<u8>, Vec<u8>)>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -94,6 +109,7 @@ pub struct RosterEntry {
   pub name: String,
   pub color_rgb: u32,
   pub selection: Option<PresenceSelection>,
+  pub flow_focus: Option<FlowPresenceFocus>,
 }
 
 #[derive(Clone, Debug)]
@@ -283,6 +299,7 @@ fn roster_entry_from_value(key: String, value: LoroValue) -> Option<RosterEntry>
     key,
     name: state.name,
     selection: state.selection,
+    flow_focus: state.flow_focus,
   })
 }
 
@@ -294,10 +311,21 @@ fn sanitize_presence_state(state: &PresenceState) -> PresenceState {
     Some(selection) if selection_within_caps(selection) => Some(selection.clone()),
     _ => None,
   };
+  let flow_focus = state.flow_focus.clone().map(|mut focus| {
+    if focus
+      .caret
+      .as_ref()
+      .is_some_and(|(head, anchor)| head.len() > MAX_PRESENCE_CURSOR_BYTES || anchor.len() > MAX_PRESENCE_CURSOR_BYTES)
+    {
+      focus.caret = None;
+    }
+    focus
+  });
   PresenceState {
     name: sanitize_display_name(&state.name),
     color_rgb: state.color_rgb & 0x00ff_ffff,
     selection,
+    flow_focus,
   }
 }
 
@@ -323,6 +351,12 @@ fn truncate_to_bytes(text: &str, max_bytes: usize) -> String {
 fn presence_state_within_caps(state: &PresenceState) -> bool {
   state.name.len() <= MAX_PRESENCE_NAME_BYTES
     && !state.name.chars().any(|c| c.is_control())
+    && state.flow_focus.as_ref().is_none_or(|focus| {
+      focus
+        .caret
+        .as_ref()
+        .is_none_or(|(head, anchor)| head.len() <= MAX_PRESENCE_CURSOR_BYTES && anchor.len() <= MAX_PRESENCE_CURSOR_BYTES)
+    })
     && state.selection.as_ref().is_none_or(selection_within_caps)
 }
 
@@ -345,6 +379,7 @@ mod tests {
       name: name.to_string(),
       color_rgb: 0x3b82f6,
       selection: None,
+      flow_focus: None,
     }
   }
 

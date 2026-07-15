@@ -124,6 +124,25 @@ impl Render for FlowRibbon {
         let editor = self.editor.clone();
         move |_: &MouseDownEvent, _, cx| editor.update(cx, |editor, cx| editor.set_annotation_tool(AnnotationTool::None, cx))
       })
+      // S11: peers on OTHER sheets show as colored dots by the switcher.
+      .children({
+        let active_sheet = self.editor.read(cx).active_sheet();
+        let dots: Vec<_> = self
+          .editor
+          .read(cx)
+          .external_presences()
+          .iter()
+          .filter(|presence| presence.sheet.is_some() && presence.sheet != active_sheet)
+          .map(|presence| {
+            gpui::div()
+              .size(gpui::px(8.0))
+              .rounded_full()
+              .bg(gpui::Hsla::from(gpui::rgba((presence.color_rgb << 8) | 0xff)))
+              .into_any_element()
+          })
+          .collect();
+        dots
+      })
       .when_some(sheet_name_input, |this, input| {
         this.child(div().w(px(180.0)).child(Input::new(&input).w_full()))
       })

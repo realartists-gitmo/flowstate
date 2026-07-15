@@ -74,6 +74,10 @@ impl CollabSession {
       tracing::trace!(session = %self.session, "skipping own collaboration presence refresh because store is missing");
       return;
     }
+    if let Some(flow) = self.flow_editor() {
+      self.refresh_own_flow_presence(&flow, cx);
+      return;
+    }
     let selection = self
       .rich_text_editor()
       .map(|editor| editor.read(cx).selection().clone());
@@ -96,6 +100,7 @@ impl CollabSession {
             name: default_presence_name(),
             color_rgb: crate::app_settings::load_local_user_profile().color_rgb,
             selection,
+            flow_focus: None,
           };
           tracing::trace!(session = %session_id, has_selection = state.selection.is_some(), "refreshing own collaboration presence");
           if let Some(presence) = &session.presence
@@ -113,6 +118,67 @@ impl CollabSession {
       });
     })
     .detach();
+  }
+
+  /// S11 flow arm: publish this hand's board focus + exact cell caret
+  /// (encoded Loro cursors, resolved synchronously under the flow gate).
+  fn refresh_own_flow_presence(&mut self, flow: &gpui::Entity<crate::flow::FlowEditor>, cx: &mut Context<Self>) {
+    let focus = flow.read(cx).presence_focus(cx);
+    let state = PresenceState {
+      name: default_presence_name(),
+      color_rgb: crate::app_settings::load_local_user_profile().color_rgb,
+      selection: None,
+      flow_focus: Some(flowstate_collab::presence::FlowPresenceFocus {
+        sheet: focus.sheet.map(|id| id.as_u128()),
+        cell: focus.cell.map(|id| id.as_u128()),
+        editing: focus.editing,
+        caret: focus.caret,
+      }),
+    };
+    if let Some(presence) = &self.presence
+      && let Err(error) = presence.set_self(&state)
+    {
+      tracing::warn!(session = %self.session, error = %format_args!("{error:#}"), "flow collaboration presence encode failed");
+    }
+    if self.refresh_peer_count() {
+      cx.notify();
+    }
+  }
+
+  /// S11 flow arm of the external-presence fan-out: remote hands land on the
+  /// board (rings + chips + sheet dots) and exact carets forward into any
+  /// open cell editors.
+  fn refresh_flow_presences_now(&mut self, cx: &mut Context<Self>) {
+    let Some(editor) = self.flow_editor() else {
+      return;
+    };
+    let Some(presence) = &self.presence else {
+      return;
+    };
+    let self_key = presence.self_key().to_string();
+    let mut hands = Vec::new();
+    let mut carets: Vec<(flowstate_flow::CellId, u32, Vec<u8>, Vec<u8>)> = Vec::new();
+    for entry in presence.roster() {
+      if entry.key == self_key {
+        continue;
+      }
+      let Some(focus) = entry.flow_focus else {
+        continue;
+      };
+      let cell = focus.cell.map(uuid::Uuid::from_u128);
+      if let (Some(cell), Some((head, anchor))) = (cell, focus.caret.clone()) {
+        carets.push((cell, entry.color_rgb, head, anchor));
+      }
+      hands.push(crate::flow::FlowExternalPresence {
+        key: entry.key,
+        name: entry.name.into(),
+        color_rgb: entry.color_rgb,
+        sheet: focus.sheet.map(uuid::Uuid::from_u128),
+        cell,
+        editing: focus.editing,
+      });
+    }
+    editor.update(cx, |editor, cx| editor.set_external_presences(hands, carets, cx));
   }
 
   pub(super) fn schedule_own_presence_refresh(&mut self, cx: &mut Context<Self>) {
@@ -198,6 +264,10 @@ impl CollabSession {
   }
 
   fn refresh_external_carets_now(&mut self, cx: &mut Context<Self>) {
+    if self.flow_editor().is_some() {
+      self.refresh_flow_presences_now(cx);
+      return;
+    }
     let Some(presence) = &self.presence else {
       tracing::trace!(session = %self.session, "skipping external caret refresh because presence is missing");
       return;
