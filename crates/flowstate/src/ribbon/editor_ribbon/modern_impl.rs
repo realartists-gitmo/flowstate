@@ -15,7 +15,7 @@ impl ModernStylesRibbon {
     speech_available: bool,
     speech_active: bool,
     speech_send_enabled: bool,
-    _available_width: gpui::Pixels,
+    available_width: gpui::Pixels,
     window: &mut Window,
     cx: &mut Context<EditorRibbon>,
   ) -> AnyElement {
@@ -156,6 +156,49 @@ impl ModernStylesRibbon {
     });
 
     let metrics = RibbonLayoutMetrics::from_height(height);
+
+    // P4-S3: the OverflowBehavior enum is finally consumed. Under width
+    // pressure, the lowest-priority MoveToOverflow commands fold into a
+    // trailing chevron menu (HideInCompact ones hide outright); KeepVisible
+    // never folds. The estimate reuses the same row-width math the wrap
+    // layout trusts.
+    let mut overflowed: Vec<RibbonCommand> = Vec::new();
+    if available_width > px(0.0) {
+      let chrome = metrics.outer_padding_x * 2.0 + metrics.inner_padding_x * 2.0 + px(64.0);
+      loop {
+        let strip: f32 = groups
+          .iter()
+          .filter(|group| !group.commands.is_empty())
+          .map(|group| group_row_width(group, metrics, metrics.max_chip_rows, window, cx).as_f32() + metrics.group_gap.as_f32())
+          .sum();
+        let more_chip = if overflowed.is_empty() { 0.0 } else { 40.0 };
+        if strip + chrome.as_f32() + more_chip <= available_width.as_f32() {
+          break;
+        }
+        // Fold the lowest-priority foldable command anywhere in the strip.
+        let candidate = groups
+          .iter()
+          .enumerate()
+          .flat_map(|(group_ix, group)| {
+            group
+              .commands
+              .iter()
+              .enumerate()
+              .filter(|(_, command)| !matches!(command.overflow_behavior, OverflowBehavior::KeepVisible))
+              .map(move |(command_ix, command)| (command.priority, group_ix, command_ix))
+          })
+          .min_by_key(|(priority, ..)| *priority);
+        let Some((_, group_ix, command_ix)) = candidate else {
+          break;
+        };
+        let folded = groups[group_ix].commands.remove(command_ix);
+        if matches!(folded.overflow_behavior, OverflowBehavior::MoveToOverflow) {
+          overflowed.push(folded);
+        }
+      }
+      groups.retain(|group| !group.commands.is_empty());
+    }
+
     // Use vertical ribbon room proactively. Width pressure can force wrapping,
     // but when there is spare height we still prefer balanced columns over one
     // long horizontal strip.
@@ -168,10 +211,6 @@ impl ModernStylesRibbon {
             group_row_width(group, metrics, 2, window, cx)
           } else if group.id == "history" || group.id == "speech" {
             group_row_width(group, metrics, 1, window, cx)
-          } else if group.id == "views" {
-            let label_width = measure_ribbon_text("Views", metrics.chip_text_size, window, cx).as_f32();
-            let cmd_width = group_row_width(group, metrics, metrics.max_chip_rows, window, cx).as_f32();
-            px(label_width.max(cmd_width))
           } else {
             group_row_width(group, metrics, metrics.max_chip_rows, window, cx)
           }
@@ -220,9 +259,46 @@ impl ModernStylesRibbon {
                   panel_id,
                   cx,
                 )
-              })),
+              }))
+              .when(!overflowed.is_empty(), |this| {
+                this.child(modern_overflow_menu(overflowed, editor.clone(), metrics, workspace.clone(), panel_id, cx))
+              }),
           ),
       )
       .into_any_element()
   }
+}
+
+/// P4-S3: the trailing chevron holding folded commands; every entry executes
+/// through the unified dispatch, so folded and visible chips behave
+/// identically.
+#[hotpath::measure]
+fn modern_overflow_menu(
+  overflowed: Vec<RibbonCommand>,
+  editor: Entity<RichTextEditor>,
+  metrics: RibbonLayoutMetrics,
+  workspace: Option<WeakEntity<Workspace>>,
+  panel_id: Option<Uuid>,
+  cx: &mut Context<EditorRibbon>,
+) -> AnyElement {
+  let chip_height = metrics.chip_height;
+  Button::new("modern-ribbon-overflow")
+    .compact()
+    .outline()
+    .h(chip_height)
+    .px(metrics.chip_padding_x)
+    .tooltip("More commands")
+    .child(Icon::new(IconName::Ellipsis).xsmall().text_color(cx.theme().muted_foreground))
+    .dropdown_menu(move |menu, _, _| {
+      overflowed.iter().fold(menu, |menu, command| {
+        let label = command.label;
+        let command_id = command.id;
+        let editor = editor.clone();
+        let workspace = workspace.clone();
+        menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
+          perform_ribbon_command_in_workspace(&editor, workspace.as_ref(), panel_id, command_id, window, cx);
+        }))
+      })
+    })
+    .into_any_element()
 }

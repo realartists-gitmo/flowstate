@@ -5,6 +5,7 @@ use gpui::{
 use gpui_component::Size;
 use gpui_component::button::DropdownButton;
 use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::menu::DropdownMenu as _;
 use gpui_component::h_flex;
 use gpui_component::kbd::Kbd;
 use gpui_component::menu::PopupMenuItem;

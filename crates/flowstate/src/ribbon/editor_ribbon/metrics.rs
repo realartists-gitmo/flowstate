@@ -7,7 +7,9 @@ impl RibbonLayoutMetrics {
     let group_padding_top = px(3.0 + 3.0 * scale);
     let chip_gap = px(2.0 + 4.0 * scale);
     let chip_height = px(20.0 + 10.0 * scale);
-    let group_label_height = px(12.0);
+    // P4-S2 (labels pick: reclaim the band): group labels were measured and
+    // height-reserved but never rendered — the 12px band goes back to chips.
+    let group_label_height = px(0.0);
     let group_body_gap = px(3.0);
     let group_bottom_guard = px(5.0);
     let max_chip_rows = chip_rows_for_height(
