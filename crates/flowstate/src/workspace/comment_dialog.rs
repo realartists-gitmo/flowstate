@@ -100,7 +100,7 @@ impl CommentDialog {
     let input = self.create_input.clone();
     let window = window.window_handle();
     cx.spawn(async move |dialog, cx| {
-      let result = io.create_comment(selection, body, user_id, name).await;
+      let result = io.create_comment(Some(selection), body, user_id, name).await;
       let _ = window.update(cx, |_, window, cx| {
         let _ = dialog.update(cx, |dialog, cx| {
           dialog.busy = false;

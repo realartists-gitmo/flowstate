@@ -35,15 +35,23 @@ pub struct RuntimeCommentMessage {
   pub body: String,
   pub created_at_unix_secs: i64,
   pub updated_at_unix_secs: i64,
+  /// C-S1: tombstoned by its author — render "message deleted", keep shape.
+  pub deleted: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct RuntimeCommentThread {
   pub comment_id: u128,
+  /// The one authorship authority (enforcement uses the same resolution).
+  pub author_user_id: Option<u128>,
   pub quoted_text: String,
   pub resolved: bool,
+  /// A general (unanchored) note — never an orphan, pinned by the panel.
+  pub general: bool,
   pub created_at_unix_secs: i64,
   pub updated_at_unix_secs: i64,
+  /// The frontier this thread was born at (C-S6 history-jump checks it out).
+  pub created_frontier: Option<Vec<u8>>,
   pub anchor: Option<(gpui_flowtext::DocumentOffset, gpui_flowtext::DocumentOffset)>,
   pub messages: Vec<RuntimeCommentMessage>,
 }

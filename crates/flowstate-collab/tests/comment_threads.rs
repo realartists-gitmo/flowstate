@@ -34,7 +34,7 @@ mod tests {
     let (_handle, gate) = commented_doc();
     let mut guard = gate.lock(GateHolder::DocumentService).expect("gate");
     let comment_id = guard
-      .create_comment(&selection(0, 5), "first!", 7, "Alex")
+      .create_comment(Some(&selection(0, 5)), "first!", 7, "Alex")
       .expect("create comment");
 
     let threads = guard.comments();
@@ -64,7 +64,7 @@ mod tests {
     let (_handle, gate) = commented_doc();
     let mut guard = gate.lock(GateHolder::DocumentService).expect("gate");
     let comment_id = guard
-      .create_comment(&selection(0, 5), "line one\r\nline\u{7} two", 7, "Alex")
+      .create_comment(Some(&selection(0, 5)), "line one\r\nline\u{7} two", 7, "Alex")
       .expect("create comment");
 
     let threads = guard.comments();
@@ -83,12 +83,12 @@ mod tests {
 
     assert!(
       guard
-        .create_comment(&selection(2, 2), "empty selection", 7, "Alex")
+        .create_comment(Some(&selection(2, 2)), "empty selection", 7, "Alex")
         .is_err()
     );
     assert!(
       guard
-        .create_comment(&selection(0, 5), " \r\u{0} ", 7, "Alex")
+        .create_comment(Some(&selection(0, 5)), " \r\u{0} ", 7, "Alex")
         .is_err()
     );
     drop(guard);

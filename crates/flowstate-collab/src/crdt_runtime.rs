@@ -1923,16 +1923,20 @@ impl CrdtRuntime {
             body: map_string_opt(&message, "body").unwrap_or_default(),
             created_at_unix_secs: map_i64_opt(&message, "created_at").unwrap_or_default(),
             updated_at_unix_secs: map_i64_opt(&message, "updated_at").unwrap_or_default(),
+            deleted: map_bool_opt(&message, "deleted").unwrap_or(false),
           });
         });
       }
       messages.sort_by_key(|message| (message.created_at_unix_secs, message.message_id));
       threads.push(RuntimeCommentThread {
         comment_id,
+        author_user_id: comment_thread_author(&thread),
         quoted_text: map_string_opt(&thread, "quoted_text").unwrap_or_default(),
         resolved: map_bool_opt(&thread, "resolved").unwrap_or(false),
+        general: map_bool_opt(&thread, "general").unwrap_or(false),
         created_at_unix_secs: map_i64_opt(&thread, "created_at").unwrap_or_default(),
         updated_at_unix_secs: map_i64_opt(&thread, "updated_at").unwrap_or_default(),
+        created_frontier: map_binary_opt(&thread, "created_frontier"),
         anchor,
         messages,
       });
@@ -1941,16 +1945,32 @@ impl CrdtRuntime {
     threads
   }
 
-  pub fn create_comment(&mut self, selection: &EditorSelection, body: &str, author_user_id: u128, author_display_name: &str) -> Result<u128> {
+  /// C-S1: `selection: None` creates a GENERAL comment — feedback with no
+  /// location (the F3 decision) — stored with no cursors and a `general`
+  /// marker so it never reads as an orphan. Every thread records the
+  /// frontier it was born at, which is what history-jump (C-S6) checks out.
+  pub fn create_comment(
+    &mut self,
+    selection: Option<&EditorSelection>,
+    body: &str,
+    author_user_id: u128,
+    author_display_name: &str,
+  ) -> Result<u128> {
     let body = validated_comment_body(body)?;
-    anyhow::ensure!(selection.anchor != selection.head, "Select text before adding a comment");
+    let anchored = match selection {
+      Some(selection) => {
+        anyhow::ensure!(selection.anchor != selection.head, "Select text before adding an anchored comment");
+        let (head_cursor, anchor_cursor) = self
+          .encode_selection_anchor(selection)
+          .context("The selected text cannot be anchored in this document")?;
+        let start = gpui_flowtext::global_byte(&self.projection, selection.anchor.min(selection.head));
+        let end = gpui_flowtext::global_byte(&self.projection, selection.anchor.max(selection.head));
+        let quoted_text = gpui_flowtext::document_text_slice(&self.projection, start..end);
+        Some((head_cursor, anchor_cursor, quoted_text))
+      },
+      None => None,
+    };
     self.register_pending_author_identity();
-    let (head_cursor, anchor_cursor) = self
-      .encode_selection_anchor(selection)
-      .context("The selected text cannot be anchored in this document")?;
-    let start = gpui_flowtext::global_byte(&self.projection, selection.anchor.min(selection.head));
-    let end = gpui_flowtext::global_byte(&self.projection, selection.anchor.max(selection.head));
-    let quoted_text = gpui_flowtext::document_text_slice(&self.projection, start..end);
     let comment_id = Uuid::new_v4().as_u128();
     let message_id = Uuid::new_v4().as_u128();
     let now = unix_time_secs();
@@ -1961,9 +1981,18 @@ impl CrdtRuntime {
     let thread = comments.ensure_mergeable_map(&comment_id.to_string())?;
     thread.insert("id", comment_id.to_string())?;
     thread.insert("author_user_id", author_user_id.to_string())?;
-    thread.insert("head_cursor", LoroValue::Binary(head_cursor.into()))?;
-    thread.insert("anchor_cursor", LoroValue::Binary(anchor_cursor.into()))?;
-    thread.insert("quoted_text", quoted_text)?;
+    match &anchored {
+      Some((head_cursor, anchor_cursor, quoted_text)) => {
+        thread.insert("head_cursor", LoroValue::Binary(head_cursor.clone().into()))?;
+        thread.insert("anchor_cursor", LoroValue::Binary(anchor_cursor.clone().into()))?;
+        thread.insert("quoted_text", quoted_text.as_str())?;
+      },
+      None => {
+        thread.insert("general", true)?;
+        thread.insert("quoted_text", "")?;
+      },
+    }
+    thread.insert("created_frontier", LoroValue::Binary(from_frontier.encode().into()))?;
     thread.insert("resolved", false)?;
     thread.insert("created_at", now)?;
     thread.insert("updated_at", now)?;
@@ -1971,6 +2000,25 @@ impl CrdtRuntime {
     write_comment_message(&messages, message_id, &body, author_user_id, author_display_name, now)?;
     self.finish_comment_mutation(from_frontier, from_vv, "comment-create")?;
     Ok(comment_id)
+  }
+
+  /// C-S1: author-gated per-message delete leaving a tombstone — the thread
+  /// keeps its shape ("message deleted") instead of replies losing referents.
+  pub fn delete_comment_message(&mut self, comment_id: u128, message_id: u128, actor_user_id: u128) -> Result<()> {
+    let from_frontier = self.doc.state_frontiers();
+    let from_vv = self.doc.state_vv();
+    let thread = existing_comment_thread(&self.doc, comment_id)?;
+    let messages = existing_child_map(&thread, "messages_by_id")?;
+    let message = existing_child_map(&messages, &message_id.to_string())?;
+    anyhow::ensure!(
+      map_string_opt(&message, "author_user_id").and_then(|id| id.parse().ok()) == Some(actor_user_id),
+      "Only the message author can delete it"
+    );
+    message.insert("deleted", true)?;
+    message.insert("body", "")?;
+    message.insert("updated_at", unix_time_secs())?;
+    thread.insert("updated_at", unix_time_secs())?;
+    self.finish_comment_mutation(from_frontier, from_vv, "comment-message-delete")
   }
 
   pub fn reply_to_comment(&mut self, comment_id: u128, body: &str, author_user_id: u128, author_display_name: &str) -> Result<u128> {
@@ -2020,23 +2068,13 @@ impl CrdtRuntime {
     let root = flowstate_document::loro_schema::root_map(&self.doc);
     let comments = existing_child_map(&root, flowstate_document::COMMENTS_BY_ID)?;
     let thread = existing_child_map(&comments, &comment_id.to_string())?;
-    // Threads written before the author field existed fall back to the
-    // earliest message's author.
-    let thread_author = map_string_opt(&thread, "author_user_id")
-      .and_then(|id| id.parse::<u128>().ok())
-      .or_else(|| {
-        let messages = existing_child_map(&thread, "messages_by_id").ok()?;
-        messages
-          .values()
-          .filter_map(|value| match value {
-            ValueOrContainer::Container(Container::Map(message)) => Some(message),
-            _ => None,
-          })
-          .min_by_key(|message| map_i64_opt(message, "created_at").unwrap_or_default())
-          .and_then(|message| map_string_opt(&message, "author_user_id"))
-          .and_then(|id| id.parse::<u128>().ok())
-      });
-    anyhow::ensure!(thread_author == Some(actor_user_id), "Only the thread author can delete it");
+    // C-S1: ONE authority for thread authorship — the same resolution the
+    // materializer exposes to the UI, so visibility and enforcement can
+    // never diverge again.
+    anyhow::ensure!(
+      comment_thread_author(&thread) == Some(actor_user_id),
+      "Only the thread author can delete it"
+    );
     comments.delete(&comment_id.to_string())?;
     self.finish_comment_mutation(from_frontier, from_vv, "comment-delete")
   }
@@ -7187,6 +7225,27 @@ fn existing_child_map(parent: &LoroMap, key: &str) -> Result<LoroMap> {
   }
 }
 
+/// C-S1: THE thread-authorship resolution — used by both enforcement
+/// (delete) and the materializer, so UI visibility can never diverge from
+/// what the server checks. Threads written before the author field existed
+/// fall back to the earliest message's author.
+fn comment_thread_author(thread: &LoroMap) -> Option<u128> {
+  map_string_opt(thread, "author_user_id")
+    .and_then(|id| id.parse::<u128>().ok())
+    .or_else(|| {
+      let messages = existing_child_map(thread, "messages_by_id").ok()?;
+      messages
+        .values()
+        .filter_map(|value| match value {
+          ValueOrContainer::Container(Container::Map(message)) => Some(message),
+          _ => None,
+        })
+        .min_by_key(|message| map_i64_opt(message, "created_at").unwrap_or_default())
+        .and_then(|message| map_string_opt(&message, "author_user_id"))
+        .and_then(|id| id.parse::<u128>().ok())
+    })
+}
+
 fn existing_comment_thread(doc: &LoroDoc, comment_id: u128) -> Result<LoroMap> {
   let root = flowstate_document::loro_schema::root_map(doc);
   let comments = existing_child_map(&root, flowstate_document::COMMENTS_BY_ID)?;
@@ -7859,6 +7918,56 @@ mod tests {
   }
 
   #[test]
+  fn general_comments_tombstones_and_frontiers_converge() -> Result<()> {
+    let base = flowstate_document::new_loro_document("Comments")?;
+    let mut source = CrdtRuntime::from_doc(base.fork(), None, None)?;
+    let mut target = CrdtRuntime::from_doc(base, None, None)?;
+    source.command(SemanticCommand::InsertText {
+      unicode_index: 1,
+      text: "alpha".to_string(),
+      styles: RunStyles::default(),
+    })?;
+    source.set_author_identity(7, Some("Ada".into()))?;
+
+    // A general comment: no selection, never an orphan, pinned by `general`.
+    let general_id = source.create_comment(None, "Read the aff top-down first", 7, "Ada")?;
+    // An anchored comment records its birth frontier.
+    let selection = EditorSelection::range(DocumentOffset { paragraph: 0, byte: 0 }, DocumentOffset { paragraph: 0, byte: 5 });
+    let anchored_id = source.create_comment(Some(&selection), "Tighten this", 7, "Ada")?;
+    let reply_id = source.reply_to_comment(anchored_id, "on it", 9, "Sol")?;
+    // Tombstone the reply (author-gated: the wrong actor is refused).
+    assert!(source.delete_comment_message(anchored_id, reply_id, 7).is_err());
+    source.delete_comment_message(anchored_id, reply_id, 9)?;
+
+    // Converge to the peer via a full-state export.
+    let update = source.doc().export(ExportMode::all_updates()).expect("export");
+    target.import_remote_update(&update)?;
+
+    for runtime in [&source, &target] {
+      let threads = runtime.comments();
+      let general = threads.iter().find(|thread| thread.comment_id == general_id).expect("general");
+      assert!(general.general);
+      assert!(general.anchor.is_none());
+      assert_eq!(general.author_user_id, Some(7));
+      let anchored = threads.iter().find(|thread| thread.comment_id == anchored_id).expect("anchored");
+      assert!(!anchored.general);
+      assert!(anchored.anchor.is_some());
+      let frontier = anchored.created_frontier.clone().expect("birth frontier recorded");
+      // H-K0 integration: the birth frontier is checkout-able.
+      let historical = runtime.frontier_projection(&frontier)?;
+      assert_eq!(flowstate_document::paragraph_text(&historical, 0), "alpha");
+      let tombstoned = anchored
+        .messages
+        .iter()
+        .find(|message| message.message_id == reply_id)
+        .expect("tombstone survives");
+      assert!(tombstoned.deleted);
+      assert!(tombstoned.body.is_empty());
+    }
+    Ok(())
+  }
+
+  #[test]
   fn comment_threads_converge_and_anchors_survive_edits() -> Result<()> {
     let base = flowstate_document::new_loro_document("Comments")?;
     let mut source = CrdtRuntime::from_doc(base.fork(), None, None)?;
@@ -7871,7 +7980,7 @@ mod tests {
     target.import_remote_update(&local_update_bytes(&insert))?;
     source.set_author_identity(7, Some("Ada".into()))?;
     let selection = EditorSelection::range(DocumentOffset { paragraph: 0, byte: 0 }, DocumentOffset { paragraph: 0, byte: 5 });
-    let comment_id = source.create_comment(&selection, "Needs a source", 7, "Ada")?;
+    let comment_id = source.create_comment(Some(&selection), "Needs a source", 7, "Ada")?;
     source.reply_to_comment(comment_id, "Added one", 9, "Grace")?;
     source.set_comment_resolved(comment_id, true)?;
 

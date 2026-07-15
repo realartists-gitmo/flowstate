@@ -10,4 +10,4 @@ mod revision_dialog;
 mod workspace;
 
 pub use workspace::{Workspace, install_workspace_close_prompt, open_workspace_window};
-pub(crate) use workspace::{PaletteAction, PaletteEntry};
+pub(crate) use workspace::PaletteEntry;

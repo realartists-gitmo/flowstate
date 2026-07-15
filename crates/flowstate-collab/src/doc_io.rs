@@ -94,7 +94,8 @@ pub enum IoRequest {
     reply: Sender<Result<Vec<RuntimeCommentThread>>>,
   },
   CreateComment {
-    selection: gpui_flowtext::EditorSelection,
+    /// `None` = a general (unanchored) comment — the F3 decision.
+    selection: Option<gpui_flowtext::EditorSelection>,
     body: String,
     author_user_id: u128,
     author_display_name: String,
@@ -121,6 +122,13 @@ pub enum IoRequest {
   },
   DeleteComment {
     comment_id: u128,
+    actor_user_id: u128,
+    reply: Sender<Result<()>>,
+  },
+  /// C-S1: author-gated per-message tombstone delete.
+  DeleteCommentMessage {
+    comment_id: u128,
+    message_id: u128,
     actor_user_id: u128,
     reply: Sender<Result<()>>,
   },
@@ -184,6 +192,7 @@ fn io_request_kind(request: &IoRequest) -> &'static str {
     IoRequest::SetCommentResolved { .. } => "set-comment-resolved",
     IoRequest::EditCommentMessage { .. } => "edit-comment-message",
     IoRequest::DeleteComment { .. } => "delete-comment",
+    IoRequest::DeleteCommentMessage { .. } => "delete-comment-message",
     IoRequest::ProjectionFallbackStats { .. } => "projection-fallback-stats",
     IoRequest::PresenceSelection { .. } => "presence-selection",
     IoRequest::ResolvePresenceCarets { .. } => "resolve-presence-carets",
@@ -319,7 +328,7 @@ impl DocIoHandle {
 
   pub async fn create_comment(
     &self,
-    selection: gpui_flowtext::EditorSelection,
+    selection: Option<gpui_flowtext::EditorSelection>,
     body: String,
     author_user_id: u128,
     author_display_name: String,
@@ -369,6 +378,17 @@ impl DocIoHandle {
     self
       .request(|reply| IoRequest::DeleteComment {
         comment_id,
+        actor_user_id,
+        reply,
+      })
+      .await
+  }
+
+  pub async fn delete_comment_message(&self, comment_id: u128, message_id: u128, actor_user_id: u128) -> Result<()> {
+    self
+      .request(|reply| IoRequest::DeleteCommentMessage {
+        comment_id,
+        message_id,
         actor_user_id,
         reply,
       })
@@ -790,7 +810,7 @@ fn io_loop(core: &Arc<WriteGate<CrdtRuntime>>, receiver: &Receiver<IoRequest>) {
         send_reply(
           &reply,
           gate_call(core, GateHolder::DocumentService, |runtime| {
-            runtime.create_comment(&selection, &body, author_user_id, &author_display_name)
+            runtime.create_comment(selection.as_ref(), &body, author_user_id, &author_display_name)
           }),
         );
       },
@@ -839,6 +859,19 @@ fn io_loop(core: &Arc<WriteGate<CrdtRuntime>>, receiver: &Receiver<IoRequest>) {
           &reply,
           gate_call(core, GateHolder::DocumentService, |runtime| {
             runtime.delete_comment(comment_id, actor_user_id)
+          }),
+        );
+      },
+      IoRequest::DeleteCommentMessage {
+        comment_id,
+        message_id,
+        actor_user_id,
+        reply,
+      } => {
+        send_reply(
+          &reply,
+          gate_call(core, GateHolder::DocumentService, |runtime| {
+            runtime.delete_comment_message(comment_id, message_id, actor_user_id)
           }),
         );
       },
