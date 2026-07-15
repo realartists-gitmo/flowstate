@@ -61,6 +61,7 @@ impl Render for Workspace {
         this.child(self.render_settings_overlay(overlay, cx))
       })
       .when_some(self.file_search_overlay.clone(), |this, overlay| this.child(overlay))
+      .when_some(self.command_palette.clone(), |this, palette| this.child(palette))
       .when_some(self.outline_context_menu.as_ref(), |this, ctx| {
         let workspace = cx.entity().downgrade();
         let menu = ctx.menu_view.clone();

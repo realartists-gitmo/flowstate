@@ -139,6 +139,7 @@ pub struct Workspace {
   collab_notice_subscriptions: FxHashMap<flowstate_collab::SessionId, Subscription>,
   collab_incompatible_version_notices: HashSet<String>,
   file_search_overlay: Option<Entity<FileSearchOverlay>>,
+  command_palette: Option<Entity<crate::workspace::command_palette::CommandPalette>>,
   tub_root: Option<PathBuf>,
   tub_index: Option<Arc<TubIndex>>,
   tub_files: Vec<TubFile>,
@@ -309,6 +310,7 @@ impl DocumentStyleSection {
 }
 
 include!("documents.rs");
+include!("palette_actions.rs");
 include!("status_activity.rs");
 include!("collab_prompts.rs");
 include!("collab.rs");

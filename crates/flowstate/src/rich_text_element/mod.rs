@@ -59,7 +59,8 @@ pub fn flowstate_command_to_rich_text(command: CommandId) -> Option<RichTextEdit
     CommandId::Delete => RichTextEditorCommand::Delete,
     CommandId::InsertNewline => RichTextEditorCommand::InsertNewline,
     CommandId::InsertSoftLineBreak => RichTextEditorCommand::InsertSoftLineBreak,
-    CommandId::Save
+    CommandId::OpenCommandPalette
+    | CommandId::Save
     | CommandId::NewDocument
     | CommandId::OpenDocument
     | CommandId::OpenDemoDocument

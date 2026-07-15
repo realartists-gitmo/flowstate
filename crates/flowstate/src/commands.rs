@@ -5,7 +5,7 @@ use gpui::actions;
 pub(crate) use keymap::action_for_command;
 pub use keymap::{Keymap, KeymapEntry, register_default_keybindings, register_keymap};
 
-actions!(flowstate_workspace, [FindInDocumentAction, FidelityMarkAction]);
+actions!(flowstate_workspace, [FindInDocumentAction, FidelityMarkAction, OpenCommandPaletteAction]);
 
 pub const RICH_TEXT_CONTEXT: &str = "RichTextEditor";
 
@@ -48,6 +48,7 @@ pub enum CommandId {
   Cut,
   Paste,
   Save,
+  OpenCommandPalette,
   Undo,
   Redo,
   SetParagraphPocket,
@@ -191,6 +192,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
   CommandSpec::new(CommandId::Cut, "Cut", EDITOR, &["cmd-x", "ctrl-x"]),
   CommandSpec::new(CommandId::Paste, "Paste", EDITOR, &["cmd-v", "ctrl-v"]),
   CommandSpec::new(CommandId::Save, "Save", EDITOR, &["cmd-s", "ctrl-s"]),
+  CommandSpec::new(CommandId::OpenCommandPalette, "Command Palette", APP, &["cmd-shift-p", "ctrl-shift-p"]),
   CommandSpec::new(CommandId::Undo, "Undo", EDITOR, &["cmd-z", "ctrl-z"]),
   CommandSpec::new(CommandId::Redo, "Redo", EDITOR, &["cmd-shift-z", "ctrl-shift-z", "ctrl-y"]),
   CommandSpec::new(CommandId::SetParagraphPocket, "Set Paragraph: Pocket", EDITOR, &["f4"]),

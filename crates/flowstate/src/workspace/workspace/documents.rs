@@ -227,6 +227,7 @@ impl Workspace {
       collab_notice_subscriptions: FxHashMap::default(), // §perf: FxHash for trusted SessionId keys
       collab_incompatible_version_notices: HashSet::new(),
       file_search_overlay: None,
+      command_palette: None,
       tub_root: None,
       tub_index: None,
       tub_files: Vec::new(),

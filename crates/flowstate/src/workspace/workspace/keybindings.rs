@@ -141,6 +141,10 @@ impl Workspace {
       CommandId::JoinCollaborationFromClipboard => self.join_collaboration_from_clipboard(window, cx),
       CommandId::LeaveCollaboration => self.confirm_leave_collaboration_on_active_document(window, cx),
       CommandId::FindInDocument => self.open_active_document_search_bar(window, cx),
+      CommandId::OpenCommandPalette => {
+        self.open_command_palette(window, cx);
+        true
+      },
       CommandId::ZoomIn => {
         if let Some(editor) = self.active_editor.clone() {
           editor.update(cx, |editor, cx| editor.zoom_in(cx));

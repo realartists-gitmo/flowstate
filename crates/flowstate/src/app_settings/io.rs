@@ -492,6 +492,12 @@ pub fn save_tub_root(path: Option<PathBuf>) -> io::Result<()> {
   save_app_settings(settings)
 }
 
+pub fn save_reduce_motion(enabled: bool) -> io::Result<()> {
+  let mut settings = load_app_settings();
+  settings.editor.reduce_motion = enabled;
+  save_app_settings(settings)
+}
+
 pub fn save_send_to_document_directory(enabled: bool) -> io::Result<()> {
   let mut settings = load_app_settings();
   settings.editor.send_to_document_directory = enabled;

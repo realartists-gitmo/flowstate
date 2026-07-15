@@ -121,6 +121,7 @@ pub(crate) fn action_for_command(command: CommandId) -> Option<Box<dyn Action>> 
     CommandId::Cut => Box::new(Cut),
     CommandId::Paste => Box::new(Paste),
     CommandId::Save => Box::new(Save),
+    CommandId::OpenCommandPalette => Box::new(super::OpenCommandPaletteAction),
     CommandId::Undo => Box::new(Undo),
     CommandId::Redo => Box::new(Redo),
     CommandId::SetParagraphPocket => Box::new(SetParagraphStyle0),
