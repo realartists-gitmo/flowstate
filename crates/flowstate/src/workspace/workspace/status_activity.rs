@@ -37,6 +37,27 @@ pub(super) struct ActivityEvent {
 
 const ACTIVITY_TRANSIENT_DECAY: std::time::Duration = std::time::Duration::from_secs(6);
 
+/// P5-S1 (Law 2): run a settings save off-thread and surface failures in the
+/// activity zone — the uniform replacement for eight fire-and-forget
+/// `eprintln!` sites.
+pub(super) fn save_setting_reporting(
+  workspace: WeakEntity<Workspace>,
+  what: &'static str,
+  save: impl FnOnce() -> std::io::Result<()> + Send + 'static,
+  cx: &mut App,
+) {
+  cx.spawn(async move |cx| {
+    let result = cx.background_executor().spawn(async move { save() }).await;
+    if let Err(error) = result {
+      tracing::error!("failed to save {what}: {error}");
+      let _ = workspace.update(cx, |workspace, cx| {
+        workspace.report_failure(format!("Couldn't save {what}: {error}"), None, cx);
+      });
+    }
+  })
+  .detach();
+}
+
 impl Workspace {
   pub(super) fn set_save_state(&mut self, panel_id: Uuid, state: PanelSaveState, cx: &mut Context<Self>) {
     if self.panel_save_states.get(&panel_id) != Some(&state) {

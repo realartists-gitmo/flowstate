@@ -93,6 +93,9 @@ pub struct Workspace {
   left_nav_mode: LeftNavMode,
   /// O-S1: session-restored nav width, consumed as the panel's initial size.
   restored_nav_width: Option<Pixels>,
+  /// P5-S1: per-command keybinding parse errors, rendered inline under the
+  /// keymap row that caused them (they used to die in stderr).
+  keymap_errors: FxHashMap<crate::commands::CommandId, String>,
   tab_bar_scroll_handle: ScrollHandle,
   pinned_document_ids: Vec<Uuid>,
   speech_document_id: Option<Uuid>,

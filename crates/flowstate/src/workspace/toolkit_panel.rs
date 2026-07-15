@@ -476,10 +476,6 @@ impl Workspace {
 
   fn open_tub_tree_file(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
     self.active_tub_path = Some(path.clone());
-    let name = path
-      .file_name()
-      .map(|name| name.to_string_lossy().to_string())
-      .unwrap_or_else(|| path.display().to_string());
     cx.notify();
     self.open_document_path(path, window, cx);
   }

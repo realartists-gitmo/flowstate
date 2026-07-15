@@ -10,19 +10,13 @@ fn apply_app_theme_config(theme_name: &str, window: Option<&mut Window>, cx: &mu
   true
 }
 
-fn apply_app_theme(theme_name: &str, window: Option<&mut Window>, cx: &mut App) {
+fn apply_app_theme(theme_name: &str, workspace: WeakEntity<Workspace>, window: Option<&mut Window>, cx: &mut App) {
   if !apply_app_theme_config(theme_name, window, cx) {
     return;
   }
 
   let theme_name = theme_name.to_string();
-  cx.background_executor()
-    .spawn(async move {
-      if let Err(error) = save_theme_name(&theme_name) {
-        eprintln!("failed to save theme setting: {error}");
-      }
-    })
-    .detach();
+  save_setting_reporting(workspace, "the theme", move || save_theme_name(&theme_name), cx);
 }
 
 #[hotpath::measure]

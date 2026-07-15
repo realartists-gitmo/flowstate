@@ -467,13 +467,7 @@ fn update_active_document_theme(cx: &mut App, workspace: &WeakEntity<Workspace>,
     update(&mut theme);
 
     let theme_for_save = theme.clone();
-    cx.background_executor()
-      .spawn(async move {
-        if let Err(error) = save_document_theme(&theme_for_save) {
-          eprintln!("failed to save document style settings: {error}");
-        }
-      })
-      .detach();
+    save_setting_reporting(cx.entity().downgrade(), "document styles", move || save_document_theme(&theme_for_save), cx);
 
     workspace.apply_document_theme_to_open_editors(theme, cx);
   });
@@ -549,13 +543,7 @@ fn active_smart_word_selection(cx: &App, workspace: &WeakEntity<Workspace>) -> b
 
 #[hotpath::measure]
 fn update_smart_word_selection(cx: &mut App, workspace: &WeakEntity<Workspace>, enabled: bool) {
-  cx.background_executor()
-    .spawn(async move {
-      if let Err(error) = save_smart_word_selection(enabled) {
-        eprintln!("failed to save smart word selection setting: {error}");
-      }
-    })
-    .detach();
+  save_setting_reporting(workspace.clone(), "the smart word selection setting", move || save_smart_word_selection(enabled), cx);
 
   let _ = workspace.update(cx, |workspace, cx| {
     for panel in &workspace.document_panels {
@@ -577,13 +565,7 @@ fn active_autosave(cx: &App, workspace: &WeakEntity<Workspace>) -> bool {
 }
 
 fn update_autosave(cx: &mut App, workspace: &WeakEntity<Workspace>, enabled: bool) {
-  cx.background_executor()
-    .spawn(async move {
-      if let Err(error) = save_autosave(enabled) {
-        eprintln!("failed to save autosave setting: {error}");
-      }
-    })
-    .detach();
+  save_setting_reporting(workspace.clone(), "the autosave setting", move || save_autosave(enabled), cx);
 
   let _ = workspace.update(cx, |workspace, cx| {
     workspace.autosave_enabled = enabled;
@@ -636,8 +618,10 @@ fn send_custom_directory_item(workspace: WeakEntity<Workspace>) -> SettingItem {
       .unwrap_or_default();
     let state = window.use_keyed_state("workspace-send-custom-directory", cx, {
       let current = current.clone();
+      let workspace = workspace.clone();
       move |window, cx| {
         let initial_value = current.clone();
+        let workspace = workspace.clone();
         let input = cx.new(|cx| {
           InputState::new(window, cx)
             .default_value(initial_value)
@@ -651,13 +635,7 @@ fn send_custom_directory_item(workspace: WeakEntity<Workspace>) -> SettingItem {
               let value = input.read(cx).value().trim().to_string();
               state.current_value = value.clone();
               let path = (!value.is_empty()).then(|| PathBuf::from(value));
-              cx.background_executor()
-                .spawn(async move {
-                  if let Err(error) = save_send_custom_directory(path) {
-                    eprintln!("failed to save send directory setting: {error}");
-                  }
-                })
-                .detach();
+              save_setting_reporting(workspace.clone(), "the send directory", move || save_send_custom_directory(path), cx);
             }
           },
         );
@@ -715,7 +693,10 @@ fn send_custom_directory_item(workspace: WeakEntity<Workspace>) -> SettingItem {
                   };
                   let value = path.to_string_lossy().to_string();
                   if let Err(error) = save_send_custom_directory(Some(path)) {
-                    eprintln!("failed to save send directory setting: {error}");
+                    tracing::error!("failed to save send directory setting: {error}");
+                    let _ = workspace.update(cx, |workspace, cx| {
+                      workspace.report_failure(format!("Couldn't save the send directory: {error}"), None, cx);
+                    });
                   }
                   let _ = state.update(cx, |state, cx| {
                     state.current_value = value;
@@ -744,13 +725,7 @@ fn active_send_to_document_directory() -> bool {
 }
 
 fn update_send_to_document_directory(cx: &mut App, workspace: &WeakEntity<Workspace>, enabled: bool) {
-  cx.background_executor()
-    .spawn(async move {
-      if let Err(error) = save_send_to_document_directory(enabled) {
-        eprintln!("failed to save send directory mode setting: {error}");
-      }
-    })
-    .detach();
+  save_setting_reporting(workspace.clone(), "the send directory mode", move || save_send_to_document_directory(enabled), cx);
 
   let _ = workspace.update(cx, |_, cx| cx.notify());
 }

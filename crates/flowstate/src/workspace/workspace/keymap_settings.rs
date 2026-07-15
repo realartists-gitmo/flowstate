@@ -82,6 +82,9 @@ fn render_keymap_row(
     }
   });
   let input = state.read(cx).input.clone();
+  let binding_error = workspace
+    .upgrade()
+    .and_then(|workspace| workspace.read(cx).keymap_errors.get(&spec.id).cloned());
 
   h_flex()
     .w_full()
@@ -93,7 +96,16 @@ fn render_keymap_row(
     .border_color(cx.theme().border)
     .when(row_ix % 2 == 1, |this| this.bg(cx.theme().secondary.opacity(0.35)))
     .child(div().w_48().min_w_0().text_sm().child(spec.label))
-    .child(div().flex_1().min_w_0().child(Input::new(&input).w_full()))
+    .child(
+      v_flex()
+        .flex_1()
+        .min_w_0()
+        .gap_0p5()
+        .child(Input::new(&input).w_full())
+        .when_some(binding_error, |this, error| {
+          this.child(div().text_xs().text_color(cx.theme().danger).child(error))
+        }),
+    )
     .into_any_element()
 }
 
@@ -101,13 +113,14 @@ fn update_keymap_command(cx: &mut App, workspace: &WeakEntity<Workspace>, comman
   let mut keymap = crate::app_settings::load_keymap();
   keymap.entries.retain(|entry| entry.command != command);
   let context = crate::commands::command_spec(command).and_then(|spec| spec.context.map(str::to_string));
+  let mut invalid_keys: Vec<String> = Vec::new();
   for key in value
     .split(',')
     .map(str::trim)
     .filter(|key| !key.is_empty())
   {
     if gpui::KeyBinding::load(key, Box::new(gpui::NoAction), None, false, None, &gpui::DummyKeyboardMapper).is_err() {
-      eprintln!("invalid key binding: {key}");
+      invalid_keys.push(key.to_string());
       continue;
     }
     keymap.entries.push(crate::commands::KeymapEntry {
@@ -116,13 +129,21 @@ fn update_keymap_command(cx: &mut App, workspace: &WeakEntity<Workspace>, comman
       context: context.clone(),
     });
   }
-  let entries = keymap.entries.clone();
-  cx.background_executor()
-    .spawn(async move {
-      if let Err(error) = crate::app_settings::save_keymap_entries(entries) {
-        eprintln!("failed to save keymap: {error}");
+  // P5-S1 (Law 2): parse failures render inline under the row instead of
+  // dying in stderr while the binding silently drops.
+  let _ = workspace.update(cx, |workspace, cx| {
+    if invalid_keys.is_empty() {
+      if workspace.keymap_errors.remove(&command).is_some() {
+        cx.notify();
       }
-    })
-    .detach();
+    } else {
+      workspace
+        .keymap_errors
+        .insert(command, format!("Not a valid binding: {}", invalid_keys.join(", ")));
+      cx.notify();
+    }
+  });
+  let entries = keymap.entries.clone();
+  save_setting_reporting(workspace.clone(), "the keymap", move || crate::app_settings::save_keymap_entries(entries), cx);
   let _ = workspace.update(cx, |_, cx| cx.notify());
 }

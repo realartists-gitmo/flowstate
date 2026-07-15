@@ -31,6 +31,7 @@ fn flowstate_top_bar_button(cx: &mut Context<Workspace>) -> impl IntoElement {
             .submenu("Change Theme", window, cx, {
               let theme_names = theme_names.clone();
               let current_theme = current_theme.clone();
+              let workspace = workspace.clone();
               move |menu, _, _| {
                 let menu = menu
                   .scrollable(true)
@@ -43,8 +44,11 @@ fn flowstate_top_bar_button(cx: &mut Context<Workspace>) -> impl IntoElement {
                       .checked(selected)
                       .keep_open(true)
                       .radio(true)
-                      .on_click(move |_, window, cx| {
-                        apply_app_theme(&apply_theme, Some(window), cx);
+                      .on_click({
+                        let workspace = workspace.clone();
+                        move |_, window, cx| {
+                          apply_app_theme(&apply_theme, workspace.clone(), Some(window), cx);
+                        }
                       }),
                   )
                 })

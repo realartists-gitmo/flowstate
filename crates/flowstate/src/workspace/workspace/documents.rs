@@ -191,6 +191,7 @@ impl Workspace {
       temporary_workspace_session_persist_scheduled: false,
       left_nav_mode: LeftNavMode::Outline,
       restored_nav_width: None,
+      keymap_errors: FxHashMap::default(),
       tab_bar_scroll_handle: ScrollHandle::new(),
       pinned_document_ids: Vec::new(),
       speech_document_id: None,
@@ -255,6 +256,12 @@ impl Workspace {
     };
 
     this.refresh_recent_document_previews(cx);
+
+    // P5-S1 (Law 2/7): a settings file that failed to parse at startup is no
+    // longer a silent wipe — the load path backed it up and left a warning.
+    if let Some(warning) = crate::app_settings::take_settings_load_warning() {
+      this.report_failure(warning, None, cx);
+    }
 
     if let Some(root) = load_tub_root() {
       this.load_tub_root(root, cx);

@@ -125,14 +125,49 @@ fn load_cached_app_settings() -> Arc<CachedAppSettings> {
 
 fn load_app_settings_from_path(path: PathBuf) -> io::Result<AppSettings> {
   match fs::read_to_string(&path) {
-    Ok(text) => Ok(parse_app_settings(&text).unwrap_or_default()),
+    Ok(text) => match parse_app_settings(&text) {
+      Ok(settings) => Ok(settings),
+      Err(error) => {
+        // Law 2/7: a malformed settings file used to be silently discarded —
+        // the next save then OVERWROTE the user's file with defaults. Now the
+        // broken file is preserved beside the live one and the workspace
+        // surfaces a persistent warning (see `take_settings_load_warning`).
+        let backup = path.with_extension("toml.invalid");
+        let backup_note = match fs::copy(&path, &backup) {
+          Ok(_) => format!("the original was saved to {}", backup.display()),
+          Err(copy_error) => format!("backing up the original FAILED: {copy_error}"),
+        };
+        record_settings_load_warning(format!(
+          "Settings file could not be parsed ({error}); defaults are in effect and {backup_note}"
+        ));
+        Ok(AppSettings::default())
+      },
+    },
     Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(AppSettings::default()),
     Err(err) => Err(err),
   }
 }
 
-fn parse_app_settings(text: &str) -> Option<AppSettings> {
-  toml::from_str(text).ok()
+fn parse_app_settings(text: &str) -> Result<AppSettings, toml::de::Error> {
+  toml::from_str(text)
+}
+
+fn settings_load_warning_slot() -> &'static Mutex<Option<String>> {
+  static WARNING: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+  WARNING.get_or_init(|| Mutex::new(None))
+}
+
+fn record_settings_load_warning(message: String) {
+  tracing::error!("{message}");
+  if let Ok(mut slot) = settings_load_warning_slot().lock() {
+    *slot = Some(message);
+  }
+}
+
+/// One-shot: the workspace drains this at construction and surfaces it in
+/// the status bar's activity zone as a persistent failure.
+pub fn take_settings_load_warning() -> Option<String> {
+  settings_load_warning_slot().lock().ok()?.take()
 }
 
 #[hotpath::measure]
