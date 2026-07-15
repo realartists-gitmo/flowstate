@@ -455,10 +455,20 @@ impl Workspace {
     } else {
       cx.theme().muted_foreground.opacity(0.8)
     };
+    // D-S3: failures sit on an engine-derived surface (elevation law) so the
+    // one persistent chip in the bar reads as an object, not loose text.
+    let surface = failure.then(|| crate::visual_engine::chrome_surface(cx, cx.theme().danger, 0.04));
     h_flex()
       .flex_none()
       .items_center()
       .gap_1()
+      .when_some(surface, |this, surface| {
+        this
+          .px_1p5()
+          .rounded_sm()
+          .bg(surface.fill)
+          .when_some(surface.hairline, |this, hairline| this.border_1().border_color(hairline))
+      })
       .child(div().text_size(px(10.0)).text_color(color).child(event.message.clone()))
       .when(failure, |this| {
         let action = event.action.clone();

@@ -146,6 +146,10 @@ pub struct EditorSettings {
   pub autosave: bool,
   pub send_to_document_directory: bool,
   pub send_custom_directory: Option<PathBuf>,
+  /// D-S4: collapse all app-level animation to zero duration. Settings-UI
+  /// row lands with the P5-S2 unified home; editable in settings.toml now.
+  #[serde(default)]
+  pub reduce_motion: bool,
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -162,6 +166,7 @@ impl Default for EditorSettings {
       autosave: false,
       send_to_document_directory: true,
       send_custom_directory: None,
+      reduce_motion: false,
     }
   }
 }

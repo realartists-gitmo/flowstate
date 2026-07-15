@@ -13,6 +13,8 @@ pub mod file_search;
 pub mod flow;
 pub mod logging;
 pub mod ribbon;
+pub mod motion;
+pub mod visual_engine;
 pub mod rich_text_element;
 pub mod workspace;
 
