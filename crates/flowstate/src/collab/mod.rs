@@ -23,7 +23,8 @@ use crate::rich_text_element::RichTextEditor;
 pub use discovery_runtime::DiscoveryScanResult;
 pub use manager::{CollabManager, JoinRequest};
 pub use session::{
-  Attachment, CollabSession, Connectivity, DetachReason, JoinStage, JoinedDocument, SessionNotice, SessionPhase, SessionRosterEntry,
+  Attachment, CollabEditor, CollabSession, Connectivity, DetachReason, JoinStage, JoinedDocument, SessionNotice, SessionPhase,
+  SessionRosterEntry,
 };
 pub use shutdown::shutdown;
 
@@ -32,6 +33,19 @@ where
   C: BorrowAppContext,
 {
   CollabManager::init(cx);
+}
+
+pub fn start_flow_session_for_panel<T>(
+  panel_id: Uuid,
+  editor: Entity<crate::flow::FlowEditor>,
+  title: String,
+  io: flowstate_collab::flow::FlowIoHandle,
+  cx: &mut Context<T>,
+) -> Result<SessionId>
+where
+  T: 'static,
+{
+  cx.update_default_global::<CollabManager, _>(|manager, cx| manager.start_flow_session_for_panel(panel_id, editor, title, io, cx))
 }
 
 pub fn start_session_for_panel<T>(
@@ -88,6 +102,13 @@ where
   T: 'static,
 {
   cx.update_default_global::<CollabManager, _>(|manager, cx| manager.request_ticket_for_panel(panel_id, cx))
+}
+
+/// The document kind of a panel's live session (S9: what its tickets carry).
+pub fn session_kind_for_panel(panel_id: Uuid, cx: &App) -> Option<flowstate_collab::DocumentKind> {
+  let manager = CollabManager::global(cx);
+  let session = manager.session_for_panel(panel_id)?;
+  Some(session.read(cx).kind())
 }
 
 pub fn phase_for_panel(panel_id: Uuid, cx: &App) -> Option<SessionPhase> {

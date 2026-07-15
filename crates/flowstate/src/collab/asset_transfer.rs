@@ -13,11 +13,11 @@ pub(super) fn schedule_missing_assets(
   preferred_peer: Option<flowstate_collab::ids::PeerId>,
   cx: &mut Context<CollabSession>,
 ) {
-  let Some(editor) = session.editor.clone() else {
-    tracing::trace!(session = %session.session, preferred_peer = ?preferred_peer, "skipping collaboration asset scan because editor is missing");
+  let Some(editor) = session.rich_text_editor() else {
+    tracing::trace!(session = %session.session, preferred_peer = ?preferred_peer, "skipping collaboration asset scan (no rich-text editor arm)");
     return;
   };
-  let Some(runtime) = session.runtime.clone() else {
+  let Some(runtime) = session.doc_io() else {
     tracing::trace!(session = %session.session, preferred_peer = ?preferred_peer, "skipping collaboration asset scan because Loro doc is missing");
     return;
   };

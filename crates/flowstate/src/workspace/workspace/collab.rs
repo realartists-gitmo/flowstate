@@ -93,6 +93,28 @@ impl Workspace {
   }
 
   pub fn start_collaboration_on_document(&mut self, panel_id: Uuid, cx: &mut Context<Self>) -> Option<flowstate_collab::SessionId> {
+    // Flow-panel arm (spec S9): identical shape over the flow I/O service.
+    if let Some(flow_panel) = self
+      .flow_panels
+      .iter()
+      .find(|panel| panel.read(cx).id() == panel_id)
+      .cloned()
+    {
+      let editor = flow_panel.read(cx).editor();
+      let title = flow_panel.read(cx).title_text().to_string();
+      let runtime = self.flow_document_runtimes.get(&panel_id)?.clone();
+      tracing::info!(%panel_id, title = %title, "workspace starting collaboration on flow");
+      return match crate::collab::start_flow_session_for_panel(panel_id, editor, title, runtime, cx) {
+        Ok(session) => {
+          tracing::info!(%panel_id, %session, "workspace started collaboration on flow");
+          Some(session)
+        },
+        Err(error) => {
+          tracing::error!(%panel_id, error = %format_args!("{error:#}"), "starting flow collaboration session failed");
+          None
+        },
+      };
+    }
     let panel = self
       .document_panels
       .iter()

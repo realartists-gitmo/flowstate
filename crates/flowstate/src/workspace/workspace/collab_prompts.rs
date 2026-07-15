@@ -140,26 +140,40 @@ impl Workspace {
   }
 
   fn collaboration_close_panels(&self, cx: &App) -> Vec<CollaborationClosePanel> {
-    self
-      .document_panels
-      .iter()
-      .filter_map(|panel| {
-        let panel_state = panel.read(cx);
-        let id = panel_state.id();
-        let phase = crate::collab::phase_for_panel(id, cx);
-        collaboration_phase_blocks_close(phase.as_ref()).then(|| {
-          let panel_kind = PanelKind::Document {
-            panel: panel.clone(),
-            editor: panel_state.editor(),
-          };
-          CollaborationClosePanel {
-            id,
-            save_prompt: collaboration_save_prompt_for_panel(&panel_kind, cx),
-            panel: panel_kind,
-          }
-        })
+    let documents = self.document_panels.iter().filter_map(|panel| {
+      let panel_state = panel.read(cx);
+      let id = panel_state.id();
+      let phase = crate::collab::phase_for_panel(id, cx);
+      collaboration_phase_blocks_close(phase.as_ref()).then(|| {
+        let panel_kind = PanelKind::Document {
+          panel: panel.clone(),
+          editor: panel_state.editor(),
+        };
+        CollaborationClosePanel {
+          id,
+          save_prompt: collaboration_save_prompt_for_panel(&panel_kind, cx),
+          panel: panel_kind,
+        }
       })
-      .collect()
+    });
+    // S9: live FLOW sessions block close identically.
+    let flows = self.flow_panels.iter().filter_map(|panel| {
+      let panel_state = panel.read(cx);
+      let id = panel_state.id();
+      let phase = crate::collab::phase_for_panel(id, cx);
+      collaboration_phase_blocks_close(phase.as_ref()).then(|| {
+        let panel_kind = PanelKind::Flow {
+          panel: panel.clone(),
+          editor: panel_state.editor(),
+        };
+        CollaborationClosePanel {
+          id,
+          save_prompt: collaboration_save_prompt_for_panel(&panel_kind, cx),
+          panel: panel_kind,
+        }
+      })
+    });
+    documents.chain(flows).collect()
   }
 }
 

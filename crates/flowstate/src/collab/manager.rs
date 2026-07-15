@@ -90,6 +90,70 @@ impl CollabManager {
     tracing::debug!("collaboration runtime shutdown state cleared");
   }
 
+  /// A FLOW panel's session (spec S9): identical registration; the session
+  /// carries `DocumentKind::Flow` and its runtime arm is the flow I/O
+  /// service. Discovery fingerprints ride the flow's `document_id`.
+  pub fn start_flow_session_for_panel<T>(
+    &mut self,
+    panel_id: Uuid,
+    editor: Entity<crate::flow::FlowEditor>,
+    title: String,
+    document_io: flowstate_collab::flow::FlowIoHandle,
+    cx: &mut Context<T>,
+  ) -> Result<SessionId>
+  where
+    T: 'static,
+  {
+    if let Some(session) = self.session_by_panel.get(&panel_id).copied() {
+      tracing::debug!(%panel_id, %session, "collaboration session already exists for panel");
+      return Ok(session);
+    }
+    let commands = self.ensure_runtime(cx)?;
+    let session = SessionId::new();
+    if let Ok(Some(document_id)) = editor.read(cx).handle().document_id() {
+      self
+        .discovery_documents
+        .insert(session, document_fingerprint(document_id.as_u128()));
+    }
+    if let Some(path) = editor.read(cx).document_path().cloned() {
+      self.discovery_paths.insert(session, path);
+    }
+    self.discovery_titles.insert(session, title.clone());
+    tracing::info!(%panel_id, %session, title = %title, "starting local flow collaboration session");
+    let collab = CollabSession::from_local_flow_runtime(session, panel_id, editor, title, document_io, commands.clone());
+    let direct_handler = collab.direct_handler();
+    let entity = cx.new(|_| collab);
+    entity.update(cx, |session, cx| session.attach(cx));
+    self.register_session(entity.clone(), cx);
+    if let Err(error) = commands.try_send(NetCommand::RegisterDirectHandler {
+      session,
+      handler: direct_handler,
+    }) {
+      tracing::error!(%panel_id, %session, error = %error, "registering flow collaboration direct handler failed");
+      Self::detach_entity(
+        &entity,
+        DetachReason::Fatal(format!("registering collaboration direct handler failed: {error}")),
+        cx,
+      );
+      self.unregister_session(session);
+      return Err(error).context("registering collaboration direct handler failed");
+    }
+    self.configure_standing_access(session);
+    let (reply_tx, reply_rx) = async_channel::bounded(1);
+    if let Err(error) = commands.try_send(NetCommand::CreateSession { session, reply: reply_tx }) {
+      tracing::error!(%panel_id, %session, error = %error, "queueing flow collaboration create-session command failed");
+      Self::detach_entity(
+        &entity,
+        DetachReason::Fatal(format!("creating collaboration network session failed: {error}")),
+        cx,
+      );
+      self.unregister_session(session);
+      return Err(error).context("creating collaboration network session failed");
+    }
+    Self::finish_create_session(entity, reply_rx, cx);
+    Ok(session)
+  }
+
   pub fn start_session_for_panel<T>(
     &mut self,
     panel_id: Uuid,
@@ -309,6 +373,7 @@ impl CollabManager {
     let session_id = self.session_by_panel.get(&panel_id).copied()?;
     let session = self.sessions_by_id.get(&session_id)?.clone();
     let title = session.read(cx).title().to_string();
+    let kind = session.read(cx).kind();
     let commands = self.ensure_runtime(cx).ok()?;
     let (ticket_tx, ticket_rx) = async_channel::bounded(1);
     let (reply_tx, reply_rx) = async_channel::bounded(1);
@@ -327,15 +392,7 @@ impl CollabManager {
           tracing::info!(%session_id, inviter = %minted.inviter.id, "created collaboration share ticket");
           let own_endpoint_id = minted.inviter.id;
           let _ = cx.update_global::<CollabManager, _>(|manager, _| manager.own_endpoint_id = Some(own_endpoint_id));
-          // S9: the session enum split threads the panel's real kind here; every
-          // startable session today is a rich-text editor tab.
-          Ok(SessionTicket::new(
-            session_id,
-            vec![minted.inviter],
-            title,
-            flowstate_collab::ticket::DocumentKind::RichText,
-            minted.admission,
-          ))
+          Ok(SessionTicket::new(session_id, vec![minted.inviter], title, kind, minted.admission))
         },
         Ok(Err(error)) => {
           tracing::error!(%session_id, error = %format_args!("{error:#}"), "minting collaboration invite failed");

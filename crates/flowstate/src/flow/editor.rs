@@ -110,6 +110,9 @@ pub struct FlowEditor {
   replug_cell: Option<CellId>,
   /// `FLOWSTATE_INTENT_LOG` debug overlay: the last few intents + outcomes.
   intent_log: std::collections::VecDeque<SharedString>,
+  /// True while a live collaboration session drains the publish queue; the
+  /// editor must NOT sink it then (S9 — the session is the drainer).
+  session_attached: bool,
   drag_autoscroll: Option<gpui::Point<gpui::Pixels>>,
   drag_autoscroll_scheduled: bool,
   drag_log: Option<telemetry::DragLogSession>,
@@ -171,6 +174,7 @@ impl FlowEditor {
       refusal: None,
       replug_cell: None,
       intent_log: std::collections::VecDeque::new(),
+      session_attached: false,
       drag_autoscroll: None,
       drag_autoscroll_scheduled: false,
       drag_log: None,
@@ -276,10 +280,28 @@ impl FlowEditor {
   }
 
   fn sink_publish_queue(&self) {
+    if self.session_attached {
+      return; // the live session drains + broadcasts the queue
+    }
     use flowstate_collab::local_write::GateHolder;
     if let Ok(mut guard) = self.handle.gate().lock(GateHolder::DocumentService) {
       let _ = guard.take_pending_publish();
     }
+  }
+
+  /// S9: a live collaboration session attached (or detached). While attached
+  /// the session owns the publish queue; on detach the tab stays editable
+  /// through the untouched authority (invariant 5).
+  pub fn set_session_attached(&mut self, attached: bool, cx: &mut Context<Self>) {
+    self.session_attached = attached;
+    cx.notify();
+  }
+
+  /// S9: the session applied remote updates through the flow I/O service —
+  /// refresh everything from the runtime.
+  pub fn on_remote_updates_applied(&mut self, cx: &mut Context<Self>) {
+    self.resync_from_runtime(cx);
+    cx.notify();
   }
 
   /// Drop editors/caches for cells that no longer exist on the board.
