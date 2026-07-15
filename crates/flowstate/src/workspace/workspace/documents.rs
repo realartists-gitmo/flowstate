@@ -1,3 +1,14 @@
+/// How a flow panel obtains its gated runtime (spec S8): rebuilt from a
+/// loaded/new `FlowDocument`, or attached pre-built (the S10 join handoff).
+pub(crate) enum FlowRuntimeSource {
+  FromDocument(Box<flowstate_flow::FlowDocument>),
+  #[allow(dead_code, reason = "constructed by the S10 join handoff")]
+  Attachment {
+    handle: std::sync::Arc<flowstate_collab::flow::FlowDocHandle>,
+    io: flowstate_collab::flow::FlowIoHandle,
+  },
+}
+
 enum DocumentRuntimeSource {
   FromProjection,
   Runtime(Box<flowstate_collab::crdt_runtime::CrdtRuntime>),
@@ -163,6 +174,7 @@ impl Workspace {
     let mut this = Self {
       document_panels: Vec::new(),
       document_runtimes: FxHashMap::default(), // §perf: FxHash for trusted Uuid keys
+      flow_document_runtimes: FxHashMap::default(),
       pending_authority_panels: FxHashSet::default(),
       document_runtime_flush_pending: FxHashSet::default(), // §perf: FxHash for trusted Uuid keys
       flow_panels: Vec::new(),
@@ -511,6 +523,7 @@ impl Workspace {
         .detach();
     }
     self.document_runtimes.remove(&panel_id);
+    self.flow_document_runtimes.remove(&panel_id);
     self.document_runtime_flush_pending.remove(&panel_id);
     let closing_active_document = self.active_document_id == Some(panel_id);
     if let Some(panel) = self
@@ -834,7 +847,7 @@ impl Workspace {
           panel_id
         },
         LoadedWorkspaceDocument::Flow { document, path } => {
-          let panel = self.create_flow_panel(document, Some(path), window, cx);
+          let panel = self.create_flow_panel(FlowRuntimeSource::FromDocument(Box::new(document)), Some(path), window, cx);
           panel.read(cx).id()
         },
       };
@@ -1012,12 +1025,26 @@ impl Workspace {
 
   fn create_flow_panel(
     &mut self,
-    document: flowstate_flow::FlowDocument,
+    source: FlowRuntimeSource,
     path: Option<PathBuf>,
     window: &mut Window,
     cx: &mut Context<Self>,
   ) -> Entity<FlowPanel> {
-    let editor = cx.new(|cx| FlowEditor::new_with_path(document, path.clone(), window, cx));
+    let (handle, io) = match source {
+      FlowRuntimeSource::FromDocument(document) => {
+        let runtime = flowstate_collab::flow::FlowRuntime::from_flow_document(&document).unwrap_or_else(|error| {
+          // A FlowDocument freshly built or loaded from a validated .fl0 always
+          // round-trips; keep the panel usable rather than aborting the open.
+          tracing::error!(%error, "flow runtime rebuild from document failed; opening an empty flow");
+          flowstate_collab::flow::FlowRuntime::new_empty()
+        });
+        let (handle, gate) = flowstate_collab::flow::FlowDocHandle::new(runtime);
+        let io = flowstate_collab::flow::FlowIoHandle::spawn(gate).expect("flow I/O service spawns");
+        (std::sync::Arc::new(handle), io)
+      },
+      FlowRuntimeSource::Attachment { handle, io } => (handle, io),
+    };
+    let editor = cx.new(|cx| FlowEditor::new_with_runtime(handle, io.clone(), path.clone(), window, cx));
     let workspace = cx.entity().downgrade();
     let title = path
       .as_ref()
@@ -1032,6 +1059,7 @@ impl Workspace {
         workspace.maybe_autosave_flow(id, editor.clone(), cx);
       }),
     ));
+    self.flow_document_runtimes.insert(id, io);
     self.active_document_id = Some(id);
     self.active_editor = None;
     self.active_flow = Some(editor);
@@ -1044,7 +1072,7 @@ impl Workspace {
   }
 
   fn add_flow_panel(&mut self, document: flowstate_flow::FlowDocument, path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
-    self.create_flow_panel(document, path, window, cx);
+    self.create_flow_panel(FlowRuntimeSource::FromDocument(Box::new(document)), path, window, cx);
     self.persist_temporary_workspace_session(cx);
     cx.notify();
   }

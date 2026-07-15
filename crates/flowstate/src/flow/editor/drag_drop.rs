@@ -60,10 +60,16 @@ impl FlowEditor {
   pub(super) fn drag_drop_target(&self, sheet: &Sheet) -> Option<(CellId, DropEdge)> {
     let dragging = self.dragging_cell?;
     let intent = self.pending_cell_drop?;
-    let sheet_id = self.active_sheet?;
-    self
-      .document
-      .preview_move_cell_subtree(sheet_id, dragging, intent)?;
+    let _sheet_id = self.active_sheet?;
+    let column_ids: Vec<_> = self
+      .board
+      .format
+      .sheet_type(sheet.sheet_type_id)?
+      .columns
+      .iter()
+      .map(|column| column.id)
+      .collect();
+    flowstate_flow::board_ops::preview_move_cell_subtree(sheet, &column_ids, dragging, intent)?;
     match intent {
       FlowDropIntent::BeforeSibling(target) => Some((target, DropEdge::Before)),
       FlowDropIntent::AfterSibling(target) => Some((target, DropEdge::After)),
@@ -92,8 +98,7 @@ impl FlowEditor {
           Some((cell.id, DropEdge::Before))
         } else {
           let column = self
-            .document
-            .projection()
+            .board
             .format
             .sheet_type(sheet.sheet_type_id)?
             .columns
@@ -124,12 +129,12 @@ impl FlowEditor {
   /// the (empty) `child_column` beside it can adopt it. The dragged cell is skipped so it can't parent
   /// to itself.
   fn childless_parent_at_row(&self, parent_column: usize, child_column: usize, y: gpui::Pixels) -> Option<CellId> {
-    let projection = self.document.projection();
-    let sheet = projection
+    let sheet = self
+      .board
       .sheets
       .iter()
       .find(|sheet| Some(sheet.id) == self.active_sheet)?;
-    let definition = projection.format.sheet_type(sheet.sheet_type_id)?;
+    let definition = self.board.format.sheet_type(sheet.sheet_type_id)?;
     let parent_column = definition.columns.get(parent_column)?.id;
     let _ = definition.columns.get(child_column)?;
     sheet
@@ -162,21 +167,10 @@ impl FlowEditor {
     let Some(sheet_id) = self.active_sheet else {
       return;
     };
-    let Some(sheet) = self
-      .document
-      .projection()
-      .sheets
-      .iter()
-      .find(|sheet| sheet.id == sheet_id)
-    else {
+    let Some(sheet) = self.board.sheets.iter().find(|sheet| sheet.id == sheet_id) else {
       return;
     };
-    let Some(definition) = self
-      .document
-      .projection()
-      .format
-      .sheet_type(sheet.sheet_type_id)
-    else {
+    let Some(definition) = self.board.format.sheet_type(sheet.sheet_type_id) else {
       return;
     };
     let Some(column) = definition.columns.get(column_index) else {
@@ -278,8 +272,14 @@ impl FlowEditor {
     self.drag_autoscroll = None;
     let committed = match (destination, self.active_sheet) {
       (Some(destination), Some(sheet_id)) => self
-        .document
-        .move_cell_subtree(sheet_id, dragged, destination)
+        .apply_intent(
+          &flowstate_flow::FlowIntent::MoveCellSubtree {
+            sheet_id,
+            cell_id: dragged,
+            drop: destination,
+          },
+          cx,
+        )
         .is_ok(),
       _ => false,
     };

@@ -76,8 +76,7 @@ impl Render for FlowRibbon {
     let sheet_types: Vec<_> = self
       .editor
       .read(cx)
-      .document()
-      .projection()
+      .board()
       .format
       .sheet_types
       .iter()
@@ -87,8 +86,7 @@ impl Render for FlowRibbon {
       let sheet_name = self
         .editor
         .read(cx)
-        .document()
-        .projection()
+        .board()
         .sheets
         .iter()
         .find(|sheet| sheet.id == sheet_id)?

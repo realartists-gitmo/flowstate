@@ -149,7 +149,7 @@ impl Workspace {
     let Some(editor) = self.active_flow.clone() else {
       return div().into_any_element();
     };
-    let projection = editor.read(cx).document().projection().clone();
+    let projection = editor.read(cx).board().clone();
     let active_sheet = editor.read(cx).active_sheet();
     let active_cell = editor.read(cx).active_cell();
     let mut rows = Vec::new();

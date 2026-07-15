@@ -85,8 +85,7 @@ impl FlowEditor {
       .active_sheet
       .and_then(|id| {
         self
-          .document()
-          .projection()
+          .board()
           .sheets
           .iter()
           .find(|sheet| sheet.id == id)
@@ -180,8 +179,7 @@ impl FlowEditor {
 
   fn cell_label(&self, id: CellId) -> String {
     self
-      .document()
-      .projection()
+      .board()
       .sheets
       .iter()
       .find_map(|sheet| sheet.cells.iter().find(|cell| cell.id == id))
@@ -208,16 +206,28 @@ impl FlowEditor {
     self
       .active_sheet
       .zip(self.dragging_cell)
-      .is_some_and(|(sheet, dragged)| {
-        self
-          .document()
-          .preview_move_cell_subtree(sheet, dragged, intent)
+      .is_some_and(|(sheet_id, dragged)| {
+        let board = self.board();
+        board
+          .sheets
+          .iter()
+          .find(|sheet| sheet.id == sheet_id)
+          .and_then(|sheet| {
+            let column_ids: Vec<_> = board
+              .format
+              .sheet_type(sheet.sheet_type_id)?
+              .columns
+              .iter()
+              .map(|column| column.id)
+              .collect();
+            flowstate_flow::board_ops::preview_move_cell_subtree(sheet, &column_ids, dragged, intent)
+          })
           .is_some()
       })
   }
 
   fn sheet_topology_snapshot(&self) -> Vec<Value> {
-    let projection = self.document().projection();
+    let projection = self.board();
     let Some(sheet) = self
       .active_sheet
       .and_then(|id| projection.sheets.iter().find(|sheet| sheet.id == id))
