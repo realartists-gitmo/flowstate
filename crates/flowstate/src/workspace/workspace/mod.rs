@@ -121,6 +121,11 @@ pub struct Workspace {
   /// SCHEDULED for. A newer edit overwrites it, so the trailing timer coalesces a
   /// burst into ONE checkpoint instead of a full checkpoint per keystroke.
   autosave_pending_generation: FxHashMap<Uuid, u64>,
+  /// SB-S2: per-panel save lifecycle for the status bar's identity zone.
+  panel_save_states: FxHashMap<Uuid, PanelSaveState>,
+  /// SB-S3: the status bar's one activity slot (transient fades, failure sticks).
+  activity_event: Option<ActivityEvent>,
+  activity_generation: u64,
   autosave_flow_in_flight: FxHashSet<Uuid>,
   collaboration_dialog: Option<Entity<crate::collab::share_dialog::CollabShareDialog>>,
   revision_dialog: Option<Entity<crate::workspace::revision_dialog::RevisionDialog>>,
@@ -289,6 +294,7 @@ impl DocumentStyleSection {
 }
 
 include!("documents.rs");
+include!("status_activity.rs");
 include!("collab_prompts.rs");
 include!("collab.rs");
 include!("workspace_state.rs");

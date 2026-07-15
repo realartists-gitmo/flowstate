@@ -60,7 +60,6 @@ impl Workspace {
       .track_scroll(&self.tab_bar_scroll_handle)
       .menu(true)
       .prefix(self.render_document_tab_bar_prefix(active_index, tabs.len(), cx))
-      .suffix(self.render_document_tab_bar_suffix())
       .active_tab_bg(active_tab_bg)
       .active_tab_fg(active_tab_fg)
       .selected_index(active_index)

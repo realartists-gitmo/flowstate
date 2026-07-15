@@ -215,6 +215,9 @@ impl Workspace {
       autosave_enabled: load_autosave(),
       autosave_document_generations: FxHashMap::default(), // §perf: FxHash for trusted Uuid keys
       autosave_pending_generation: FxHashMap::default(),   // §act-five P9-throttle debounce
+      panel_save_states: FxHashMap::default(),
+      activity_event: None,
+      activity_generation: 0,
       autosave_flow_in_flight: FxHashSet::default(),       // §perf: FxHash for trusted Uuid keys
       collaboration_dialog: None,
       revision_dialog: None,
@@ -1226,6 +1229,7 @@ impl Workspace {
   }
 
   pub fn close_document_panel(&mut self, panel_id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+    self.clear_save_state(panel_id);
     let document_panel = self
       .document_panels
       .iter()
@@ -1485,6 +1489,7 @@ impl Workspace {
         workspace
           .autosave_document_generations
           .insert(panel_id, generation);
+        workspace.set_save_state(panel_id, PanelSaveState::Saving, cx);
         Some(editor.update(cx, |editor, cx| editor.save(cx)))
       });
       let Ok(Some(save_task)) = save_task else {
@@ -1494,16 +1499,30 @@ impl Workspace {
         // Keep collaborating peers in sync with the autosave checkpoint; a
         // no-op for solo documents (no session registered for the panel).
         Ok(()) => {
-          let _ = workspace.update(cx, |_, cx| {
+          let _ = workspace.update(cx, |workspace, cx| {
+            workspace.set_save_state(panel_id, PanelSaveState::Saved, cx);
             crate::collab::refresh_after_external_checkpoint(panel_id, cx);
           });
         },
         Err(error) => {
-          eprintln!("autosave failed: {error}");
-          let _ = workspace.update(cx, |workspace, _| {
+          // Law 2: an autosave failure must reach the user, not stderr.
+          tracing::error!("autosave failed: {error}");
+          let _ = workspace.update(cx, |workspace, cx| {
             if workspace.autosave_document_generations.get(&panel_id) == Some(&generation) {
               workspace.autosave_document_generations.remove(&panel_id);
             }
+            workspace.set_save_state(
+              panel_id,
+              PanelSaveState::Failed {
+                message: error.to_string(),
+              },
+              cx,
+            );
+            workspace.report_failure(
+              format!("Autosave failed: {error}"),
+              Some(ActivityAction::RetrySave { panel_id }),
+              cx,
+            );
           });
         },
       }
@@ -1521,13 +1540,31 @@ impl Workspace {
     }
 
     self.autosave_flow_in_flight.insert(panel_id);
+    self.set_save_state(panel_id, PanelSaveState::Saving, cx);
     let save_task = editor.update(cx, |editor, cx| editor.save(cx));
     cx.spawn(async move |workspace, cx| {
-      if let Err(error) = save_task.await {
-        eprintln!("flow autosave failed: {error}");
-      }
-      let _ = workspace.update(cx, |workspace, _| {
+      let result = save_task.await;
+      let _ = workspace.update(cx, |workspace, cx| {
         workspace.autosave_flow_in_flight.remove(&panel_id);
+        match result {
+          Ok(()) => workspace.set_save_state(panel_id, PanelSaveState::Saved, cx),
+          Err(error) => {
+            // Law 2: an autosave failure must reach the user, not stderr.
+            tracing::error!("flow autosave failed: {error}");
+            workspace.set_save_state(
+              panel_id,
+              PanelSaveState::Failed {
+                message: error.to_string(),
+              },
+              cx,
+            );
+            workspace.report_failure(
+              format!("Autosave failed: {error}"),
+              Some(ActivityAction::RetrySave { panel_id }),
+              cx,
+            );
+          },
+        }
       });
     })
     .detach();

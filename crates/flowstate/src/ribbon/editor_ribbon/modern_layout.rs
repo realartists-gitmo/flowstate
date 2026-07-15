@@ -47,9 +47,9 @@ fn modern_group(
             } else if matches!(command.id, RibbonCommandId::Redo) {
               modern_redo_button(command, editor.clone(), metrics, cx)
             } else if matches!(command.id, RibbonCommandId::ExportFormat) {
-              modern_export_format(command, editor.clone(), metrics, cx)
+              modern_export_format(command, editor.clone(), metrics, workspace.clone(), cx)
             } else if matches!(command.id, RibbonCommandId::ExportSend) {
-              modern_export_send(command, editor.clone(), metrics, cx)
+              modern_export_send(command, editor.clone(), metrics, workspace.clone(), cx)
             } else if matches!(command.id, RibbonCommandId::SendToSpeechDocument) {
               modern_speech_send_menu(command, editor.clone(), metrics, workspace.clone(), panel_id, cx)
             } else if matches!(command.id, RibbonCommandId::ToggleInvisibility) {

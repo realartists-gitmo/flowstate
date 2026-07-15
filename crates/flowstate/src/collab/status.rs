@@ -19,13 +19,22 @@ pub fn participant_group(phase: &SessionPhase, entries: Vec<super::SessionRoster
         .border_color(color.opacity(0.38)),
     );
   }
-  let (_, status_color) = status_label_and_color(phase, cx);
+  // Law 2: never signal by dot color alone — the phase label rides along
+  // ("2 in session", "Offline - will sync", "Fetching 3/7 bytes").
+  let (status_label, status_color) = status_label_and_color(phase, cx);
   h_flex()
     .items_center()
     .gap_1()
     .child(avatars)
     .child(div().size(px(6.0)).rounded_full().bg(status_color))
+    .child(div().text_size(px(10.0)).text_color(status_color).child(status_label))
     .into_any_element()
+}
+
+/// The phase's human-readable label, for tooltips and status surfaces.
+#[must_use]
+pub fn phase_label(phase: &SessionPhase, cx: &App) -> String {
+  status_label_and_color(phase, cx).0
 }
 
 pub fn status_pill(phase: &SessionPhase, cx: &App) -> AnyElement {

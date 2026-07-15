@@ -6,6 +6,7 @@ use gpui::TestAppContext;
 use crate::commands::CommandId;
 
 use super::support;
+use super::super::ActivityKind;
 
 #[gpui::test]
 fn new_document_command_creates_panel(cx: &mut TestAppContext) {
@@ -71,4 +72,39 @@ fn find_in_document_command_survives_with_and_without_document(cx: &mut TestAppC
   h.new_document(cx);
   h.update(cx, |ws, window, cx| ws.handle_window_keybinding(CommandId::FindInDocument, window, cx));
   cx.run_until_parked();
+}
+
+// ---- SB-S3: status-bar activity model (Patient 8) -------------------------
+
+#[gpui::test]
+fn activity_transient_reports_and_decays(cx: &mut TestAppContext) {
+  let h = support::open_workspace(cx);
+  h.update(cx, |ws, _, cx| ws.report_activity("Exported test.docx", cx));
+  assert!(h.read(cx, |ws| ws
+    .activity_event
+    .as_ref()
+    .is_some_and(|event| event.kind == ActivityKind::Transient && event.message == "Exported test.docx")));
+  // The decay timer clears it (TestAppContext advances timers on park).
+  cx.executor().advance_clock(std::time::Duration::from_secs(7));
+  cx.run_until_parked();
+  assert!(h.read(cx, |ws| ws.activity_event.is_none()));
+}
+
+#[gpui::test]
+fn activity_failure_persists_and_blocks_transients(cx: &mut TestAppContext) {
+  let h = support::open_workspace(cx);
+  h.update(cx, |ws, _, cx| ws.report_failure("Autosave failed: disk full", None, cx));
+  // A transient must never displace a pending failure (Law 2).
+  h.update(cx, |ws, _, cx| ws.report_activity("Tub indexed", cx));
+  assert!(h.read(cx, |ws| ws
+    .activity_event
+    .as_ref()
+    .is_some_and(|event| event.kind == ActivityKind::Failure && event.message.contains("disk full"))));
+  // The failure outlives the transient decay window...
+  cx.executor().advance_clock(std::time::Duration::from_secs(10));
+  cx.run_until_parked();
+  assert!(h.read(cx, |ws| ws.activity_event.is_some()));
+  // ...and only an explicit dismiss clears it.
+  h.update(cx, |ws, _, cx| ws.dismiss_activity(cx));
+  assert!(h.read(cx, |ws| ws.activity_event.is_none()));
 }

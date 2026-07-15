@@ -501,23 +501,51 @@ fn empty_input_paragraph() -> flowstate_document::InputParagraph {
 
 #[hotpath::measure]
 #[hotpath::measure]
-fn send_format_from_ribbon(editor: Entity<RichTextEditor>, format: DocumentExportFormat, cx: &mut App) {
+fn send_format_from_ribbon(
+  editor: Entity<RichTextEditor>,
+  format: DocumentExportFormat,
+  workspace: Option<WeakEntity<Workspace>>,
+  cx: &mut App,
+) {
   let task = editor.update(cx, |editor, cx| editor.send_document(format, cx));
-  cx.spawn(async move |_| {
-    if let Err(error) = task.await {
-      eprintln!("send export failed: {error}");
-    }
+  cx.spawn(async move |cx| {
+    let result = task.await;
+    let Some(workspace) = workspace else {
+      if let Err(error) = result {
+        tracing::error!("send export failed with no workspace to report to: {error}");
+      }
+      return;
+    };
+    let _ = workspace.update(cx, |workspace, cx| match result {
+      // SB-S3: exports announce themselves in the activity zone (Law 2 both
+      // ways — completion is visible, failure is loud).
+      Ok(path) => workspace.report_activity(format!("Sent {}", path.display()), cx),
+      Err(error) => workspace.report_failure(format!("Send failed: {error}"), None, cx),
+    });
   })
   .detach();
 }
 
 #[hotpath::measure]
-fn export_format_from_ribbon(editor: Entity<RichTextEditor>, format: DocumentExportFormat, cx: &mut App) {
+fn export_format_from_ribbon(
+  editor: Entity<RichTextEditor>,
+  format: DocumentExportFormat,
+  workspace: Option<WeakEntity<Workspace>>,
+  cx: &mut App,
+) {
   let task = editor.update(cx, |editor, cx| editor.export_document_format(format, cx));
-  cx.spawn(async move |_| {
-    if let Err(error) = task.await {
-      eprintln!("format export failed: {error}");
-    }
+  cx.spawn(async move |cx| {
+    let result = task.await;
+    let Some(workspace) = workspace else {
+      if let Err(error) = result {
+        tracing::error!("format export failed with no workspace to report to: {error}");
+      }
+      return;
+    };
+    let _ = workspace.update(cx, |workspace, cx| match result {
+      Ok(path) => workspace.report_activity(format!("Exported {}", path.display()), cx),
+      Err(error) => workspace.report_failure(format!("Export failed: {error}"), None, cx),
+    });
   })
   .detach();
 }
@@ -608,6 +636,7 @@ fn modern_export_format(
   command: &RibbonCommand,
   editor: Entity<RichTextEditor>,
   metrics: RibbonLayoutMetrics,
+  workspace: Option<WeakEntity<Workspace>>,
   cx: &mut Context<EditorRibbon>,
 ) -> AnyElement {
   let chip_height = metrics.chip_height;
@@ -638,13 +667,16 @@ fn modern_export_format(
         })
         .on_click({
           let editor = editor.clone();
+          let workspace = workspace.clone();
           move |_, _, cx| {
-            export_format_from_ribbon(editor.clone(), DocumentExportFormat::Docx, cx);
+            export_format_from_ribbon(editor.clone(), DocumentExportFormat::Docx, workspace.clone(), cx);
           }
         }),
     )
     .dropdown_menu(move |menu, _, _| {
       let docx_editor = editor.clone();
+      let docx_workspace = workspace.clone();
+      let pdf_workspace = workspace.clone();
       let pdf_editor = editor.clone();
       menu
         .min_w(px(100.0))
@@ -658,7 +690,7 @@ fn modern_export_format(
           })
           .icon(Icon::default().path("icons/docx.svg").small())
           .on_click(move |_, _, cx| {
-            export_format_from_ribbon(docx_editor.clone(), DocumentExportFormat::Docx, cx);
+            export_format_from_ribbon(docx_editor.clone(), DocumentExportFormat::Docx, docx_workspace.clone(), cx);
           }),
         )
         .item(
@@ -671,7 +703,7 @@ fn modern_export_format(
           })
           .icon(Icon::default().path("icons/pdf.svg").small())
           .on_click(move |_, _, cx| {
-            export_format_from_ribbon(pdf_editor.clone(), DocumentExportFormat::Pdf, cx);
+            export_format_from_ribbon(pdf_editor.clone(), DocumentExportFormat::Pdf, pdf_workspace.clone(), cx);
           }),
         )
     })
@@ -683,6 +715,7 @@ fn modern_export_send(
   command: &RibbonCommand,
   editor: Entity<RichTextEditor>,
   metrics: RibbonLayoutMetrics,
+  workspace: Option<WeakEntity<Workspace>>,
   cx: &mut Context<EditorRibbon>,
 ) -> AnyElement {
   let chip_height = metrics.chip_height;
@@ -713,10 +746,12 @@ fn modern_export_send(
         })
         .on_click({
           let editor = editor.clone();
+          let workspace = workspace.clone();
           move |_, _, cx| {
             send_format_from_ribbon(
               editor.clone(),
               DocumentExportFormat::NativeWithExtension(flowstate_document::FLOWSTATE_EXTENSION),
+              workspace.clone(),
               cx,
             );
           }
@@ -726,6 +761,9 @@ fn modern_export_send(
       let db8_editor = editor.clone();
       let docx_editor = editor.clone();
       let pdf_editor = editor.clone();
+      let db8_workspace = workspace.clone();
+      let docx_workspace = workspace.clone();
+      let pdf_workspace = workspace.clone();
       menu
         .min_w(px(100.0))
         .item(
@@ -740,6 +778,7 @@ fn modern_export_send(
             send_format_from_ribbon(
               db8_editor.clone(),
               DocumentExportFormat::NativeWithExtension(flowstate_document::FLOWSTATE_EXTENSION),
+              db8_workspace.clone(),
               cx,
             );
           }),
@@ -754,7 +793,7 @@ fn modern_export_send(
           })
           .icon(Icon::default().path("icons/docx.svg").small())
           .on_click(move |_, _, cx| {
-            send_format_from_ribbon(docx_editor.clone(), DocumentExportFormat::Docx, cx);
+            send_format_from_ribbon(docx_editor.clone(), DocumentExportFormat::Docx, docx_workspace.clone(), cx);
           }),
         )
         .item(
@@ -767,7 +806,7 @@ fn modern_export_send(
           })
           .icon(Icon::default().path("icons/pdf.svg").small())
           .on_click(move |_, _, cx| {
-            send_format_from_ribbon(pdf_editor.clone(), DocumentExportFormat::Pdf, cx);
+            send_format_from_ribbon(pdf_editor.clone(), DocumentExportFormat::Pdf, pdf_workspace.clone(), cx);
           }),
         )
     })

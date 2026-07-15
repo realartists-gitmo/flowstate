@@ -55,14 +55,6 @@ impl Workspace {
       )
   }
 
-  fn render_document_tab_bar_suffix(&self) -> impl IntoElement {
-    h_flex().h_full().items_center().gap_1().px_1().child(
-      icon_button("tab-bar-multipanel-placeholder", AppIcon::MultiPanel)
-        .tooltip("Multi-panel layout")
-        .disabled(true),
-    )
-  }
-
   fn render_empty_state(&self, cx: &mut Context<Self>) -> impl IntoElement {
     // These buttons call command methods directly for now. When command
     // dispatch grows beyond direct callbacks, keep the buttons mapped to
@@ -313,24 +305,36 @@ impl Workspace {
     if let Some(percent) = zoom {
       self.sync_zoom_slider(percent, window, cx);
     }
+    // SB-S2 (Patient 8, B2): zoned instrument strip — left: document identity
+    // (format badge, title, save state); center: the activity slot; right:
+    // collab / counters / zoom. The old bar was one flex_1 spacer and a
+    // right-cluster; every zone below has an address now.
+    let identity = self.active_panel_identity(cx);
+    let activity = self.activity_event.clone();
     h_flex()
       .h(px(26.0))
       .flex_none()
       .w_full()
       .items_center()
       .px_2()
+      .gap_2()
       .border_t(APP_CHROME_BORDER_WIDTH)
       .border_color(cx.theme().border)
       .bg(cx.theme().background)
+      .when_some(identity, |this, identity| this.child(self.render_status_identity(identity, cx)))
+      .child(div().flex_1())
+      .when_some(activity, |this, event| this.child(self.render_activity_slot(&event, cx)))
       .child(div().flex_1())
       .when_some(collab_phase, |this, phase| {
         if matches!(phase, crate::collab::SessionPhase::Detached(_)) {
           this
         } else {
+          let tooltip = format!("Collaboration: {} — click to manage", crate::collab::status::phase_label(&phase, cx));
           this.child(
             Button::new("collaboration-status-pill")
               .text()
               .compact()
+              .tooltip(tooltip)
               .child(crate::collab::status::participant_group(&phase, collab_roster, cx))
               .on_click(cx.listener(|workspace, _, window, cx| workspace.open_collaboration_dialog(window, cx))),
           )
@@ -342,10 +346,142 @@ impl Workspace {
           div()
             .flex_none()
             .pl_2()
+            .id("speech-word-count")
+            .tooltip(|window, cx| {
+              gpui_component::tooltip::Tooltip::new("Words in tags, cites, and highlighted text — what gets spoken").build(window, cx)
+            })
             .text_size(px(10.0))
             .text_color(cx.theme().muted_foreground.opacity(0.82))
             .child(format!("Speech: {count} words")),
         )
+      })
+  }
+
+  /// The identity zone's inputs: format badge, title, and save state for the
+  /// active panel (document or flow).
+  fn active_panel_identity(&self, cx: &App) -> Option<(&'static str, SharedString, PanelSaveState, bool, Uuid)> {
+    let panel_id = self.active_document_id?;
+    if let Some(panel) = self
+      .document_panels
+      .iter()
+      .find(|panel| panel.read(cx).id() == panel_id)
+    {
+      let panel = panel.read(cx);
+      let default_state = if panel.editor().read(cx).document_path().is_none() {
+        PanelSaveState::Unsaved
+      } else {
+        PanelSaveState::Saved
+      };
+      let state = self.panel_save_states.get(&panel_id).cloned().unwrap_or(default_state);
+      return Some((".db8", panel.title_text(), state, panel.is_dirty(cx), panel_id));
+    }
+    if let Some(panel) = self.flow_panels.iter().find(|panel| panel.read(cx).id() == panel_id) {
+      let panel = panel.read(cx);
+      let default_state = if panel.editor().read(cx).document_path().is_none() {
+        PanelSaveState::Unsaved
+      } else {
+        PanelSaveState::Saved
+      };
+      let state = self.panel_save_states.get(&panel_id).cloned().unwrap_or(default_state);
+      return Some((".fl0", panel.title_text(), state, panel.is_dirty(cx), panel_id));
+    }
+    None
+  }
+
+  fn render_status_identity(
+    &self,
+    (format, title, state, dirty, _panel_id): (&'static str, SharedString, PanelSaveState, bool, Uuid),
+    cx: &Context<Self>,
+  ) -> impl IntoElement {
+    // Quiet dot, loud failure (Patient 8 pick): the dot + tooltip carry the
+    // healthy states; text appears only when something is wrong.
+    let (dot_color, tooltip, failure_text): (Hsla, SharedString, Option<SharedString>) = match &state {
+      PanelSaveState::Failed { message } => (
+        cx.theme().danger,
+        format!("Save failed: {message}").into(),
+        Some("Autosave failed".into()),
+      ),
+      PanelSaveState::Saving => (cx.theme().info, "Saving…".into(), None),
+      PanelSaveState::Unsaved => (
+        cx.theme().muted_foreground,
+        "Not saved to disk yet — Save As to choose a location".into(),
+        None,
+      ),
+      PanelSaveState::Saved if dirty => (
+        cx.theme().muted_foreground,
+        "Unsaved changes — autosave will catch up".into(),
+        None,
+      ),
+      PanelSaveState::Saved => (cx.theme().success, "Saved".into(), None),
+    };
+    h_flex()
+      .flex_none()
+      .items_center()
+      .gap_1p5()
+      .child(
+        div()
+          .text_size(px(9.0))
+          .px_1()
+          .rounded_sm()
+          .border_1()
+          .border_color(cx.theme().border)
+          .text_color(cx.theme().muted_foreground)
+          .child(format),
+      )
+      .child(
+        div()
+          .text_size(px(10.5))
+          .max_w(px(220.0))
+          .overflow_hidden()
+          .text_ellipsis()
+          .text_color(cx.theme().foreground.opacity(0.85))
+          .child(title),
+      )
+      .child(
+        div()
+          .id("save-state-dot")
+          .tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx))
+          .child(div().size(px(6.0)).rounded_full().bg(dot_color)),
+      )
+      .when_some(failure_text, |this, text| {
+        this.child(div().text_size(px(10.0)).text_color(cx.theme().danger).child(text))
+      })
+  }
+
+  fn render_activity_slot(&self, event: &ActivityEvent, cx: &mut Context<Self>) -> impl IntoElement {
+    let failure = event.kind == ActivityKind::Failure;
+    let color = if failure {
+      cx.theme().danger
+    } else {
+      cx.theme().muted_foreground.opacity(0.8)
+    };
+    h_flex()
+      .flex_none()
+      .items_center()
+      .gap_1()
+      .child(div().text_size(px(10.0)).text_color(color).child(event.message.clone()))
+      .when(failure, |this| {
+        let action = event.action.clone();
+        this
+          .when_some(action, |this, action| {
+            this.child(
+              Button::new("activity-action")
+                .text()
+                .compact()
+                .text_color(cx.theme().danger)
+                .child(div().text_size(px(10.0)).child("Retry"))
+                .on_click(cx.listener(move |workspace, _, window, cx| {
+                  workspace.run_activity_action(action.clone(), window, cx);
+                })),
+            )
+          })
+          .child(
+            Button::new("activity-dismiss")
+              .text()
+              .compact()
+              .child(div().text_size(px(10.0)).text_color(cx.theme().muted_foreground).child("✕"))
+              .on_click(cx.listener(|workspace, _, _, cx| workspace.dismiss_activity(cx))),
+          )
       })
   }
 
