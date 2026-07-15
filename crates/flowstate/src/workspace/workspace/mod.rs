@@ -140,6 +140,7 @@ pub struct Workspace {
   collab_incompatible_version_notices: HashSet<String>,
   file_search_overlay: Option<Entity<FileSearchOverlay>>,
   command_palette: Option<Entity<crate::workspace::command_palette::CommandPalette>>,
+  comments_panel: Option<Entity<crate::workspace::comments_panel::CommentsPanel>>,
   tub_root: Option<PathBuf>,
   tub_index: Option<Arc<TubIndex>>,
   tub_files: Vec<TubFile>,
@@ -219,6 +220,7 @@ enum LeftNavMode {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ToolkitTool {
   Tub,
+  Comments,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

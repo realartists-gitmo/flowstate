@@ -25,6 +25,24 @@ impl Workspace {
     cx.notify();
   }
 
+  /// C-S3: open the comments rail (creating the panel if needed) and focus
+  /// its composer — the keybinding + Collaborate-menu entry point.
+  pub fn open_comments_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    if self.active_toolkit_tool != Some(ToolkitTool::Comments) {
+      self.toggle_toolkit_tool(ToolkitTool::Comments, cx);
+    }
+    if let Some(panel) = self.comments_panel.clone() {
+      panel.update(cx, |panel, cx| panel.focus_composer(window, cx));
+    } else {
+      // First open: the panel is created by the next render pass; focus after.
+      cx.on_next_frame(window, |workspace, window, cx| {
+        if let Some(panel) = workspace.comments_panel.clone() {
+          panel.update(cx, |panel, cx| panel.focus_composer(window, cx));
+        }
+      });
+    }
+  }
+
   fn toggle_toolkit_tool(&mut self, tool: ToolkitTool, cx: &mut Context<Self>) {
     let was_expanded = self.active_toolkit_tool.is_some();
     self.active_toolkit_tool = if self.active_toolkit_tool == Some(tool) { None } else { Some(tool) };

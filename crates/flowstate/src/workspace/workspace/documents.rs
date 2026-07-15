@@ -228,6 +228,7 @@ impl Workspace {
       collab_incompatible_version_notices: HashSet::new(),
       file_search_overlay: None,
       command_palette: None,
+      comments_panel: None,
       tub_root: None,
       tub_index: None,
       tub_files: Vec::new(),

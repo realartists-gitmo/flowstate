@@ -4,6 +4,7 @@ pub mod document_search;
 pub mod document_search_overlay;
 mod file_management;
 pub(crate) mod command_palette;
+pub(crate) mod comments_panel;
 mod file_search_overlay;
 mod icons;
 mod revision_dialog;

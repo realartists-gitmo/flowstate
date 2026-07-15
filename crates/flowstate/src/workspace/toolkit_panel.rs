@@ -49,7 +49,7 @@ impl Workspace {
   /// resizable horizontal split. The expanded panel is a live evidence browser:
   /// search results are miniature scrollable windows that can be opened,
   /// inserted, or dragged into the editor.
-  pub(super) fn render_content_area(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+  pub(super) fn render_content_area(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     let toolkit_width = if self.active_toolkit_tool.is_some() { px(380.0) } else { px(40.0) };
     let toolkit_range_end = if self.active_toolkit_tool.is_none() { toolkit_width } else { px(620.0) };
 
@@ -72,16 +72,38 @@ impl Workspace {
           .size(toolkit_width)
           .size_range(toolkit_width..toolkit_range_end)
           .grow(false)
-          .child(self.render_toolkit_rail_area(cx)),
+          .child(self.render_toolkit_rail_area(window, cx)),
       )
   }
 
-  fn render_toolkit_rail_area(&self, cx: &mut Context<Self>) -> impl IntoElement {
+  fn render_toolkit_rail_area(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     if self.active_toolkit_tool == Some(ToolkitTool::Tub) {
       return self.render_toolkit_expanded(cx).into_any_element();
     }
+    if self.active_toolkit_tool == Some(ToolkitTool::Comments) {
+      return self.render_comments_rail(window, cx).into_any_element();
+    }
 
     self.render_toolkit_icon_bar(cx).into_any_element()
+  }
+
+  /// C-S3: the comments rail — the panel entity is created lazily and
+  /// re-contexted whenever the active document changes.
+  fn render_comments_rail(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+    let panel = match self.comments_panel.clone() {
+      Some(panel) => panel,
+      None => {
+        let workspace = cx.entity().downgrade();
+        let panel = cx.new(|cx| crate::workspace::comments_panel::CommentsPanel::new(workspace, window, cx));
+        self.comments_panel = Some(panel.clone());
+        panel
+      },
+    };
+    let io = self.active_document_id.and_then(|panel_id| self.document_runtimes.get(&panel_id).cloned());
+    let editor = self.active_editor.clone();
+    let panel_id = self.active_document_id;
+    panel.update(cx, |panel, cx| panel.set_context(io, editor, panel_id, cx));
+    panel.into_any_element()
   }
 
   fn render_toolkit_icon_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -109,6 +131,25 @@ impl Workspace {
           .tooltip("Search files")
           .on_click(cx.listener(|workspace, _, window, cx| {
             workspace.open_file_search_overlay(window, cx);
+          })),
+      )
+      .child(
+        Button::new("toolkit-comments-tool")
+          .icon(
+            Icon::default()
+              .path("icons/message-square-reply.svg")
+              .text_color(if self.active_toolkit_tool == Some(ToolkitTool::Comments) {
+                cx.theme().link
+              } else {
+                cx.theme().muted_foreground
+              }),
+          )
+          .xsmall()
+          .ghost()
+          .selected(self.active_toolkit_tool == Some(ToolkitTool::Comments))
+          .tooltip("Comments")
+          .on_click(cx.listener(|workspace, _, _, cx| {
+            workspace.toggle_toolkit_tool(ToolkitTool::Comments, cx);
           })),
       )
       .child(

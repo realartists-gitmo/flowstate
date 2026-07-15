@@ -118,12 +118,13 @@ fn collaboration_top_bar_button(cx: &mut Context<Workspace>, has_document: bool,
                 workspace.copy_active_collaboration_ticket(window, cx);
               },
             ))
-            .item(file_menu_item(
+            .item(command_menu_item(
               workspace.clone(),
               "Comments...",
+              Some(crate::commands::CommandId::OpenComments),
               !has_document,
               |workspace, window, cx| {
-                workspace.open_comment_dialog(window, cx);
+                workspace.open_comments_panel(window, cx);
               },
             ))
             .separator()

@@ -145,6 +145,10 @@ impl Workspace {
         self.open_command_palette(window, cx);
         true
       },
+      CommandId::OpenComments => {
+        self.open_comments_panel(window, cx);
+        true
+      },
       CommandId::ZoomIn => {
         if let Some(editor) = self.active_editor.clone() {
           editor.update(cx, |editor, cx| editor.zoom_in(cx));
