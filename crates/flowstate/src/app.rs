@@ -350,6 +350,7 @@ pub fn run_standalone(mut document_path: Option<PathBuf>) {
   });
   application.run(move |cx: &mut App| {
     gpui_component::init(cx);
+    install_bundled_fonts(cx);
     init_theme_registry(cx);
     apply_saved_theme(cx);
     register_rich_text_editor_keybindings(cx);
@@ -603,8 +604,21 @@ fn apply_saved_theme(cx: &mut App) {
   apply_global_ui_font(cx);
 }
 
+/// The bundled UI chrome face (design-language decision: IBM Plex Sans, T1
+/// proportional everywhere). Variable fonts carry the full 100-900 weight range.
+pub const UI_FONT_FAMILY: &str = "IBM Plex Sans";
+
+fn install_bundled_fonts(cx: &mut App) {
+  let fonts: Vec<Cow<'static, [u8]>> = vec![
+    Cow::Borrowed(include_bytes!("../assets/fonts/IBMPlexSans-Variable.ttf")),
+    Cow::Borrowed(include_bytes!("../assets/fonts/IBMPlexSans-Italic-Variable.ttf")),
+  ];
+  if let Err(error) = cx.text_system().add_fonts(fonts) {
+    tracing::error!("failed to install bundled UI fonts, falling back to system: {error}");
+  }
+}
+
 #[hotpath::measure]
 fn apply_global_ui_font(cx: &mut App) {
-  let mono_font_family = Theme::global(cx).mono_font_family.clone();
-  Theme::global_mut(cx).font_family = mono_font_family;
+  Theme::global_mut(cx).font_family = UI_FONT_FAMILY.into();
 }
