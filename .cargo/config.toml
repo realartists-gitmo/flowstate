@@ -9,3 +9,8 @@ product = "run --profile product"
 # hotpath-meta 0.16.x looks for "hotpath-samply-meta" but the installed
 # binary from hotpath 0.20.x is "hotpath-samply". Point to the correct name.
 HOTPATH_META_SAMPLY_WRAPPER_BIN = "hotpath-samply"
+# The product profile's fat-LTO bin compile legitimately exceeds zccache's
+# default 180s wedge budget; at the default Low child priority it gets starved
+# under load and the client kills the daemon mid-compile (zccache#666).
+ZCCACHE_WEDGE_RECV_TIMEOUT_SECS = "1800"
+ZCCACHE_COMPILE_PRIORITY = "normal"
