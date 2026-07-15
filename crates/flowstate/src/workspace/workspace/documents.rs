@@ -235,7 +235,6 @@ impl Workspace {
       tub_expanded_dirs: HashSet::new(),
       tub_file_search_input,
       tub_file_search_generation: 0,
-      tub_status: "No tub selected".into(),
       tub_watcher: None,
       tub_watch_polling: false,
       tub_scan_in_flight: false,
@@ -784,6 +783,13 @@ impl Workspace {
         .sizes()
         .first()
         .map(|width| f32::from(*width)),
+      tub_tool_open: self.active_toolkit_tool == Some(ToolkitTool::Tub),
+      toolkit_filter: Some(self.toolkit_search_filter.session_key().to_string()),
+      tub_expanded_dirs: self
+        .tub_expanded_dirs
+        .iter()
+        .map(|dir| dir.to_string_lossy().into_owned())
+        .collect(),
     });
     if self.temporary_workspace_session_persist_scheduled {
       return;
@@ -880,6 +886,15 @@ impl Workspace {
     self.outline_collapsed = session.outline_collapsed;
     self.left_nav_mode = if session.left_nav_tub { LeftNavMode::Tub } else { LeftNavMode::Outline };
     self.restored_nav_width = session.nav_width.map(px);
+    if session.tub_tool_open {
+      self.active_toolkit_tool = Some(ToolkitTool::Tub);
+    }
+    if let Some(filter) = &session.toolkit_filter {
+      self.toolkit_search_filter = ToolkitSearchFilter::from_session_key(filter);
+    }
+    self
+      .tub_expanded_dirs
+      .extend(session.tub_expanded_dirs.iter().map(PathBuf::from));
     self.pinned_document_ids = pinned_ids;
     self.speech_document_id = speech_id;
 
@@ -1888,6 +1903,14 @@ struct TemporaryWorkspaceSession {
   /// O-S1: the nav's resized width survives too.
   #[serde(default)]
   nav_width: Option<f32>,
+  /// T-S1: toolkit-rail state survives restarts (tool open, filter,
+  /// expanded tub directories).
+  #[serde(default)]
+  tub_tool_open: bool,
+  #[serde(default)]
+  toolkit_filter: Option<String>,
+  #[serde(default)]
+  tub_expanded_dirs: Vec<String>,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]

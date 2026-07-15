@@ -21,7 +21,7 @@ use rusqlite::{Connection, OptionalExtension as _, params};
 use serde::{Deserialize, Serialize};
 use tantivy::{
   Index, IndexWriter, TantivyDocument, Term, doc,
-  query::QueryParser,
+  query::{BooleanQuery, Occur, Query, QueryParser, TermQuery},
   schema::{Field, IndexRecordOption, STORED, STRING, Schema, TEXT, TextFieldIndexing, TextOptions, Value as _},
   tokenizer::NgramTokenizer,
 };
@@ -436,12 +436,27 @@ impl TubIndex {
       ]
     };
     let parser = QueryParser::for_index(&self.index, fields);
-    let (query, _) = parser.parse_query_lenient(query);
-    let top_docs = searcher.search(
-      &query,
-      &tantivy::collector::TopDocs::with_limit(limit.saturating_mul(8).max(limit)).order_by_score(),
-    )?;
-    let allowed = allowed_kinds.iter().cloned().collect::<HashSet<_>>();
+    let (parsed, _) = parser.parse_query_lenient(query);
+    // T-S1: the kind constraint is part of the QUERY, not a post-filter — the
+    // old fetch-8x-then-drop shape silently under-returned whenever the top
+    // of the score order was dominated by other kinds.
+    let kind_union: Vec<(Occur, Box<dyn Query>)> = allowed_kinds
+      .iter()
+      .map(|kind| {
+        (
+          Occur::Should,
+          Box::new(TermQuery::new(
+            Term::from_field_text(self.schema.unit_kind, kind.as_str()),
+            IndexRecordOption::Basic,
+          )) as Box<dyn Query>,
+        )
+      })
+      .collect();
+    let filtered = BooleanQuery::new(vec![
+      (Occur::Must, parsed),
+      (Occur::Must, Box::new(BooleanQuery::new(kind_union)) as Box<dyn Query>),
+    ]);
+    let top_docs = searcher.search(&filtered, &tantivy::collector::TopDocs::with_limit(limit).order_by_score())?;
     let mut hits = Vec::new();
 
     for (score, address) in top_docs {
@@ -449,12 +464,10 @@ impl TubIndex {
       let Some(mut hit) = hit_from_document(&self.schema, &document, score) else {
         continue;
       };
-      if allowed.contains(&hit.unit_kind) {
-        if !filename_only {
-          self.hydrate_hit_preview(&mut hit)?;
-        }
-        hits.push(hit);
+      if !filename_only {
+        self.hydrate_hit_preview(&mut hit)?;
       }
+      hits.push(hit);
       if hits.len() >= limit {
         break;
       }
@@ -647,11 +660,11 @@ impl TubWatcher {
   }
 
   #[must_use]
-  pub fn drain_has_db8_change(&self) -> bool {
+  pub fn drain_has_relevant_change(&self) -> bool {
     self
       .drain_events()
       .into_iter()
-      .any(|event| event.is_ok_and(|event| is_relevant_db8_watch_event(&event)))
+      .any(|event| event.is_ok_and(|event| is_relevant_tub_watch_event(&event)))
   }
 
   #[must_use]
@@ -660,8 +673,10 @@ impl TubWatcher {
   }
 }
 
-fn is_relevant_db8_watch_event(event: &Event) -> bool {
-  if !event.paths.iter().any(|path| is_db8_path(path)) {
+fn is_relevant_tub_watch_event(event: &Event) -> bool {
+  // T-S1: every catalogued format re-indexes on change — the old .db8-only
+  // gate let docx/fl0 edits go silently stale in search results.
+  if !event.paths.iter().any(|path| file_kind_from_path(path).is_some()) {
     return false;
   }
 
@@ -677,10 +692,6 @@ fn is_relevant_db8_watch_event(event: &Event) -> bool {
           | ModifyKind::Name(_)
       )
   )
-}
-
-fn is_db8_path(path: &Path) -> bool {
-  matches!(file_kind_from_path(path), Some(FileKind::Db8))
 }
 
 #[derive(Clone, Debug)]

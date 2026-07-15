@@ -40,7 +40,7 @@ impl FileSearchOverlay {
     window: &mut Window,
     cx: &mut Context<Self>,
   ) -> Self {
-    let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("file_name.db8, file_name.docx, file_name.pdf, or file_name.fl0"));
+    let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search files by name"));
     let _input_subscription = cx.subscribe(&search_input, |overlay, _, event: &InputEvent, cx| {
       if let InputEvent::Change = event {
         overlay.refresh_results(cx);
@@ -338,12 +338,15 @@ impl Render for FileSearchOverlay {
               })
               .when(!has_hits, |this| {
                 let message = self.error.clone().unwrap_or_else(|| {
-                  if self.loading {
-                    "Indexing documents..."
-                  } else if query.trim().is_empty() {
-                    "No .db8, .docx, .pdf, or .fl0 files indexed"
-                  } else {
-                    "No matching .db8, .docx, .pdf, or .fl0 files"
+                  // Law 1: the tub path indexes .db8/.docx/.fl0 — never
+                  // promise PDFs it will silently drop.
+                  let tub_active = self.tub_search.is_some();
+                  match (self.loading, query.trim().is_empty(), tub_active) {
+                    (true, _, _) => "Indexing documents...",
+                    (false, true, true) => "No .db8, .docx, or .fl0 files indexed in the tub",
+                    (false, false, true) => "No matching .db8, .docx, or .fl0 files in the tub",
+                    (false, true, false) => "No .db8, .docx, .pdf, or .fl0 files indexed",
+                    (false, false, false) => "No matching .db8, .docx, .pdf, or .fl0 files",
                   }
                   .into()
                 });

@@ -142,7 +142,7 @@ impl Workspace {
       .tub_tree
       .update(cx, |tree, cx| tree.set_items(Vec::<TreeItem>::new(), cx));
     self.tub_expanded_dirs.insert(root.clone());
-    self.tub_status = format!("Indexing {}", root.display()).into();
+    self.report_activity(format!("Indexing tub {}", root.display()), cx);
     self.toolkit_status = "Indexing tub...".into();
     cx.notify();
     self.spawn_tub_scan(root, false, cx);
@@ -196,7 +196,6 @@ impl Workspace {
 
   fn refresh_tub(&mut self, cx: &mut Context<Self>) {
     let Some(root) = self.tub_root.clone() else {
-      self.tub_status = "No tub selected".into();
       cx.notify();
       return;
     };
@@ -206,14 +205,12 @@ impl Workspace {
   fn spawn_tub_scan(&mut self, root: PathBuf, persist_root: bool, cx: &mut Context<Self>) {
     if self.tub_scan_in_flight {
       self.tub_scan_pending = true;
-      self.tub_status = "Indexing queued".into();
       cx.notify();
       return;
     }
     let data_dir = flowstate_data_dir().join("tub");
     let requested_root = root.clone();
     self.tub_scan_in_flight = true;
-    self.tub_status = format!("Indexing {}", root.display()).into();
     self.toolkit_status = "Indexing tub...".into();
     self.toolkit_hits.clear();
     cx.notify();
@@ -253,7 +250,7 @@ impl Workspace {
             workspace.tub_files = result.files;
             workspace.rebuild_tub_tree_cache();
             workspace.refresh_tub_file_search(cx);
-            workspace.tub_status = "Tub indexed".into();
+            workspace.report_activity("Tub indexed", cx);
             workspace.toolkit_status = if workspace
               .toolkit_search_input
               .read(cx)
@@ -282,7 +279,7 @@ impl Workspace {
               .tub_tree
               .update(cx, |tree, cx| tree.set_items(Vec::<TreeItem>::new(), cx));
             workspace.toolkit_hits.clear();
-            workspace.tub_status = format!("Tub unavailable: {error}").into();
+            workspace.report_failure(format!("Tub unavailable: {error}"), None, cx);
             workspace.toolkit_status = "Tub unavailable".into();
             if rescan_pending && let Some(root) = workspace.tub_root.clone() {
               workspace.spawn_tub_scan(root, true, cx);
@@ -309,11 +306,10 @@ impl Workspace {
               workspace.tub_watch_polling = false;
               return false;
             };
-            let has_relevant_event = watcher.drain_has_db8_change();
+            let has_relevant_event = watcher.drain_has_relevant_change();
             if has_relevant_event {
               if workspace.tub_scan_in_flight {
                 workspace.tub_scan_pending = true;
-                workspace.tub_status = "Indexing queued".into();
               } else {
                 workspace.refresh_tub(cx);
               }
@@ -484,12 +480,20 @@ impl Workspace {
       .file_name()
       .map(|name| name.to_string_lossy().to_string())
       .unwrap_or_else(|| path.display().to_string());
-    self.tub_status = format!("Opening {name}").into();
     cx.notify();
     self.open_document_path(path, window, cx);
   }
 
   fn render_toolkit_expanded(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    // T-S1: the live rail width (the panel resizes 380..620) feeds the card
+    // height estimator so it stops assuming the default width.
+    let toolkit_panel_width = self
+      .content_resizable_state
+      .read(cx)
+      .sizes()
+      .get(1)
+      .copied()
+      .unwrap_or(px(380.0));
     let (preview_theme, _) = self
       .active_editor
       .as_ref()
@@ -519,7 +523,7 @@ impl Workspace {
           .map(|hit| {
             let expanded =
               toolkit_hit_preview_can_expand(hit, toolkit_hit_preview_text(hit)) && self.expanded_toolkit_hits.contains(&toolkit_hit_key(hit));
-            size(px(1.0), toolkit_hit_virtual_height(hit, expanded, &preview_theme))
+            size(px(1.0), toolkit_hit_virtual_height(hit, expanded, &preview_theme, toolkit_panel_width))
           })
           .collect::<Vec<_>>(),
       );
@@ -532,7 +536,7 @@ impl Workspace {
                 && workspace
                   .expanded_toolkit_hits
                   .contains(&toolkit_hit_key(hit));
-              workspace.render_toolkit_hit(ix, hit, toolkit_hit_card_height(hit, expanded, &preview_theme_for_rows), cx)
+              workspace.render_toolkit_hit(ix, hit, toolkit_hit_card_height(hit, expanded, &preview_theme_for_rows, toolkit_panel_width), cx)
             })
           })
           .collect::<Vec<_>>()
@@ -647,6 +651,17 @@ impl Workspace {
           .w_full()
           .overflow_hidden()
           .p_2()
+          .when(self.tub_root.is_some() && !self.toolkit_hits.is_empty(), |this| {
+            this.child(
+              div()
+                .flex_none()
+                .px_1()
+                .pb_1()
+                .text_size(px(10.0))
+                .text_color(cx.theme().muted_foreground.opacity(0.82))
+                .child(self.toolkit_status.clone()),
+            )
+          })
           .child(result_list),
       )
   }
@@ -1081,17 +1096,17 @@ fn toolkit_hit_preview_can_expand(hit: &flowstate_tub::SearchHit, fallback_text:
     > TOOLKIT_PREVIEW_FALLBACK_LINE_LIMIT
 }
 
-fn toolkit_hit_virtual_height(hit: &flowstate_tub::SearchHit, expanded: bool, theme: &DocumentTheme) -> Pixels {
-  toolkit_hit_card_height(hit, expanded, theme) + px(12.0)
+fn toolkit_hit_virtual_height(hit: &flowstate_tub::SearchHit, expanded: bool, theme: &DocumentTheme, panel_width: Pixels) -> Pixels {
+  toolkit_hit_card_height(hit, expanded, theme, panel_width) + px(12.0)
 }
 
-fn toolkit_hit_card_height(hit: &flowstate_tub::SearchHit, expanded: bool, theme: &DocumentTheme) -> Pixels {
+fn toolkit_hit_card_height(hit: &flowstate_tub::SearchHit, expanded: bool, theme: &DocumentTheme, panel_width: Pixels) -> Pixels {
   let can_expand = toolkit_hit_preview_can_expand(hit, toolkit_hit_preview_text(hit));
   if !expanded && can_expand {
     return px(258.0);
   }
 
-  let estimated = toolkit_hit_preview_estimated_height(hit, expanded, theme);
+  let estimated = toolkit_hit_preview_estimated_height(hit, expanded, theme, panel_width);
   if expanded {
     estimated.clamp(px(258.0), px(720.0))
   } else {
@@ -1099,7 +1114,7 @@ fn toolkit_hit_card_height(hit: &flowstate_tub::SearchHit, expanded: bool, theme
   }
 }
 
-fn toolkit_hit_preview_estimated_height(hit: &flowstate_tub::SearchHit, expanded: bool, theme: &DocumentTheme) -> Pixels {
+fn toolkit_hit_preview_estimated_height(hit: &flowstate_tub::SearchHit, expanded: bool, theme: &DocumentTheme, panel_width: Pixels) -> Pixels {
   let preview_paragraphs;
   let paragraphs = if hit.preview_paragraphs.is_empty() {
     preview_paragraphs = toolkit_fallback_paragraphs(toolkit_hit_preview_text(hit), (!expanded).then_some(TOOLKIT_PREVIEW_FALLBACK_LINE_LIMIT));
@@ -1115,12 +1130,12 @@ fn toolkit_hit_preview_estimated_height(hit: &flowstate_tub::SearchHit, expanded
 
   let mut height = px(8.0) + px(12.0);
   for paragraph in paragraphs {
-    height += toolkit_estimated_paragraph_height(paragraph, theme);
+    height += toolkit_estimated_paragraph_height(paragraph, theme, panel_width);
   }
   height
 }
 
-fn toolkit_estimated_paragraph_height(paragraph: &InputParagraph, theme: &DocumentTheme) -> Pixels {
+fn toolkit_estimated_paragraph_height(paragraph: &InputParagraph, theme: &DocumentTheme, panel_width: Pixels) -> Pixels {
   let zoom = (theme.zoom_factor * TOOLKIT_PREVIEW_ZOOM).max(0.01);
   let (base_font_size, spacing_before, spacing_after, border_pad_x, border_pad_y) = match paragraph.style {
     ParagraphStyle::Normal => (theme.body_font_size * zoom, px(0.0), theme.paragraph_after, px(0.0), px(0.0)),
@@ -1153,7 +1168,10 @@ fn toolkit_estimated_paragraph_height(paragraph: &InputParagraph, theme: &Docume
     max_size.max(run_size)
   });
   let line_height = (max_run_font_size + max_run_font_size * theme.line_gap_fraction) * theme.line_spacing;
-  let content_width = (px(344.0) - px(10.0) * 2.0 - border_pad_x * 2.0).max(px(1.0));
+  // T-S1 honest geometry: the estimator tracks the ACTUAL rail width (the
+  // panel resizes 380..620) instead of a hardcoded 344px snapshot of the
+  // default — card heights stop drifting the moment the user resizes.
+  let content_width = (panel_width - px(36.0) - px(10.0) * 2.0 - border_pad_x * 2.0).max(px(1.0));
   let avg_char_width = (max_run_font_size * 0.50).max(px(1.0));
   let chars_per_line = ((content_width / avg_char_width).floor() as usize).max(1);
   let text_len = paragraph

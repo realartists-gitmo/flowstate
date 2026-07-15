@@ -145,7 +145,6 @@ pub struct Workspace {
   tub_expanded_dirs: HashSet<PathBuf>,
   tub_file_search_input: Entity<InputState>,
   tub_file_search_generation: u64,
-  tub_status: SharedString,
   tub_watcher: Option<flowstate_tub::TubWatcher>,
   tub_watch_polling: bool,
   tub_scan_in_flight: bool,
@@ -224,6 +223,26 @@ enum ToolkitSearchFilter {
   Blocks,
   Tags,
   Analytics,
+}
+
+impl ToolkitSearchFilter {
+  fn session_key(self) -> &'static str {
+    match self {
+      Self::All => "all",
+      Self::Blocks => "blocks",
+      Self::Tags => "tags",
+      Self::Analytics => "analytics",
+    }
+  }
+
+  fn from_session_key(key: &str) -> Self {
+    match key {
+      "blocks" => Self::Blocks,
+      "tags" => Self::Tags,
+      "analytics" => Self::Analytics,
+      _ => Self::All,
+    }
+  }
 }
 
 impl ToolkitSearchFilter {
