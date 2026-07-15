@@ -47,7 +47,6 @@ impl Workspace {
             .map(|panel| panel.read(cx).ribbon().into_any_element())
         })
     });
-    let show_placeholder = active_ribbon.is_none();
 
     h_flex()
       .relative()
@@ -83,13 +82,6 @@ impl Workspace {
         }
         this.child(ribbon)
       })
-      .when(show_placeholder, |this| {
-        this.px_2().child(
-          div()
-            .text_xs()
-            .text_color(cx.theme().muted_foreground)
-            .child("Ribbon placeholder"),
-        )
-      })
+
   }
 }

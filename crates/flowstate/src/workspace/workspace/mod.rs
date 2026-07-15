@@ -272,15 +272,6 @@ enum DocumentStyleSection {
 }
 
 impl DocumentStyleSection {
-  fn title(self) -> &'static str {
-    match self {
-      Self::Text => "Text",
-      Self::Style => "Style",
-      Self::Colors => "Colors",
-      Self::Size => "Size",
-      Self::Background => "Background",
-    }
-  }
 
   fn index(self) -> usize {
     match self {

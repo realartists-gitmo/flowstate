@@ -220,7 +220,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
   CommandSpec::new(CommandId::OpenDocument, "Open Document", APP, &[]),
   CommandSpec::new(CommandId::OpenDemoDocument, "Open Demo Document", APP, &[]),
   CommandSpec::new(CommandId::CloseDocument, "Close Document", APP, &[]),
-  CommandSpec::new(CommandId::ShareDocument, "Share / Collaborate...", APP, &[]),
+  CommandSpec::new(CommandId::ShareDocument, "Share...", APP, &[]),
   CommandSpec::new(CommandId::JoinSession, "Join Collaboration Session...", APP, &[]),
   CommandSpec::new(CommandId::StartCollaboration, "Start Collaboration", APP, &[]),
   CommandSpec::new(CommandId::CopyCollaborationTicket, "Copy Collaboration Invite", APP, &[]),

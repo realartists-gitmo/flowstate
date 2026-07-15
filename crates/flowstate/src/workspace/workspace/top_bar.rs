@@ -73,24 +73,16 @@ fn document_top_bar_button(cx: &mut Context<Workspace>) -> impl IntoElement {
         .xsmall()
         .ghost()
         .dropdown_menu(move |menu, _, _| {
-          [
-            DocumentStyleSection::Text,
-            DocumentStyleSection::Style,
-            DocumentStyleSection::Colors,
-            DocumentStyleSection::Size,
-            DocumentStyleSection::Background,
-          ]
-          .into_iter()
-          .fold(menu, |menu, section| {
-            let workspace = workspace.clone();
-            menu.item(PopupMenuItem::new(section.title()).on_click(move |_, _, cx| {
-              let _ = workspace.update(cx, |workspace, cx| {
-                workspace.document_style_section = section;
-                workspace.settings_overlay = Some(WorkspaceSettingsOverlay::Styles);
-                cx.notify();
-              });
-            }))
-          })
+          // Patient 5/7: five section items all opened the same overlay —
+          // one honest door until the P5-S4 style editor replaces it.
+          let workspace = workspace.clone();
+          menu.item(PopupMenuItem::new("Document Styles...").on_click(move |_, _, cx| {
+            let _ = workspace.update(cx, |workspace, cx| {
+              workspace.document_style_section = DocumentStyleSection::Text;
+              workspace.settings_overlay = Some(WorkspaceSettingsOverlay::Styles);
+              cx.notify();
+            });
+          }))
         }),
     )
 }
@@ -111,14 +103,9 @@ fn collaboration_top_bar_button(cx: &mut Context<Workspace>, has_document: bool,
         .ghost()
         .dropdown_menu(move |menu, _, _| {
           menu
-            .item(file_menu_item(
-              workspace.clone(),
-              "Share / Collaborate...",
-              !has_document,
-              |workspace, window, cx| {
-                workspace.open_collaboration_dialog(window, cx);
-              },
-            ))
+            .item(file_menu_item(workspace.clone(), "Share...", !has_document, |workspace, window, cx| {
+              workspace.open_collaboration_dialog(window, cx);
+            }))
             .item(file_menu_item(
               workspace.clone(),
               "Copy Invite Ticket",
@@ -189,23 +176,21 @@ fn file_top_bar_button(has_document: bool, cx: &mut Context<Workspace>) -> impl 
             .item(file_menu_item(workspace.clone(), "Open File", false, |workspace, window, cx| {
               workspace.prompt_open_document(window, cx);
             }))
-            .item(file_menu_item(workspace.clone(), "Save", !has_document, |workspace, window, cx| {
-              workspace.save_active(window, cx);
-            }))
+            .item(command_menu_item(
+              workspace.clone(),
+              "Save",
+              Some(crate::commands::CommandId::Save),
+              !has_document,
+              |workspace, window, cx| {
+                workspace.save_active(window, cx);
+              },
+            ))
             .item(file_menu_item(workspace.clone(), "Save As", !has_document, |workspace, window, cx| {
               workspace.save_active_as(window, cx);
             }))
             .separator()
-            .item(file_menu_item(
-              workspace.clone(),
-              "Share Document...",
-              !has_document,
-              |workspace, window, cx| {
-                workspace.open_collaboration_dialog(window, cx);
-              },
-            ))
-            .item(file_menu_item(workspace.clone(), "Join Session...", false, |workspace, window, cx| {
-              workspace.open_join_collaboration_dialog(window, cx);
+            .item(file_menu_item(workspace.clone(), "Share...", !has_document, |workspace, window, cx| {
+              workspace.open_collaboration_dialog(window, cx);
             }))
             .separator()
             .item(file_menu_item(workspace.clone(), "Close File", !has_document, |workspace, window, cx| {
@@ -225,11 +210,26 @@ fn file_menu_item(
   disabled: bool,
   action: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
 ) -> PopupMenuItem {
-  PopupMenuItem::new(label)
-    .disabled(disabled)
-    .on_click(move |_, window, cx| {
-      let _ = workspace.update(cx, |workspace, cx| action(workspace, window, cx));
-    })
+  command_menu_item(workspace, label, None, disabled, action)
+}
+
+/// Menu item that displays its command's keybinding (Law 9: menus never hide
+/// the keyboard path). `command` is optional only because some entries have
+/// no `CommandId` yet — the omni-palette build registers the rest.
+fn command_menu_item(
+  workspace: WeakEntity<Workspace>,
+  label: &'static str,
+  command: Option<crate::commands::CommandId>,
+  disabled: bool,
+  action: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
+) -> PopupMenuItem {
+  let mut item = PopupMenuItem::new(label);
+  if let Some(bound) = command.and_then(crate::commands::action_for_command) {
+    item = item.action(bound);
+  }
+  item.disabled(disabled).on_click(move |_, window, cx| {
+    let _ = workspace.update(cx, |workspace, cx| action(workspace, window, cx));
+  })
 }
 
 #[hotpath::measure]
@@ -248,32 +248,31 @@ fn insert_top_bar_button(cx: &mut Context<Workspace>, has_document: bool) -> imp
         .xsmall()
         .ghost()
         .disabled(!has_document)
-        .dropdown_menu(move |menu, _, _| {
+        .dropdown_menu(move |menu, window, cx| {
+          // The whole button disables without a document; per-item disable
+          // duplication removed (the audit's redundant-disable finding).
           let image_workspace = workspace.clone();
           let table_workspace = workspace.clone();
           let equation_workspace = workspace.clone();
           menu
-            .item(
-              PopupMenuItem::new("Image...")
-                .disabled(!has_document)
-                .on_click(move |_, _, cx| {
-                  insert_image_from_top_bar(&image_workspace, cx);
-                }),
-            )
-            .item(
-              PopupMenuItem::new("Table")
-                .disabled(!has_document)
-                .on_click(move |_, _, cx| {
-                  insert_default_table_from_top_bar(&table_workspace, cx);
-                }),
-            )
-            .item(
-              PopupMenuItem::new("Equation")
-                .disabled(!has_document)
-                .on_click(move |_, _, cx| {
-                  insert_default_equation_from_top_bar(&equation_workspace, cx);
-                }),
-            )
+            .item(PopupMenuItem::new("Image...").on_click(move |_, _, cx| {
+              insert_image_from_top_bar(&image_workspace, cx);
+            }))
+            .submenu("Table", window, cx, move |menu, _, _| {
+              [(2usize, 2usize), (2, 3), (3, 3), (4, 4), (5, 5)]
+                .into_iter()
+                .fold(menu, |menu, (rows, columns)| {
+                  let table_workspace = table_workspace.clone();
+                  menu.item(
+                    PopupMenuItem::new(format!("{rows} × {columns}")).on_click(move |_, _, cx| {
+                      insert_table_from_top_bar(&table_workspace, rows, columns, cx);
+                    }),
+                  )
+                })
+            })
+            .item(PopupMenuItem::new("Equation").on_click(move |_, _, cx| {
+              insert_default_equation_from_top_bar(&equation_workspace, cx);
+            }))
         }),
     )
 }
@@ -320,10 +319,10 @@ fn insert_image_from_top_bar(workspace: &WeakEntity<Workspace>, cx: &mut App) {
 }
 
 #[hotpath::measure]
-fn insert_default_table_from_top_bar(workspace: &WeakEntity<Workspace>, cx: &mut App) {
+fn insert_table_from_top_bar(workspace: &WeakEntity<Workspace>, rows: usize, columns: usize, cx: &mut App) {
   let _ = workspace.update(cx, |workspace, cx| {
     if let Some(editor) = workspace.active_editor.clone() {
-      editor.update(cx, |editor, cx| editor.insert_default_table(2, 2, cx));
+      editor.update(cx, |editor, cx| editor.insert_default_table(rows, columns, cx));
     }
   });
 }

@@ -89,8 +89,12 @@ impl Workspace {
             )
           })
           .when_some(tab.pin_index.and_then(pin_shortcut_label), |this, pin_label| {
+            let shortcut_hint: SharedString =
+              format!("Pinned — Alt+{pin_label} switches here (with pins, Alt+N counts pinned tabs first)").into();
             this.child(
               div()
+                .id(("tab-pin-badge", panel_id.as_u128() as u64))
+                .tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(shortcut_hint.clone()).build(window, cx))
                 .w(px(14.0))
                 .h(px(14.0))
                 .flex()
@@ -127,6 +131,13 @@ impl Workspace {
           // before rendering so long filenames cannot break the tab strip.
           .label(tab.label)
           .selected(tab.active)
+          .on_mouse_down(
+            MouseButton::Middle,
+            cx.listener(move |workspace, _, window, cx| {
+              cx.stop_propagation();
+              workspace.close_document_panel(panel_id, window, cx);
+            }),
+          )
           .when(tab.speech, |this| this.bg(cx.theme().success.opacity(0.14)))
           .prefix(tab_prefix)
           .suffix(close_button)
