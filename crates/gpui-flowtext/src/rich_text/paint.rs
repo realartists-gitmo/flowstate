@@ -23,6 +23,7 @@ pub(super) fn paint_layout(
   external_carets: &[ExternalCaret],
   external_selections: &[ExternalSelection],
   annotation_selections: &[ExternalSelection],
+  jump_flash: Option<&ExternalSelection>,
   search_highlights: &[Range<DocumentOffset>],
   active_search_highlight: Option<usize>,
   window: &mut Window,
@@ -112,6 +113,19 @@ pub(super) fn paint_layout(
       content_mask,
       visible_range.clone(),
       annotation_selection_color(annotation.color_rgb),
+      window,
+    );
+  }
+  // The transient navigation flash paints above annotations, stronger, so a
+  // jump target reads unmistakably even inside an existing annotation span.
+  if let Some(flash) = jump_flash {
+    paint_text_range_fill(
+      layout,
+      &flash.selection,
+      bounds.origin,
+      content_mask,
+      visible_range.clone(),
+      jump_flash_color(flash.color_rgb),
       window,
     );
   }
@@ -710,6 +724,11 @@ fn remote_selection_color(color_rgb: u32) -> Hsla {
 
 fn annotation_selection_color(color_rgb: u32) -> Hsla {
   gpui::Hsla::from(rgb(color_rgb)).opacity(0.22)
+}
+
+/// Stronger than the annotation fill: the flash must register as an event.
+fn jump_flash_color(color_rgb: u32) -> Hsla {
+  gpui::Hsla::from(rgb(color_rgb)).opacity(0.38)
 }
 
 fn paint_text_range_fill(

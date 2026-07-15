@@ -172,20 +172,81 @@ impl RichTextEditor {
         self.emit_selection_changed(cx);
       }
 
-      let width = self.current_layout_width();
-      let start = paragraph_ix.saturating_sub(2);
-      let end = (paragraph_ix + 6).min(self.document.paragraphs.len());
-      for ix in start..end {
-        self.ensure_next_paragraph_chunk(ix, width, window, cx);
-      }
-      let target_anchor = self.paragraph_start_anchor(paragraph_ix);
-      self.item_sizes_cache = None;
-      let _ = self.rebuild_item_sizes_cache(width, target_anchor.clone(), window, cx);
-      let _ = self.materialize_visible_remainders_for_scroll(width, target_anchor.clone(), window, cx);
-      self.restore_scroll_anchor(target_anchor);
-      self.pending_snap_to_paragraph = None;
-      cx.notify();
+      self.scroll_paragraph_into_view(paragraph_ix, window, cx);
+      self.flash_paragraph(paragraph_ix, DEFAULT_JUMP_FLASH_RGB, cx);
     }
+  }
+
+  /// Scroll so `paragraph_ix` sits near the top WITHOUT touching the caret or
+  /// selection, then flash it. The "peek" half of outline/panel navigation —
+  /// committing the caret is a separate, deliberate act.
+  pub fn peek_paragraph(&mut self, paragraph_ix: usize, flash_rgb: u32, window: &mut Window, cx: &mut Context<Self>) {
+    if paragraph_ix < self.document.paragraphs.len() {
+      self.scroll_paragraph_into_view(paragraph_ix, window, cx);
+      self.flash_paragraph(paragraph_ix, flash_rgb, cx);
+    }
+  }
+
+  fn scroll_paragraph_into_view(&mut self, paragraph_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+    let width = self.current_layout_width();
+    let start = paragraph_ix.saturating_sub(2);
+    let end = (paragraph_ix + 6).min(self.document.paragraphs.len());
+    for ix in start..end {
+      self.ensure_next_paragraph_chunk(ix, width, window, cx);
+    }
+    let target_anchor = self.paragraph_start_anchor(paragraph_ix);
+    self.item_sizes_cache = None;
+    let _ = self.rebuild_item_sizes_cache(width, target_anchor.clone(), window, cx);
+    let _ = self.materialize_visible_remainders_for_scroll(width, target_anchor.clone(), window, cx);
+    self.restore_scroll_anchor(target_anchor);
+    self.pending_snap_to_paragraph = None;
+    cx.notify();
+  }
+
+  fn flash_paragraph(&mut self, paragraph_ix: usize, color_rgb: u32, cx: &mut Context<Self>) {
+    let Some(paragraph) = self.document.paragraphs.get(paragraph_ix) else {
+      return;
+    };
+    let start = DocumentOffset {
+      paragraph: paragraph_ix,
+      byte: 0,
+    };
+    let end = DocumentOffset {
+      paragraph: paragraph_ix,
+      byte: paragraph_text_len(paragraph),
+    };
+    self.flash_range(
+      EditorSelection {
+        anchor: start,
+        head: end,
+        ..EditorSelection::default()
+      },
+      color_rgb,
+      cx,
+    );
+  }
+
+  /// Paint a transient highlight over `selection`, replacing any in-flight
+  /// flash, and clear it after [`JUMP_FLASH_DURATION`].
+  pub fn flash_range(&mut self, selection: EditorSelection, color_rgb: u32, cx: &mut Context<Self>) {
+    self.jump_flash_generation = self.jump_flash_generation.wrapping_add(1);
+    let generation = self.jump_flash_generation;
+    self.jump_flash = Some(JumpFlash {
+      selection,
+      color_rgb,
+      generation,
+    });
+    cx.notify();
+    cx.spawn(async move |editor, cx| {
+      Timer::after(JUMP_FLASH_DURATION).await;
+      let _ = editor.update(cx, |editor, cx| {
+        if editor.jump_flash.as_ref().is_some_and(|flash| flash.generation == generation) {
+          editor.jump_flash = None;
+          cx.notify();
+        }
+      });
+    })
+    .detach();
   }
 
   /// Loro-first (spec §10): undo executes through the write authority's

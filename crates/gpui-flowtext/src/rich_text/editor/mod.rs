@@ -440,6 +440,24 @@ pub struct ExternalSelection {
   pub color_rgb: u32,
 }
 
+/// A transient "you are here" highlight painted over a range after
+/// programmatic navigation (outline peek, comment jump, tub open). Decays on a
+/// timer; `generation` guards a stale timer from erasing a newer flash.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct JumpFlash {
+  pub selection: EditorSelection,
+  pub color_rgb: u32,
+  pub(super) generation: u64,
+}
+
+/// Fallback flash color for callers with no theme access (the annotation
+/// amber). Callers with a theme pass their own via `peek_paragraph`/
+/// `flash_range`; migrates to the derived visual engine in D-S2.
+pub const DEFAULT_JUMP_FLASH_RGB: u32 = 0x00D9_9A20;
+
+/// How long a navigation flash stays painted before the timer clears it.
+pub const JUMP_FLASH_DURATION: Duration = Duration::from_millis(900);
+
 // Loro-first: hooks carry NO pending edit batches (nothing is ever pending —
 // intents commit synchronously) and return no replacement projection (the
 // canonical doc is always current; there is nothing to replay).
@@ -960,6 +978,10 @@ pub struct RichTextEditor {
   /// Kept separate from peer presence so either layer can refresh without
   /// erasing the other.
   annotation_selections: Vec<ExternalSelection>,
+  /// Transient navigation flash (see [`JumpFlash`]); separate from
+  /// annotations so comment refreshes never erase an in-flight flash.
+  pub(super) jump_flash: Option<JumpFlash>,
+  pub(super) jump_flash_generation: u64,
   pub(super) search_highlights: Vec<Range<DocumentOffset>>,
   pub(super) active_search_highlight: Option<usize>,
   pending_typing_prefetch_resume: bool,

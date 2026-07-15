@@ -118,6 +118,8 @@ impl RichTextEditor {
       external_carets: Vec::new(),
       external_selections: Vec::new(),
       annotation_selections: Vec::new(),
+      jump_flash: None,
+      jump_flash_generation: 0,
       search_highlights: Vec::new(),
       active_search_highlight: None,
       last_text_input_at: None,
@@ -249,6 +251,7 @@ impl RichTextEditor {
     self.external_carets.clear();
     self.external_selections.clear();
     self.annotation_selections.clear();
+    self.jump_flash = None;
     self.last_text_input_at = None;
     self.ime_marked_range = None;
     self.pending_typing_prefetch_resume = false;
@@ -520,6 +523,15 @@ impl RichTextEditor {
       })
       .cloned()
       .collect()
+  }
+
+  pub(super) fn jump_flash_for_paragraph(&self, paragraph_ix: usize) -> Option<ExternalSelection> {
+    let flash = self.jump_flash.as_ref()?;
+    let range = flash.selection.normalized();
+    (range.start.paragraph <= paragraph_ix && range.end.paragraph >= paragraph_ix).then(|| ExternalSelection {
+      selection: flash.selection.clone(),
+      color_rgb: flash.color_rgb,
+    })
   }
 }
 

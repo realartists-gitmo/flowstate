@@ -173,6 +173,7 @@ impl Element for RichTextDocumentElement {
         &[],
         &[],
         &[],
+        None,
         &[],
         None,
         window,
@@ -265,6 +266,7 @@ impl Element for VirtualParagraphChunkElement {
       external_carets,
       external_selections,
       annotation_selections,
+      jump_flash,
       search_highlights,
       active_search_highlight,
     ) = {
@@ -273,6 +275,7 @@ impl Element for VirtualParagraphChunkElement {
       let external_carets = editor.external_carets_for_paragraph(self.paragraph_ix);
       let external_selections = editor.external_selections_for_paragraph(self.paragraph_ix);
       let annotation_selections = editor.annotation_selections_for_paragraph(self.paragraph_ix);
+      let jump_flash = editor.jump_flash_for_paragraph(self.paragraph_ix);
       (
         editor.selection.clone(),
         drag_selection,
@@ -295,6 +298,7 @@ impl Element for VirtualParagraphChunkElement {
         external_carets,
         external_selections,
         annotation_selections,
+        jump_flash,
         editor.search_highlights.clone(),
         editor.active_search_highlight,
       )
@@ -354,6 +358,7 @@ impl Element for VirtualParagraphChunkElement {
         &external_carets,
         &external_selections,
         &annotation_selections,
+        jump_flash.as_ref(),
         &search_highlights,
         active_search_highlight,
         window,
