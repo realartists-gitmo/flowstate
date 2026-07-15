@@ -11,7 +11,7 @@ mod intents;
 pub mod loro_projection;
 pub mod loro_schema;
 pub mod mutate;
-mod persistence;
+pub mod persistence;
 mod projection;
 #[cfg(test)]
 mod tests;

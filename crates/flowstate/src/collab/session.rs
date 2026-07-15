@@ -335,7 +335,15 @@ impl CollabSession {
     // thread (spec I-9a: raw ungated doc reads are outlawed — they can
     // force-commit mid-intent state). Absent a runtime yet, it falls back to
     // the session-served request channel.
-    DirectSessionHandler::new(self.direct_tx.clone(), self.runtime.clone())
+    // S9's enum split threads a Flow arm through here; today every live
+    // session runtime is the rich-text document I/O service.
+    DirectSessionHandler::new(
+      self.direct_tx.clone(),
+      self
+        .runtime
+        .clone()
+        .map(flowstate_collab::sync_io::SyncIoHandle::RichText),
+    )
   }
 
   pub(super) fn pull_candidates(&self, preferred: Option<flowstate_collab::ids::PeerId>) -> Vec<flowstate_collab::ids::PeerId> {

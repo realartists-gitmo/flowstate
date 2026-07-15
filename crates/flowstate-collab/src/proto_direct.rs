@@ -51,6 +51,9 @@ pub enum DirectRequest {
 pub struct DiscoveryAdmissionGrant {
   pub admission: SessionAdmission,
   pub title: String,
+  /// Which runtime the joiner must spawn; folded into the minted ticket's
+  /// authenticated metadata.
+  pub document: crate::ticket::DocumentKind,
 }
 
 /// How a streamed direct payload is encoded on the wire. Rides on the response

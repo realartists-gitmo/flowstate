@@ -327,7 +327,15 @@ impl CollabManager {
           tracing::info!(%session_id, inviter = %minted.inviter.id, "created collaboration share ticket");
           let own_endpoint_id = minted.inviter.id;
           let _ = cx.update_global::<CollabManager, _>(|manager, _| manager.own_endpoint_id = Some(own_endpoint_id));
-          Ok(SessionTicket::new(session_id, vec![minted.inviter], title, minted.admission))
+          // S9: the session enum split threads the panel's real kind here; every
+          // startable session today is a rich-text editor tab.
+          Ok(SessionTicket::new(
+            session_id,
+            vec![minted.inviter],
+            title,
+            flowstate_collab::ticket::DocumentKind::RichText,
+            minted.admission,
+          ))
         },
         Ok(Err(error)) => {
           tracing::error!(%session_id, error = %format_args!("{error:#}"), "minting collaboration invite failed");

@@ -7,12 +7,14 @@
 
 mod cell_authority;
 mod cell_text;
+mod flow_io;
 mod handle;
 mod runtime;
 #[cfg(test)]
 mod tests;
 
 pub use cell_authority::FlowCellAuthority;
+pub use flow_io::{FlowIoHandle, FlowIoRequest};
 pub use handle::{FlowDocHandle, FlowWriteRejected};
 pub use runtime::{FlowLocalOutcome, FlowPublishEvent, FlowRuntime, FlowStreamItem};
 

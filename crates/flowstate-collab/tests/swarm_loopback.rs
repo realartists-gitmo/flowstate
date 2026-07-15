@@ -130,7 +130,13 @@ async fn swarm_loopback_net_subset() -> Result<()> {
   // owner proxy: C can authenticate directly to B and bootstrap from B even
   // if A is unavailable.
   install_snapshot_handler(&b, session, b"snapshot-from-b".to_vec()).await;
-  let b_invite = SessionTicket::new(session, vec![b_addr.clone()], "Shared brief".into(), admission.clone());
+  let b_invite = SessionTicket::new(
+    session,
+    vec![b_addr.clone()],
+    "Shared brief".into(),
+    flowstate_collab::ticket::DocumentKind::RichText,
+    admission.clone(),
+  );
   let b_invite = SessionTicket::decode_text(&b_invite.encode_text())?;
   let snapshot = direct::pull_with_endpoint(
     &c.endpoint,
@@ -317,4 +323,148 @@ where
   })
   .await
   .with_context(|| format!("timed out waiting for {label}"))?
+}
+
+/// Flow architecture S7 gate: a FLOW session served through the same direct
+/// transport — the kind-dispatched [`flowstate_collab::SyncIoHandle`] answers
+/// snapshot and incremental-update pulls off a live `FlowRuntime`'s I/O
+/// service, and the puller materializes a converged board from the bytes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires local UDP loopback and real iroh gossip timing"]
+async fn flow_loopback_direct_pull() -> Result<()> {
+  use flowstate_collab::SyncIoHandle;
+  use flowstate_collab::flow::{FlowDocHandle, FlowIoHandle, FlowRuntime};
+  use flowstate_flow::{CellPlacement, CellSeed, FlowIntent};
+
+  let session = SessionId::new();
+  let lookup = MemoryLookup::new();
+  let a = Peer::spawn(lookup.clone()).await?;
+  let b = Peer::spawn(lookup.clone()).await?;
+  let admission = SessionAdmission::generate();
+  for peer in [&a, &b] {
+    peer
+      .direct_state
+      .auth()
+      .configure_session(session, admission.clone());
+  }
+  auth::install_local_admission(session, admission.clone());
+
+  let a_addr = wait_addr(&a.endpoint).await;
+  let b_addr = wait_addr(&b.endpoint).await;
+  ensure!(!a_addr.is_empty(), "A endpoint did not expose loopback addresses");
+  ensure!(!b_addr.is_empty(), "B endpoint did not expose loopback addresses");
+  for addr in [a_addr.clone(), b_addr.clone()] {
+    lookup.add_endpoint_info(addr);
+  }
+
+  // A hosts a live flow session: one sheet, one cell with text.
+  let runtime = FlowRuntime::new_empty();
+  let sheet_type = runtime.board().format.sheet_types[0].id;
+  let (handle, gate) = FlowDocHandle::new(runtime);
+  let sheet = uuid::Uuid::from_u128(0x5107);
+  handle
+    .apply(&FlowIntent::CreateSheet {
+      sheet_id: sheet,
+      name: "Loopback".into(),
+      sheet_type_id: sheet_type,
+    })
+    .map_err(|error| anyhow::anyhow!("seed sheet rejected: {error}"))?;
+  handle
+    .apply(&FlowIntent::AddCell {
+      sheet_id: sheet,
+      cell_id: uuid::Uuid::from_u128(0x5108),
+      placement: CellPlacement::SheetEnd { column_index: 0 },
+      seed: CellSeed::Paragraphs(vec![flowstate_document::InputParagraph {
+        style: flowstate_document::PARAGRAPH_TAG,
+        runs: vec![flowstate_document::InputRun {
+          text: "served over loopback".into(),
+          styles: flowstate_document::RunStyles::default(),
+        }],
+      }]),
+    })
+    .map_err(|error| anyhow::anyhow!("seed cell rejected: {error}"))?;
+  let io = FlowIoHandle::spawn(std::sync::Arc::clone(&gate)).expect("flow io service");
+  let (request_tx, _request_rx) = async_channel::unbounded();
+  a.direct_state
+    .register_handler(session, DirectSessionHandler::new(request_tx, Some(SyncIoHandle::Flow(io))))
+    .await;
+
+  // Snapshot pull: B materializes A's board from the served bytes.
+  let snapshot = direct::pull_with_endpoint(
+    &b.endpoint,
+    DirectRequest::Snapshot { session },
+    vec![a.endpoint.id()],
+    Duration::from_secs(5),
+  )
+  .await?;
+  let (b_handle, _b_gate) = FlowDocHandle::new(FlowRuntime::from_snapshot(&snapshot)?);
+  let board = b_handle
+    .board_projection()
+    .map_err(|error| anyhow::anyhow!("joined board unavailable: {error}"))?;
+  let joined_sheet = board
+    .sheet(sheet)
+    .context("pulled snapshot is missing the seeded sheet")?;
+  ensure!(
+    joined_sheet.cells.len() == 1,
+    "pulled snapshot has {} cells, expected 1",
+    joined_sheet.cells.len()
+  );
+  ensure!(
+    joined_sheet.cells[0]
+      .summary
+      .summary_text
+      .contains("served over loopback"),
+    "pulled cell summary lost the seeded text: {:?}",
+    joined_sheet.cells[0].summary.summary_text
+  );
+
+  // Incremental pull: A commits another cell after B's snapshot; B pulls
+  // updates for its own version vector and imports the delta.
+  handle
+    .apply(&FlowIntent::AddCell {
+      sheet_id: sheet,
+      cell_id: uuid::Uuid::from_u128(0x5109),
+      placement: CellPlacement::SheetEnd { column_index: 1 },
+      seed: CellSeed::Empty,
+    })
+    .map_err(|error| anyhow::anyhow!("post-snapshot cell rejected: {error}"))?;
+  let have_vv = {
+    let guard = _b_gate
+      .lock(flowstate_collab::local_write::GateHolder::ExportUpdates)
+      .expect("gate healthy");
+    guard.oplog_vv().encode()
+  };
+  let updates = direct::pull_with_endpoint(
+    &b.endpoint,
+    DirectRequest::Updates { session, have_vv },
+    vec![a.endpoint.id()],
+    Duration::from_secs(5),
+  )
+  .await?;
+  b_handle
+    .import_remote_updates(&[updates.as_slice()])
+    .map_err(|error| anyhow::anyhow!("importing pulled flow updates failed: {error}"))?;
+  let board = b_handle
+    .board_projection()
+    .map_err(|error| anyhow::anyhow!("post-update board unavailable: {error}"))?;
+  ensure!(
+    board
+      .sheet(sheet)
+      .context("sheet vanished after update pull")?
+      .cells
+      .len()
+      == 2,
+    "update pull did not deliver the post-snapshot cell"
+  );
+
+  a.router
+    .shutdown()
+    .await
+    .context("shutting down A router failed")?;
+  b.router
+    .shutdown()
+    .await
+    .context("shutting down B router failed")?;
+  auth::clear_local_admission(session);
+  Ok(())
 }

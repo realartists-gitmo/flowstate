@@ -27,7 +27,16 @@ pub fn load_flow_document(path: impl AsRef<Path>) -> anyhow::Result<FlowDocument
 }
 
 pub fn save_flow_document(path: impl AsRef<Path>, document: &FlowDocument) -> anyhow::Result<()> {
-  let path = path.as_ref();
+  save_encoded_to(path.as_ref(), &encode(document)?)
+}
+
+/// Frame + atomically write an ALREADY-ENCODED .fl0 (the runtime services fork
+/// under the gate and encode off it — they never hold a `FlowDocument`).
+pub fn save_snapshot_to(path: impl AsRef<Path>, snapshot: &[u8]) -> anyhow::Result<()> {
+  save_encoded_to(path.as_ref(), &encode_snapshot(snapshot)?)
+}
+
+fn save_encoded_to(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
   if let Some(parent) = path
     .parent()
     .filter(|parent| !parent.as_os_str().is_empty())
@@ -44,14 +53,18 @@ pub fn save_flow_document(path: impl AsRef<Path>, document: &FlowDocument) -> an
       .unwrap_or("flowstate"),
     Uuid::new_v4()
   ));
-  fs::write(&temp_path, encode(document)?).with_context(|| format!("failed to write temporary {}", temp_path.display()))?;
+  fs::write(&temp_path, bytes).with_context(|| format!("failed to write temporary {}", temp_path.display()))?;
   fs::rename(&temp_path, path).with_context(|| format!("failed to atomically replace {} with {}", path.display(), temp_path.display()))?;
   Ok(())
 }
 
 pub fn encode(document: &FlowDocument) -> anyhow::Result<Vec<u8>> {
-  let snapshot = document.snapshot()?;
-  let compressed = zstd::stream::encode_all(snapshot.as_slice(), 3)?;
+  encode_snapshot(&document.snapshot()?)
+}
+
+/// Frame a raw Loro snapshot as .fl0 v2 bytes.
+pub fn encode_snapshot(snapshot: &[u8]) -> anyhow::Result<Vec<u8>> {
+  let compressed = zstd::stream::encode_all(snapshot, 3)?;
   let mut bytes = Vec::with_capacity(MAGIC.len() + 8 + compressed.len());
   bytes.extend_from_slice(MAGIC);
   bytes.extend_from_slice(&VERSION.to_le_bytes());
@@ -61,6 +74,12 @@ pub fn encode(document: &FlowDocument) -> anyhow::Result<Vec<u8>> {
 }
 
 pub fn decode(bytes: &[u8]) -> anyhow::Result<FlowDocument> {
+  FlowDocument::from_snapshot(&decode_snapshot(bytes)?)
+}
+
+/// Unframe .fl0 v2 bytes back to the raw Loro snapshot (schema validation is
+/// the runtime's job — `from_snapshot` checks `flow.meta/schema_version`).
+pub fn decode_snapshot(bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
   let mut cursor = Cursor::new(bytes);
   let mut magic = [0; 8];
   cursor.read_exact(&mut magic)?;
@@ -86,8 +105,7 @@ pub fn decode(bytes: &[u8]) -> anyhow::Result<FlowDocument> {
   }
   let mut compressed = Vec::with_capacity(payload_len);
   cursor.read_to_end(&mut compressed)?;
-  let snapshot = zstd::stream::decode_all(compressed.as_slice())?;
-  FlowDocument::from_snapshot(&snapshot)
+  Ok(zstd::stream::decode_all(compressed.as_slice())?)
 }
 
 fn read_u32(cursor: &mut Cursor<&[u8]>) -> io::Result<u32> {
@@ -167,5 +185,20 @@ mod tests {
     let document = FlowDocument::new();
     let restored = decode(&encode(&document).unwrap()).unwrap();
     assert_eq!(document.projection(), restored.projection());
+  }
+
+  #[test]
+  fn snapshot_framing_round_trips() {
+    let document = FlowDocument::new();
+    let snapshot = document.snapshot().unwrap();
+    assert_eq!(decode_snapshot(&encode_snapshot(&snapshot).unwrap()).unwrap(), snapshot);
+  }
+
+  #[test]
+  fn rejects_v1_with_the_no_migration_message() {
+    let mut bytes = encode(&FlowDocument::new()).unwrap();
+    bytes[8..12].copy_from_slice(&1_u32.to_le_bytes());
+    let error = decode(&bytes).map(|_| ()).unwrap_err().to_string();
+    assert!(error.contains("pre-release format, never shipped"), "got: {error}");
   }
 }

@@ -31,6 +31,7 @@ use crate::crdt_runtime::{
   CrdtRuntime, RuntimeAssetMetadata, RuntimeCommentThread, RuntimeEvent, RuntimePresenceCaretRequest, RuntimePresenceCarets,
   RuntimeRevisionInfo, UndoSelectionSnapshot,
 };
+use crate::io_util::{gate_call, send_reply};
 use crate::local_write::{GateHolder, WriteGate};
 use crate::presence::PresenceSelection;
 
@@ -413,12 +414,6 @@ impl DocIoHandle {
         reply,
       })
       .await
-  }
-}
-
-fn send_reply<T>(reply: &Sender<Result<T>>, value: Result<T>) {
-  if let Err(error) = reply.try_send(value) {
-    tracing::warn!(%error, "doc I/O reply channel dropped before the reply was sent");
   }
 }
 
@@ -891,11 +886,4 @@ fn io_loop(core: &Arc<WriteGate<CrdtRuntime>>, receiver: &Receiver<IoRequest>) {
       tracing::error!(kind, elapsed_ms, "slow doc I/O request");
     }
   }
-}
-
-fn gate_call<T>(core: &Arc<WriteGate<CrdtRuntime>>, holder: GateHolder, call: impl FnOnce(&mut CrdtRuntime) -> Result<T>) -> Result<T> {
-  let mut guard = core
-    .lock(holder)
-    .map_err(|poisoned| anyhow::anyhow!(poisoned))?;
-  call(&mut guard)
 }

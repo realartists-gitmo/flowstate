@@ -179,6 +179,7 @@ async fn net_main(cmd_rx: async_channel::Receiver<NetCommand>, evt_tx: async_cha
             advertisement.session,
             vec![advertisement.endpoint],
             grant.title,
+            grant.document,
             grant.admission,
           ))
         }
