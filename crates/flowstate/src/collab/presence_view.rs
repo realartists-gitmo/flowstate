@@ -12,6 +12,11 @@ pub fn collaboration_recovery_path(session: SessionId, title: &str) -> PathBuf {
   dir.join(format!("{prefix}-{}.db8", sanitized_recovery_title(title)))
 }
 
+/// Flow twin of [`collaboration_recovery_path`] — a framed `.fl0`.
+pub fn collaboration_flow_recovery_path(session: SessionId, title: &str) -> PathBuf {
+  collaboration_recovery_path(session, title).with_extension("fl0")
+}
+
 fn sanitized_recovery_title(title: &str) -> String {
   let mut out = String::new();
   for ch in title.chars() {

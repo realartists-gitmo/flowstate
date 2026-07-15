@@ -316,6 +316,42 @@ impl Workspace {
           match result {
             Ok(Ok(joined)) => {
               tracing::info!(session = %joined.session, title = %joined.title, "collaboration join completed; opening joined document");
+              // Flow arm (spec S10): identical handoff over the flow services.
+              if matches!(joined.document, crate::collab::JoinedDocumentContent::Flow) {
+                let Some((handle, io)) = crate::collab::take_joined_flow_services_for_session(joined.session, cx) else {
+                  tracing::error!(session = %joined.session, "joined flow collaboration services are unavailable");
+                  std::mem::drop(window.prompt(
+                    PromptLevel::Critical,
+                    "Join failed",
+                    Some("The joined collaboration flow is unavailable."),
+                    &[PromptButton::ok("Ok")],
+                    cx,
+                  ));
+                  return;
+                };
+                let panel = workspace.add_joined_collaboration_flow_panel(joined.title, handle, io, window, cx);
+                let panel_id = panel.read(cx).id();
+                let editor = panel.read(cx).editor();
+                if let Err(error) = crate::collab::attach_joined_flow_session(joined.session, panel_id, editor, cx) {
+                  tracing::error!(session = %joined.session, %panel_id, error = %format_args!("{error:#}"), "joined flow collaboration attachment failed");
+                  let detail = format!("Joined flow opened, but collaboration attachment failed: {error:#}");
+                  std::mem::drop(window.prompt(
+                    PromptLevel::Critical,
+                    "Join failed",
+                    Some(&detail),
+                    &[PromptButton::ok("Ok")],
+                    cx,
+                  ));
+                } else if workspace.collaboration_dialog.is_some() {
+                  workspace.close_collaboration_dialog(cx);
+                  window.close_dialog(cx);
+                }
+                return;
+              }
+              let crate::collab::JoinedDocumentContent::RichText(document) = joined.document else {
+                return;
+              };
+              let document = *document;
               // Loro-first (spec §3 join gate): the session built the document
               // services from the initial snapshot import; the workspace now
               // takes the write authority + I/O handle and wires the panel
@@ -333,7 +369,7 @@ impl Workspace {
                 return;
               };
               let attachment = DocumentRuntimeAttachment { authority, io };
-              let panel = match workspace.add_joined_collaboration_panel(joined.document, joined.title, attachment, window, cx) {
+              let panel = match workspace.add_joined_collaboration_panel(document, joined.title, attachment, window, cx) {
                 Ok(panel) => panel,
                 Err(error) => {
                   tracing::error!(session = %joined.session, error = %format_args!("{error:#}"), "starting joined document runtime failed");
@@ -410,6 +446,28 @@ impl Workspace {
     self.persist_temporary_workspace_session(cx);
     cx.notify();
     Ok(panel)
+  }
+
+  /// S10: open the joined flow as a pathless tab wired to the pre-built
+  /// runtime; recovery riding + autosave-skip come from its pathlessness.
+  fn add_joined_collaboration_flow_panel(
+    &mut self,
+    title: String,
+    handle: std::sync::Arc<flowstate_collab::flow::FlowDocHandle>,
+    io: flowstate_collab::flow::FlowIoHandle,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) -> Entity<crate::flow::FlowPanel> {
+    let panel = self.create_flow_panel_titled(
+      FlowRuntimeSource::Attachment { handle, io },
+      None,
+      Some(title),
+      window,
+      cx,
+    );
+    self.persist_temporary_workspace_session(cx);
+    cx.notify();
+    panel
   }
 
   pub fn leave_collaboration_on_active_document(&mut self, cx: &mut Context<Self>) -> bool {

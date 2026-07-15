@@ -99,3 +99,64 @@ fn start_and_leave_flow_collaboration_session_round_trip(cx: &mut TestAppContext
     );
   });
 }
+
+/// Flow architecture S10 gate: the join handoff shape — a pathless flow panel
+/// wired from a PRE-BUILT runtime (the parked join authority), autosave
+/// skipped, recovery file written on edit and discarded on demand.
+#[gpui::test]
+fn joined_flow_panel_attachment_and_recovery_round_trip(cx: &mut TestAppContext) {
+  let h = support::open_workspace(cx);
+
+  // The "joined" runtime the session would park: a board with one sheet.
+  let runtime = flowstate_collab::flow::FlowRuntime::new_empty();
+  let (handle, gate) = flowstate_collab::flow::FlowDocHandle::new(runtime);
+  let io = flowstate_collab::flow::FlowIoHandle::spawn(gate).expect("flow io");
+  let handle = std::sync::Arc::new(handle);
+
+  let panel = h.update(cx, |ws, window, cx| {
+    ws.create_flow_panel_titled(
+      super::super::FlowRuntimeSource::Attachment {
+        handle: std::sync::Arc::clone(&handle),
+        io,
+      },
+      None,
+      Some("Shared board (shared)".into()),
+      window,
+      cx,
+    )
+  });
+  cx.run_until_parked();
+  let editor = h
+    .read(cx, |ws| ws.active_flow.clone())
+    .expect("joined flow active");
+  assert_eq!(panel.read_with(cx, |panel, _| panel.title_text().to_string()), "Shared board (shared)");
+  editor.read_with(cx, |editor, _cx| {
+    assert!(editor.document_path().is_none(), "joined flow tabs are pathless (autosave skips them)");
+  });
+
+  // Recovery: install a target, edit, wait for the debounced write.
+  let recovery = support::sandbox_config_dir().join("joined-flow-recovery.fl0");
+  editor.update(cx, |editor, cx| {
+    editor.set_recovery_path(Some(recovery.clone()), cx);
+    editor.create_sheet(cx);
+    editor.add_first_argument(cx);
+  });
+  cx.executor()
+    .advance_clock(std::time::Duration::from_secs(3));
+  cx.run_until_parked();
+  // The encode crosses the real flow-IO OS thread; give its reply time to
+  // wake the test executor.
+  for _ in 0..100 {
+    if recovery.exists() {
+      break;
+    }
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    cx.run_until_parked();
+  }
+  assert!(recovery.exists(), "debounced .fl0 recovery file must be written for a pathless flow tab");
+  let bytes = std::fs::read(&recovery).expect("recovery bytes");
+  assert_eq!(&bytes[..8], b"FLOWFL0\0", "recovery file carries the framed .fl0 magic");
+
+  editor.update(cx, |editor, _| editor.discard_recovery_file());
+  assert!(!recovery.exists(), "discard_recovery_file removes the file");
+}

@@ -267,7 +267,14 @@ impl CollabManager {
       .first()
       .map(|addr| addr.id)
       .ok_or_else(|| anyhow!("collaboration invite has no reachable participants"))?;
-    let collab = CollabSession::joining(session, ticket.title.clone(), commands.clone(), bootstrap.clone(), admission.clone());
+    let collab = CollabSession::joining(
+      session,
+      ticket.document,
+      ticket.title.clone(),
+      commands.clone(),
+      bootstrap.clone(),
+      admission.clone(),
+    );
     let entity = cx.new(|_| collab);
     self.register_session(entity.clone(), cx);
     let neighbor_rx = entity.update(cx, |session, cx| session.prepare_join_neighbor_wait(cx));
@@ -296,7 +303,7 @@ impl CollabManager {
     &mut self,
     session_id: SessionId,
     panel_id: Uuid,
-    editor: Entity<RichTextEditor>,
+    editor: super::CollabEditor,
     cx: &mut Context<T>,
   ) -> Result<()>
   where

@@ -1030,6 +1030,17 @@ impl Workspace {
     window: &mut Window,
     cx: &mut Context<Self>,
   ) -> Entity<FlowPanel> {
+    self.create_flow_panel_titled(source, path, None, window, cx)
+  }
+
+  pub(crate) fn create_flow_panel_titled(
+    &mut self,
+    source: FlowRuntimeSource,
+    path: Option<PathBuf>,
+    title_override: Option<String>,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) -> Entity<FlowPanel> {
     let (handle, io) = match source {
       FlowRuntimeSource::FromDocument(document) => {
         let runtime = flowstate_collab::flow::FlowRuntime::from_flow_document(&document).unwrap_or_else(|error| {
@@ -1046,11 +1057,13 @@ impl Workspace {
     };
     let editor = cx.new(|cx| FlowEditor::new_with_runtime(handle, io.clone(), path.clone(), window, cx));
     let workspace = cx.entity().downgrade();
-    let title = path
-      .as_ref()
-      .and_then(|path| path.file_name())
-      .map(|name| name.to_string_lossy().to_string())
-      .or_else(|| Some(self.next_untitled_flow_title(cx)));
+    let title = title_override.or_else(|| {
+      path
+        .as_ref()
+        .and_then(|path| path.file_name())
+        .map(|name| name.to_string_lossy().to_string())
+        .or_else(|| Some(self.next_untitled_flow_title(cx)))
+    });
     let panel = cx.new(|cx| FlowPanel::new_with_title(title, path, editor.clone(), workspace, window, cx));
     let id = panel.read(cx).id();
     self.editor_subscriptions.push((

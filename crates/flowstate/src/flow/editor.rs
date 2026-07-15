@@ -113,6 +113,10 @@ pub struct FlowEditor {
   /// True while a live collaboration session drains the publish queue; the
   /// editor must NOT sink it then (S9 — the session is the drainer).
   session_attached: bool,
+  /// S10: pathless collaboration tabs write a debounced `.fl0` recovery file
+  /// here so a crash never loses a joined flow.
+  recovery_path: Option<PathBuf>,
+  recovery_write_pending: bool,
   drag_autoscroll: Option<gpui::Point<gpui::Pixels>>,
   drag_autoscroll_scheduled: bool,
   drag_log: Option<telemetry::DragLogSession>,
@@ -175,6 +179,8 @@ impl FlowEditor {
       replug_cell: None,
       intent_log: std::collections::VecDeque::new(),
       session_attached: false,
+      recovery_path: None,
+      recovery_write_pending: false,
       drag_autoscroll: None,
       drag_autoscroll_scheduled: false,
       drag_log: None,
@@ -277,6 +283,7 @@ impl FlowEditor {
     self.undo_state = self.handle.can_undo().unwrap_or((false, false));
     self.prune_dead_cells(cx);
     self.sink_publish_queue();
+    self.schedule_recovery_write(cx);
   }
 
   fn sink_publish_queue(&self) {
@@ -962,7 +969,65 @@ impl FlowEditor {
     })
   }
 
-  pub fn discard_recovery_file(&mut self) {}
+  /// S10: install (or clear) the crash-recovery target for a pathless
+  /// collaboration tab. Writes are debounced off `after_local_change`.
+  pub fn set_recovery_path(&mut self, path: Option<PathBuf>, cx: &mut Context<Self>) {
+    self.recovery_path = path;
+    if self.recovery_path.is_some() {
+      self.schedule_recovery_write(cx);
+    }
+  }
+
+  pub fn recovery_path(&self) -> Option<&PathBuf> {
+    self.recovery_path.as_ref()
+  }
+
+  fn schedule_recovery_write(&mut self, cx: &mut Context<Self>) {
+    if self.recovery_write_pending || self.path.is_some() || self.recovery_path.is_none() {
+      return;
+    }
+    self.recovery_write_pending = true;
+    let io = self.io.clone();
+    cx.spawn(async move |editor, cx| {
+      cx.background_executor()
+        .timer(std::time::Duration::from_secs(2))
+        .await;
+      let Ok(target) = editor.update(cx, |editor, _| {
+        editor.recovery_write_pending = false;
+        // A save-as landed meanwhile: the real file supersedes recovery.
+        editor
+          .path
+          .is_none()
+          .then(|| editor.recovery_path.clone())
+          .flatten()
+      }) else {
+        return;
+      };
+      let Some(target) = target else {
+        return;
+      };
+      match io.encode_bytes().await {
+        Ok(bytes) => {
+          if let Err(error) = std::fs::write(&target, bytes) {
+            tracing::warn!(path = %target.display(), %error, "writing flow recovery file failed");
+          }
+        },
+        Err(error) => {
+          tracing::warn!(error = %format_args!("{error:#}"), "encoding flow recovery bytes failed");
+        },
+      }
+    })
+    .detach();
+  }
+
+  pub fn discard_recovery_file(&mut self) {
+    if let Some(path) = self.recovery_path.take()
+      && let Err(error) = std::fs::remove_file(&path)
+      && error.kind() != std::io::ErrorKind::NotFound
+    {
+      tracing::warn!(path = %path.display(), %error, "discarding flow recovery file failed");
+    }
+  }
 
   pub fn resolve_pending(&mut self, _cx: &mut Context<Self>) {}
 

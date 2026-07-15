@@ -23,8 +23,8 @@ use crate::rich_text_element::RichTextEditor;
 pub use discovery_runtime::DiscoveryScanResult;
 pub use manager::{CollabManager, JoinRequest};
 pub use session::{
-  Attachment, CollabEditor, CollabSession, Connectivity, DetachReason, JoinStage, JoinedDocument, SessionNotice, SessionPhase,
-  SessionRosterEntry,
+  Attachment, CollabEditor, CollabSession, Connectivity, DetachReason, JoinStage, JoinedDocument, JoinedDocumentContent, SessionNotice,
+  SessionPhase, SessionRosterEntry,
 };
 pub use shutdown::shutdown;
 
@@ -87,7 +87,35 @@ pub fn attach_joined_session<T>(session_id: SessionId, panel_id: Uuid, editor: E
 where
   T: 'static,
 {
-  cx.update_default_global::<CollabManager, _>(|manager, cx| manager.attach_joined_session(session_id, panel_id, editor, cx))
+  cx.update_default_global::<CollabManager, _>(|manager, cx| {
+    manager.attach_joined_session(session_id, panel_id, CollabEditor::RichText(editor), cx)
+  })
+}
+
+pub fn attach_joined_flow_session<T>(
+  session_id: SessionId,
+  panel_id: Uuid,
+  editor: Entity<crate::flow::FlowEditor>,
+  cx: &mut Context<T>,
+) -> Result<()>
+where
+  T: 'static,
+{
+  cx.update_default_global::<CollabManager, _>(|manager, cx| manager.attach_joined_session(session_id, panel_id, CollabEditor::Flow(editor), cx))
+}
+
+/// Flow twin of [`take_joined_document_services_for_session`] (spec S10).
+pub fn take_joined_flow_services_for_session<T>(
+  session_id: SessionId,
+  cx: &mut Context<T>,
+) -> Option<(Arc<flowstate_collab::flow::FlowDocHandle>, flowstate_collab::flow::FlowIoHandle)>
+where
+  T: 'static,
+{
+  cx.update_default_global::<CollabManager, _>(|manager, cx| {
+    let session = manager.session_for_id(session_id)?;
+    session.update(cx, |session, _| session.take_joined_flow_services())
+  })
 }
 
 pub fn leave_session_for_panel<T>(panel_id: Uuid, cx: &mut Context<T>) -> bool

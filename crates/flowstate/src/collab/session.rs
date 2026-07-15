@@ -95,7 +95,15 @@ pub(super) enum JoinNeighborSignal {
 pub struct JoinedDocument {
   pub session: SessionId,
   pub title: String,
-  pub document: DocumentProjection,
+  pub document: JoinedDocumentContent,
+}
+
+/// What the join built, by document family (spec S10): rich text hands the
+/// panel its initial projection; a flow panel builds its board straight from
+/// the parked authority.
+pub enum JoinedDocumentContent {
+  RichText(Box<DocumentProjection>),
+  Flow,
 }
 
 #[derive(Clone, Debug)]
@@ -114,6 +122,12 @@ pub enum CollabEditor {
   Flow(Entity<FlowEditor>),
 }
 
+/// The parked write authority a join built, by document family (S10).
+pub(super) enum JoinedAuthority {
+  RichText(Arc<LocalDocHandle>),
+  Flow(Arc<flowstate_collab::flow::FlowDocHandle>),
+}
+
 pub struct CollabSession {
   session: SessionId,
   title: String,
@@ -128,7 +142,7 @@ pub struct CollabSession {
   // JOIN handoff slot (spec §3 join gate): the write authority constructed by
   // `finish_join_snapshot`, held ONLY until the workspace takes it via
   // `take_joined_document_services`. The session never calls into it.
-  join_authority: Option<Arc<LocalDocHandle>>,
+  join_authority: Option<JoinedAuthority>,
   runtime_vv: Vec<u8>,
   editor: Option<CollabEditor>,
   panel_id: Option<Uuid>,
@@ -272,11 +286,25 @@ impl CollabSession {
       panel_id: Some(panel_id),
       direct_tx,
       direct_rx,
-      ..Self::joining(session, title, net_tx, Vec::new(), SessionAdmission::generate())
+      ..Self::joining(
+        session,
+        flowstate_collab::DocumentKind::Flow,
+        title,
+        net_tx,
+        Vec::new(),
+        SessionAdmission::generate(),
+      )
     }
   }
 
-  pub fn joining(session: SessionId, title: String, net_tx: CommandSender, bootstrap_addrs: Vec<PeerAddr>, admission: SessionAdmission) -> Self {
+  pub fn joining(
+    session: SessionId,
+    kind: flowstate_collab::DocumentKind,
+    title: String,
+    net_tx: CommandSender,
+    bootstrap_addrs: Vec<PeerAddr>,
+    admission: SessionAdmission,
+  ) -> Self {
     let collaboration_role = CollaborationRole::Editor;
     let (direct_tx, direct_rx) = async_channel::bounded(DIRECT_REQUEST_CHANNEL_CAPACITY);
     let now = Instant::now();
@@ -285,7 +313,7 @@ impl CollabSession {
       session,
       title,
       phase: SessionPhase::Joining(JoinStage::Resolving),
-      kind: flowstate_collab::DocumentKind::RichText,
+      kind,
       runtime: None,
       join_authority: None,
       runtime_vv: Vec::new(),
@@ -553,7 +581,7 @@ impl CollabSession {
     Ok(reply_rx)
   }
 
-  pub fn attach_joined_editor(&mut self, panel_id: Uuid, editor: Entity<RichTextEditor>, cx: &mut Context<Self>) -> Result<()> {
+  pub fn attach_joined_editor(&mut self, panel_id: Uuid, editor: CollabEditor, cx: &mut Context<Self>) -> Result<()> {
     if self.runtime.is_none() {
       tracing::warn!(session = %self.session, %panel_id, "cannot attach joined editor before snapshot load finishes");
       bail!("collaboration snapshot has not finished loading");
@@ -567,7 +595,7 @@ impl CollabSession {
       "attaching joined collaboration editor",
     );
     self.panel_id = Some(panel_id);
-    self.editor = Some(CollabEditor::RichText(editor));
+    self.editor = Some(editor);
     self.attach(cx);
 
     let pending_updates = std::mem::take(&mut self.pending_remote_updates);
@@ -647,8 +675,25 @@ impl CollabSession {
   /// after the services were already taken.
   pub fn take_joined_document_services(&mut self) -> Option<(Arc<LocalDocHandle>, DocIoHandle)> {
     let io = self.doc_io()?;
-    let authority = self.join_authority.take()?;
-    Some((authority, io))
+    match self.join_authority.take()? {
+      JoinedAuthority::RichText(authority) => Some((authority, io)),
+      other @ JoinedAuthority::Flow(_) => {
+        self.join_authority = Some(other);
+        None
+      },
+    }
+  }
+
+  /// Flow twin of [`Self::take_joined_document_services`] (spec S10).
+  pub fn take_joined_flow_services(&mut self) -> Option<(Arc<flowstate_collab::flow::FlowDocHandle>, flowstate_collab::flow::FlowIoHandle)> {
+    let io = self.flow_io()?;
+    match self.join_authority.take()? {
+      JoinedAuthority::Flow(authority) => Some((authority, io)),
+      other @ JoinedAuthority::RichText(_) => {
+        self.join_authority = Some(other);
+        None
+      },
+    }
   }
 
   /// Single fidelity-instrumented write point for the cached runtime version
@@ -794,6 +839,9 @@ impl CollabSession {
     cx.notify();
     self.phase = SessionPhase::Joining(JoinStage::Building);
     cx.notify();
+    if self.kind == flowstate_collab::DocumentKind::Flow {
+      return self.finish_join_flow_snapshot(snapshot);
+    }
 
     let doc = LoroDoc::new();
     flowstate_document::loro_schema::configure_text_styles(&doc);
@@ -847,7 +895,7 @@ impl CollabSession {
     );
 
     self.runtime = Some(flowstate_collab::SyncIoHandle::RichText(io));
-    self.join_authority = Some(Arc::new(authority));
+    self.join_authority = Some(JoinedAuthority::RichText(Arc::new(authority)));
     fidelity::event(FidelityClass::Frontier, "runtime-vv-reset", || {
       format!("session={} source=join-snapshot prior_bytes={}", self.session, self.runtime_vv.len())
     });
@@ -855,7 +903,29 @@ impl CollabSession {
     Ok(JoinedDocument {
       session: self.session,
       title: format!("{} (shared)", self.title),
-      document,
+      document: JoinedDocumentContent::RichText(Box::new(document)),
+    })
+  }
+
+  /// Flow arm of the join gate (spec S10): the raw Loro snapshot becomes a
+  /// gated `FlowRuntime`; the authority parks for the workspace handoff and the
+  /// session keeps only the flow I/O arm.
+  fn finish_join_flow_snapshot(&mut self, snapshot: &[u8]) -> Result<JoinedDocument> {
+    let runtime =
+      flowstate_collab::flow::FlowRuntime::from_snapshot(snapshot).context("building joined flow runtime from collaboration snapshot")?;
+    let (handle, gate) = flowstate_collab::flow::FlowDocHandle::new(runtime);
+    let io = flowstate_collab::flow::FlowIoHandle::spawn(gate).context("starting joined flow collaboration I/O service")?;
+    self.runtime = Some(flowstate_collab::SyncIoHandle::Flow(io));
+    self.join_authority = Some(JoinedAuthority::Flow(Arc::new(handle)));
+    fidelity::event(FidelityClass::Frontier, "runtime-vv-reset", || {
+      format!("session={} source=join-flow-snapshot prior_bytes={}", self.session, self.runtime_vv.len())
+    });
+    self.runtime_vv.clear();
+    tracing::info!(session = %self.session, "built joined flow runtime from collaboration snapshot");
+    Ok(JoinedDocument {
+      session: self.session,
+      title: format!("{} (shared)", self.title),
+      document: JoinedDocumentContent::Flow,
     })
   }
 
@@ -890,7 +960,10 @@ impl CollabSession {
     if let Some(editor) = self.flow_editor() {
       // Flow arm (invariant 5 identically): the tab freezes to a local doc;
       // the editor resumes sinking its own publish queue.
-      editor.update(cx, |editor, cx| editor.set_session_attached(false, cx));
+      editor.update(cx, |editor, cx| {
+        editor.set_session_attached(false, cx);
+        editor.set_recovery_path(None, cx);
+      });
     }
     if let Some(editor) = self.rich_text_editor() {
       editor.update(cx, |editor, cx| {
@@ -1263,7 +1336,12 @@ impl CollabSession {
   /// while attached (the session is the drainer).
   fn attach_flow_editor_hooks(&mut self, editor: &Entity<FlowEditor>, cx: &mut Context<Self>) {
     tracing::debug!(session = %self.session, "attaching flow collaboration editor hooks");
-    editor.update(cx, |editor, cx| editor.set_session_attached(true, cx));
+    editor.update(cx, |editor, cx| {
+      editor.set_session_attached(true, cx);
+      if editor.document_path().is_none() {
+        editor.set_recovery_path(Some(presence_view::collaboration_flow_recovery_path(self.session, &self.title)), cx);
+      }
+    });
     self
       .editor_subscriptions
       .push(cx.observe(editor, |session, _, cx| {
