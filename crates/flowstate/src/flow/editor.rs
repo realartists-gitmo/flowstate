@@ -132,6 +132,9 @@ pub struct FlowEditor {
   hidden_annotation_sheets: HashSet<SheetId>,
   hidden_annotation_originators: HashSet<AnnotationOriginator>,
   local_annotation_originator: AnnotationOriginator,
+  /// I-S2: the pen's current color (theme-derived swatches on the marker
+  /// chip). Flowing tradition is color-coded pens.
+  marker_color_rgba: u32,
   drawing_points: Vec<BoardPoint>,
   cell_editors: std::collections::HashMap<CellId, Entity<RichTextEditor>>,
   cell_editor_themes: std::collections::HashMap<CellId, (gpui::Hsla, gpui::Hsla, u32)>,
@@ -213,6 +216,7 @@ impl FlowEditor {
       // I-S1: strokes author under the durable user identity. The literal
       // "local" was every peer's stamp before this — ownership was fiction.
       local_annotation_originator: AnnotationOriginator(crate::app_settings::load_local_user_identity().0.to_string()),
+      marker_color_rgba: 0xf59e_0bff,
       drawing_points: Vec::new(),
       cell_editors: std::collections::HashMap::new(),
       cell_editor_themes: std::collections::HashMap::new(),

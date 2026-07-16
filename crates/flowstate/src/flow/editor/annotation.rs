@@ -5,6 +5,18 @@ use gpui_component::PixelsExt as _;
 use super::{AnnotationTool, FlowEditor};
 
 impl FlowEditor {
+  pub fn marker_color_rgba(&self) -> u32 {
+    self.marker_color_rgba
+  }
+
+  /// I-S2: pick a pen color (and arm the marker — picking a pen means you
+  /// want to draw).
+  pub fn set_marker_color(&mut self, color_rgba: u32, cx: &mut Context<Self>) {
+    self.marker_color_rgba = color_rgba;
+    self.annotation_tool = AnnotationTool::Marker;
+    cx.notify();
+  }
+
   pub fn set_annotation_tool(&mut self, tool: AnnotationTool, cx: &mut Context<Self>) {
     self.annotation_tool = tool;
     cx.notify();
@@ -147,7 +159,9 @@ impl FlowEditor {
       originator: self.local_annotation_originator.clone(),
       points,
       style: StrokeStyle {
-        color_rgba: 0xf59e_0bff,
+        // I-S2: the chosen pen color (color_rgba was in every stroke blob all
+        // along — only the hardcoded amber ever reached it).
+        color_rgba: self.marker_color_rgba,
         width: 4.0,
         opacity: 0.55,
       },

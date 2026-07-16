@@ -223,9 +223,18 @@ pub fn execute_intent(doc: &LoroDoc, board: &FlowBoardProjection, intent: &FlowI
       let Some(bytes) = map_binary(&map, &key) else {
         bail!("unknown annotation {stroke_id}");
       };
-      let stroke: crate::projection::AnnotationStroke = postcard::from_bytes(&bytes)?;
-      if stroke.sheet_id != *sheet_id || &stroke.originator != originator {
-        bail!("annotation {stroke_id} does not match sheet/originator");
+      // I-S2 hardening: an UNDECODABLE stroke must not be immortal — the old
+      // `?` made corrupt blobs undeletable while the materializer silently
+      // skipped them (invisible AND unremovable).
+      match postcard::from_bytes::<crate::projection::AnnotationStroke>(&bytes) {
+        Ok(stroke) => {
+          if stroke.sheet_id != *sheet_id || &stroke.originator != originator {
+            bail!("annotation {stroke_id} does not match sheet/originator");
+          }
+        },
+        Err(error) => {
+          tracing::warn!(%error, stroke = %stroke_id, "deleting undecodable annotation blob");
+        },
       }
       map.delete(&key)?;
       Ok(MutationReport::default())

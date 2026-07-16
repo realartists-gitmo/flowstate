@@ -317,6 +317,43 @@ impl Render for FlowRibbon {
             )
             .on_click(move |_, _, cx| marker_editor.update(cx, |editor, cx| editor.toggle_annotation_tool(AnnotationTool::Marker, cx))),
           )
+          // I-S2: the pen palette — theme-derived swatches (paper flowing is
+          // color-coded); picking one arms the marker. color_rgba was in
+          // every stroke blob all along; only hardcoded amber ever reached it.
+          .child({
+            let swatches: Vec<(&'static str, gpui::Hsla)> = vec![
+              ("amber", cx.theme().warning),
+              ("red", cx.theme().danger),
+              ("blue", cx.theme().link),
+              ("green", cx.theme().success),
+              ("ink", cx.theme().foreground),
+            ];
+            let current = self.editor.read(cx).marker_color_rgba();
+            gpui::div().flex().flex_row().items_center().gap_0p5().children(swatches.into_iter().map(|(name, color)| {
+              let rgba = gpui::Rgba::from(color);
+              let color_u32 = (u32::from((rgba.r * 255.0) as u8) << 24)
+                | (u32::from((rgba.g * 255.0) as u8) << 16)
+                | (u32::from((rgba.b * 255.0) as u8) << 8)
+                | 0xff;
+              let editor = self.editor.clone();
+              gpui::div()
+                .id(gpui::SharedString::from(format!("flow-pen-{name}")))
+                .size(gpui::px(14.0))
+                .rounded_full()
+                .bg(color)
+                .border_2()
+                .border_color(if current == color_u32 {
+                  cx.theme().foreground
+                } else {
+                  cx.theme().border.opacity(0.4)
+                })
+                .cursor_pointer()
+                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                  editor.update(cx, |editor, cx| editor.set_marker_color(color_u32, cx));
+                  cx.stop_propagation();
+                })
+            }))
+          })
           .child(
             chip(
               RibbonChip::new("flow-arm-eraser", "Eraser", "Erase strokes")

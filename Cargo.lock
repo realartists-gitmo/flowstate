@@ -3290,6 +3290,7 @@ dependencies = [
  "loro",
  "postcard",
  "serde",
+ "tracing",
  "uuid",
  "zstd",
 ]

@@ -361,6 +361,8 @@ fn sheet_annotations(doc: &LoroDoc, sheet_id: SheetId) -> Vec<AnnotationStroke> 
       continue;
     };
     let Ok(stroke) = postcard::from_bytes::<AnnotationStroke>(&bytes) else {
+      // I-S2 hardening: silent refusal is a defect — an invisible stroke too.
+      tracing::warn!("skipping undecodable annotation blob in projection");
       continue;
     };
     if key != stroke.id.to_string() || stroke.sheet_id != sheet_id {
