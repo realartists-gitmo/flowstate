@@ -36,6 +36,45 @@ impl Workspace {
           .flex()
           .flex_col()
           .when_some(active_search_bar, |this, search_bar| this.child(search_bar))
+          // B-S10: the inline alt-text editor floats over the pane.
+          .when_some(self.alt_text_editor.clone(), |this, input| {
+            this.child(
+              h_flex()
+                .w_full()
+                .items_center()
+                .gap_2()
+                .px_3()
+                .py_1p5()
+                .border_b_1()
+                .border_color(cx.theme().border)
+                .bg(cx.theme().secondary)
+                .child(div().text_xs().text_color(cx.theme().muted_foreground).flex_none().child("Alt text"))
+                .child(div().flex_1().child(Input::new(&input)))
+                .child(
+                  Button::new("alt-text-save")
+                    .xsmall()
+                    .primary()
+                    .label("Save")
+                    .on_click(cx.listener(move |workspace, _, _, cx| {
+                      let value = workspace
+                        .alt_text_editor
+                        .as_ref()
+                        .map(|input| input.read(cx).value().to_string());
+                      if let (Some(value), Some(editor)) = (value, workspace.active_editor.clone()) {
+                        editor.update(cx, |editor, cx| editor.set_selected_image_alt_text(value, cx));
+                      }
+                      workspace.close_alt_text_editor(cx);
+                    })),
+                )
+                .child(
+                  Button::new("alt-text-cancel")
+                    .xsmall()
+                    .ghost()
+                    .label("Cancel")
+                    .on_click(cx.listener(|workspace, _, _, cx| workspace.close_alt_text_editor(cx))),
+                ),
+            )
+          })
           // H-S3: history mode commandeers the viewport for its panel.
           .when_some(
             self

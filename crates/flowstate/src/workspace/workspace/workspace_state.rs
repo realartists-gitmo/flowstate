@@ -719,6 +719,24 @@ impl Workspace {
         },
         EditorContextTarget::Image { .. } => menu
           .min_w(px(200.0))
+          // B-S10: the dead trio ships — alt text and alignment had complete
+          // intent/CRDT/fuzz plumbing and zero UI callers.
+          .item({
+            let alt_workspace = workspace.clone();
+            PopupMenuItem::new("Edit Alt Text…").on_click(move |_, window, cx| {
+              let _ = alt_workspace.update(cx, |workspace, cx| workspace.open_alt_text_editor(window, cx));
+            })
+          })
+          .item(command_menu_item(workspace.clone(), "Align Left", None, false, with_editor(|editor, cx| {
+            editor.set_selected_image_alignment(crate::rich_text_element::BlockAlignment::Left, cx);
+          })))
+          .item(command_menu_item(workspace.clone(), "Align Center", None, false, with_editor(|editor, cx| {
+            editor.set_selected_image_alignment(crate::rich_text_element::BlockAlignment::Center, cx);
+          })))
+          .item(command_menu_item(workspace.clone(), "Align Right", None, false, with_editor(|editor, cx| {
+            editor.set_selected_image_alignment(crate::rich_text_element::BlockAlignment::Right, cx);
+          })))
+          .separator()
           .item(command_menu_item(workspace.clone(), "Fit Width", None, false, with_editor(|editor, cx| {
             editor.set_selected_image_fit_width(cx);
           })))
@@ -926,6 +944,43 @@ impl Workspace {
     }
     cx.notify();
     self.persist_temporary_workspace_session(cx);
+  }
+
+  /// B-S10: open the inline alt-text editor prefilled with the selected
+  /// image's current description.
+  pub(crate) fn open_alt_text_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    let Some(editor) = self.active_editor.clone() else {
+      return;
+    };
+    let Some(current) = editor.read(cx).selected_image_alt_text() else {
+      self.report_failure("Select an image first — alt text lives on the image.", None, cx);
+      return;
+    };
+    let input = cx.new(|cx| {
+      InputState::new(window, cx)
+        .default_value(current.to_string())
+        .placeholder("Describe the image (screen readers + exported descr)")
+    });
+    cx.subscribe_in(&input, window, move |workspace: &mut Self, input, event: &InputEvent, _, cx| {
+      if matches!(event, InputEvent::PressEnter { .. }) {
+        let value = input.read(cx).value().to_string();
+        if let Some(editor) = workspace.active_editor.clone() {
+          editor.update(cx, |editor, cx| editor.set_selected_image_alt_text(value, cx));
+        }
+        workspace.alt_text_editor = None;
+        cx.notify();
+      }
+    })
+    .detach();
+    input.update(cx, |input, cx| input.focus(window, cx));
+    self.alt_text_editor = Some(input);
+    cx.notify();
+  }
+
+  pub(crate) fn close_alt_text_editor(&mut self, cx: &mut Context<Self>) {
+    if self.alt_text_editor.take().is_some() {
+      cx.notify();
+    }
   }
 
   pub(crate) fn toggle_speech_document(&mut self, panel_id: Uuid, cx: &mut Context<Self>) {

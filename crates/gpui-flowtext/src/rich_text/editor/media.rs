@@ -168,6 +168,17 @@ impl RichTextEditor {
     }
   }
 
+  /// B-S10: the selected image's current alt text (feeds the edit affordance).
+  pub fn selected_image_alt_text(&self) -> Option<SharedString> {
+    let BlockSelection::Image(block_ix) = self.selected_block? else {
+      return None;
+    };
+    match self.document.blocks.get(block_ix)? {
+      Block::Image(image) => Some(image.alt_text.clone()),
+      _ => None,
+    }
+  }
+
   pub fn set_selected_image_alt_text(&mut self, alt_text: impl Into<SharedString>, cx: &mut Context<Self>) {
     let Some(BlockSelection::Image(block_ix)) = self.selected_block else {
       return;

@@ -130,6 +130,9 @@ pub struct Workspace {
   outline_scrolled_paragraph: Option<usize>,
   editor_subscriptions: Vec<(Uuid, Subscription)>,
   settings_overlay: Option<WorkspaceSettingsOverlay>,
+  /// B-S10: the inline image alt-text editor (context menu → Edit Alt Text…).
+  /// The intent plumbing existed fully fuzz-tested with ZERO UI callers.
+  alt_text_editor: Option<Entity<InputState>>,
   document_style_picker_revision: u64,
   document_style_section: DocumentStyleSection,
   settings_section: WorkspaceSettingsSection,

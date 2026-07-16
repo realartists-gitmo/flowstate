@@ -261,6 +261,7 @@ impl Workspace {
       outline_scrolled_paragraph: None,
       editor_subscriptions: Vec::new(),
       settings_overlay: None,
+      alt_text_editor: None,
       document_style_picker_revision: 0,
       document_style_section: DocumentStyleSection::Text,
       settings_section: WorkspaceSettingsSection::General,
