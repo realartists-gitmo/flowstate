@@ -63,12 +63,25 @@ impl Workspace {
     let new_flow = cx.listener(|workspace, _, window, cx| workspace.new_flow(window, cx));
     let open_document = cx.listener(|workspace, _, window, cx| workspace.prompt_open_document(window, cx));
     let open_search = cx.listener(|workspace, _, window, cx| workspace.open_file_search_overlay(window, cx));
-    let recent_documents = self
-      .recent_documents
+    // R5-B: pinned recents float first and never age out; MRU fills the rest.
+    let mut recent_documents: Vec<PathBuf> = self
+      .pinned_recent_documents
       .iter()
-      .take(3)
+      .filter(|path| path.exists())
       .cloned()
-      .collect::<Vec<_>>();
+      .collect();
+    for path in &self.recent_documents {
+      if recent_documents.len() >= 6 {
+        break;
+      }
+      if !recent_documents.contains(path) {
+        recent_documents.push(path.clone());
+      }
+    }
+    recent_documents.truncate(6);
+    let pinned: std::collections::HashSet<PathBuf> = self.pinned_recent_documents.iter().cloned().collect();
+    let resume_available = self.document_panels.is_empty() && self.flow_panels.is_empty() && Self::persisted_session_available();
+    let recovered = self.recovered_work.clone();
     v_flex()
       .size_full()
       .items_center()
@@ -111,8 +124,88 @@ impl Workspace {
               .icon(Icon::new(IconName::Search).text_color(cx.theme().secondary_foreground))
               .label("Search")
               .on_click(open_search),
-          ),
+          )
+          .when(resume_available, |this| {
+            this.child(
+              Button::new("empty-resume-session")
+                .icon(Icon::new(IconName::ArrowRight).text_color(cx.theme().secondary_foreground))
+                .label("Resume last session")
+                .on_click(cx.listener(|workspace, _, window, cx| workspace.resume_persisted_session(window, cx))),
+            )
+          }),
       )
+      // R3-A: the recovered-work shelf — orphaned recovery snapshots from a
+      // crash surface HERE with provenance; opening is deliberate and lands
+      // a pathless "Recovered — …" tab.
+      .when(!recovered.is_empty(), |this| {
+        this.child(
+          v_flex()
+            .w_full()
+            .px_8()
+            .pt_2()
+            .gap_2()
+            .child(
+              div()
+                .text_sm()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(cx.theme().foreground)
+                .child("Recovered work"),
+            )
+            .children(recovered.into_iter().enumerate().map(|(ix, entry)| {
+              let source_name = entry
+                .source_path
+                .file_name()
+                .map_or_else(|| entry.source_path.display().to_string(), |name| name.to_string_lossy().to_string());
+              let provenance = format!(
+                "{}{}",
+                entry.source_path.display(),
+                entry
+                  .modified_at
+                  .and_then(|at| at.elapsed().ok())
+                  .map(|elapsed| format!(" · saved {}m ago", elapsed.as_secs() / 60))
+                  .unwrap_or_default()
+              );
+              let open_entry = cx.listener({
+                let entry = entry.clone();
+                move |workspace, _, window, cx| workspace.open_recovered_work(&entry, window, cx)
+              });
+              h_flex()
+                .id(("empty-recovered-work", ix))
+                .w_full()
+                .items_center()
+                .justify_between()
+                .gap_3()
+                .px_3()
+                .py_2()
+                .rounded(cx.theme().radius)
+                .border_1()
+                .border_color(cx.theme().border)
+                .bg(cx.theme().secondary)
+                .cursor_pointer()
+                .hover(|style| style.bg(cx.theme().secondary_hover))
+                .on_click(open_entry)
+                .child(
+                  v_flex()
+                    .min_w_0()
+                    .child(
+                      div()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(cx.theme().foreground)
+                        .child(format!("Recovered — {source_name}")),
+                    )
+                    .child(div().text_xs().text_color(cx.theme().secondary_foreground).child(provenance)),
+                )
+                .child(
+                  div()
+                    .text_xs()
+                    .text_color(cx.theme().primary)
+                    .child("Open"),
+                )
+                .into_any_element()
+            })),
+        )
+      })
       .when(!recent_documents.is_empty(), |this| {
         this.child(
           h_flex()
@@ -202,13 +295,44 @@ impl Workspace {
                     ),
                 )
                 .child(
-                  div()
+                  h_flex()
                     .min_w_0()
                     .flex_none()
-                    .text_sm()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(cx.theme().foreground)
-                    .child(title),
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                      div()
+                        .min_w_0()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(cx.theme().foreground)
+                        .child(title),
+                    )
+                    .child(
+                      // R5-B: pin/unpin — pinned recents never age out.
+                      div()
+                        .id(("empty-recent-pin", ix))
+                        .flex_none()
+                        .px_1()
+                        .rounded(px(3.0))
+                        .cursor_pointer()
+                        .text_xs()
+                        .text_color(if pinned.contains(&path) {
+                          cx.theme().primary
+                        } else {
+                          cx.theme().muted_foreground
+                        })
+                        .hover(|style| style.text_color(cx.theme().primary))
+                        .on_click(cx.listener({
+                          let path = path.clone();
+                          move |workspace, _, _, cx| {
+                            cx.stop_propagation();
+                            workspace.toggle_recent_pin(&path, cx);
+                          }
+                        }))
+                        .child(if pinned.contains(&path) { "★" } else { "☆" }),
+                    ),
                 )
                 .child(
                   div()

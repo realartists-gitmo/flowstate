@@ -326,6 +326,21 @@ fn install_flowtext_adapters() {
   let _ = set_document_export_adapter(adapter);
 }
 
+/// R3-A: a crash must not race the recovery writer. The hook gives
+/// in-flight recovery snapshot writes a short grace window before the
+/// default panic behavior proceeds, so the freshest snapshot lands and the
+/// home-surface shelf has something true to offer after a restart.
+fn install_recovery_panic_hook() {
+  let previous = std::panic::take_hook();
+  std::panic::set_hook(Box::new(move |info| {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while crate::workspace::recovery_writes_in_flight() > 0 && std::time::Instant::now() < deadline {
+      std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    previous(info);
+  }));
+}
+
 /// Run the rich text processor by itself for focused component development.
 #[hotpath::measure]
 pub fn run_standalone(mut document_path: Option<PathBuf>) {
@@ -356,6 +371,7 @@ pub fn run_standalone(mut document_path: Option<PathBuf>) {
     register_rich_text_editor_keybindings(cx);
     install_prompt_renderer(cx);
     install_flowtext_adapters();
+    install_recovery_panic_hook();
     // W-S1: with multiple windows a "quit" is N close requests — the process
     // must actually exit once the last window is gone.
     cx.on_window_closed(|cx| {

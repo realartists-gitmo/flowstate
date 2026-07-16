@@ -216,6 +216,17 @@ pub fn load_recent_documents() -> Vec<PathBuf> {
   load_app_settings().recent_documents
 }
 
+/// R5-B: home-surface pinned recents.
+pub fn load_pinned_recent_documents() -> Vec<PathBuf> {
+  load_app_settings().pinned_recent_documents
+}
+
+pub fn save_pinned_recent_documents(pinned: Vec<PathBuf>) -> io::Result<()> {
+  let mut settings = load_app_settings();
+  settings.pinned_recent_documents = pinned;
+  save_app_settings(settings)
+}
+
 pub fn load_keymap_entries() -> Vec<crate::commands::KeymapEntry> {
   load_app_settings().keymap
 }

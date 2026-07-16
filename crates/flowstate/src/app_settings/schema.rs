@@ -41,6 +41,10 @@ pub struct AppSettings {
   pub editor: EditorSettings,
   pub toolkit: ToolkitSettings,
   pub recent_documents: Vec<PathBuf>,
+  /// R5-B: home-surface pins — recents the user nailed down; they float
+  /// ahead of the MRU order and never age out.
+  #[serde(default)]
+  pub pinned_recent_documents: Vec<PathBuf>,
   pub trusted_collaborators: Vec<TrustedCollaborator>,
   pub collaboration_squads: Vec<CollaborationSquad>,
   pub keymap: Vec<crate::commands::KeymapEntry>,

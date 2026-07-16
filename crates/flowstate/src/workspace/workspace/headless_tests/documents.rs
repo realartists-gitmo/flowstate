@@ -186,3 +186,46 @@ fn equation_composer_inserts_and_reopens_through_the_intent_path(cx: &mut TestAp
   assert_eq!(count, 1, "editing must not mint a second block");
   assert_eq!(source.as_deref(), Some("a^2 + b^2 = c^2"), "commit rewrote the source");
 }
+
+// R3-A + R5-B: an orphaned `.recovery` sibling of a recent document lands on
+// the home shelf at startup, and opening it is PATHLESS with provenance —
+// autosave must never adopt the .recovery path (the docx-clobber law).
+#[gpui::test]
+fn recovered_work_shelf_scans_and_opens_pathless(cx: &mut TestAppContext) {
+  let root = support::sandbox_config_dir();
+  let doc_path = root.join("crashed-cards.db8");
+  let recovery_path = root.join("crashed-cards.db8.recovery");
+  std::fs::write(&doc_path, b"placeholder").expect("seed doc file");
+  // A REAL recovery package (the shelf opener decodes it).
+  let imported =
+    flowstate_document::import_document_projection(crate::rich_text_element::demo_document(), "Recovered fixture").expect("import");
+  let mut runtime = flowstate_collab::crdt_runtime::CrdtRuntime::from_imported_document(imported).expect("runtime");
+  runtime
+    .checkpoint_package("Recovery snapshot", Some(recovery_path.clone()), &flowstate_document::RevisionStamp::session())
+    .expect("write recovery package");
+  crate::app_settings::save_recent_documents(vec![doc_path.clone()]).expect("seed recents");
+
+  let h = support::open_workspace(cx);
+  let entry = h
+    .read(cx, |ws| ws.recovered_work.first().cloned())
+    .expect("the startup scan finds the orphaned recovery snapshot");
+  assert_eq!(entry.source_path, doc_path);
+  assert_eq!(entry.recovery_path, recovery_path);
+
+  h.update(cx, |ws, window, cx| ws.open_recovered_work(&entry, window, cx));
+  cx.run_until_parked();
+  h.update(cx, |ws, _, cx| {
+    let panel = ws.document_panels.first().expect("recovered panel opens").read(cx);
+    assert!(
+      panel.title_text().starts_with("Recovered — "),
+      "provenance title, got {:?}",
+      panel.title_text()
+    );
+    assert_eq!(panel.path(), None, "recovered work opens PATHLESS — never adopts .recovery");
+    assert!(ws.recovered_work.is_empty(), "the shelf entry is consumed on open");
+  });
+
+  // Cleanup so other sandboxed tests don't inherit the seeded recents.
+  let _ = std::fs::remove_file(&recovery_path);
+  let _ = crate::app_settings::save_recent_documents(Vec::new());
+}

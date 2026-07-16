@@ -87,6 +87,11 @@ pub struct Workspace {
   active_toolkit_tool: Option<ToolkitTool>,
   recent_documents: Vec<PathBuf>,
   recent_document_previews: HashMap<PathBuf, DocumentProjection>,
+  /// R5-B: home-surface pinned recents (persisted; float ahead of MRU).
+  pinned_recent_documents: Vec<PathBuf>,
+  /// R3-A: orphaned recovery snapshots found at startup — the home
+  /// surface's "Recovered work" shelf.
+  pub(crate) recovered_work: Vec<RecoveredWorkEntry>,
   recent_document_preview_generation: u64,
   temporary_workspace_session_pending: Option<TemporaryWorkspaceSession>,
   temporary_workspace_session_persist_scheduled: bool,

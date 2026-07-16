@@ -9,6 +9,47 @@ pub(crate) enum FlowRuntimeSource {
   },
 }
 
+/// R3-A: one orphaned recovery snapshot (a crash left `<doc>.recovery`
+/// beside a recent document; clean closes discard it).
+#[derive(Clone, Debug)]
+pub(crate) struct RecoveredWorkEntry {
+  pub source_path: PathBuf,
+  pub recovery_path: PathBuf,
+  pub modified_at: Option<std::time::SystemTime>,
+}
+
+/// R3-A: startup scan over the recovery locations we can KNOW about — the
+/// recent-documents list (recovery files are `.recovery` siblings of their
+/// documents, discarded on clean close; an existing one means a crash).
+pub(crate) fn scan_recovered_work() -> Vec<RecoveredWorkEntry> {
+  let mut seen = std::collections::HashSet::new();
+  let mut entries: Vec<RecoveredWorkEntry> = crate::app_settings::load_recent_documents()
+    .into_iter()
+    .filter_map(|source_path| {
+      let recovery_path = crate::rich_text_element::recovery_path_for_document(&source_path);
+      if !seen.insert(recovery_path.clone()) || !recovery_path.exists() {
+        return None;
+      }
+      let modified_at = fs::metadata(&recovery_path).ok().and_then(|meta| meta.modified().ok());
+      Some(RecoveredWorkEntry {
+        source_path,
+        recovery_path,
+        modified_at,
+      })
+    })
+    .collect();
+  entries.sort_by_key(|entry| std::cmp::Reverse(entry.modified_at));
+  entries
+}
+
+/// R3-A: recovery snapshot writes in flight — the panic hook waits for this
+/// to drain so a crash right after edits still lands the freshest snapshot.
+static RECOVERY_WRITES_IN_FLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+pub fn recovery_writes_in_flight() -> usize {
+  RECOVERY_WRITES_IN_FLIGHT.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 enum DocumentRuntimeSource {
   FromProjection,
   Runtime(Box<flowstate_collab::crdt_runtime::CrdtRuntime>),
@@ -164,12 +205,18 @@ fn install_editor_write_authority(
     })));
     editor.set_native_recovery_hook(Some(Rc::new(move |path| {
       let io = recovery_io.clone();
+      RECOVERY_WRITES_IN_FLIGHT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
       Box::pin(async move {
-        let bytes = io
-          .package_bytes("Recovery snapshot".to_string())
-          .await
-          .map_err(runtime_io_error)?;
-        write_bytes_to_path(&path, &bytes)
+        let result = async {
+          let bytes = io
+            .package_bytes("Recovery snapshot".to_string())
+            .await
+            .map_err(runtime_io_error)?;
+          write_bytes_to_path(&path, &bytes)
+        }
+        .await;
+        RECOVERY_WRITES_IN_FLIGHT.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        result
       })
     })));
   });
@@ -306,6 +353,8 @@ impl Workspace {
       autosave_flow_in_flight: FxHashSet::default(),       // §perf: FxHash for trusted Uuid keys
       collaboration_dialog: None,
       equation_composer: None,
+      pinned_recent_documents: crate::app_settings::load_pinned_recent_documents(),
+      recovered_work: scan_recovered_work(),
       history_takeover: None,
       collab_notice_subscriptions: FxHashMap::default(), // §perf: FxHash for trusted SessionId keys
       collab_incompatible_version_notices: HashSet::new(),
@@ -358,6 +407,18 @@ impl Workspace {
       this.load_tub_root(root, cx);
     }
 
+    // R3-A: orphaned recovery snapshots announce themselves once, quietly.
+    if !this.recovered_work.is_empty() {
+      this.report_activity(
+        format!(
+          "Recovered work from a previous session is on the home screen ({} item{})",
+          this.recovered_work.len(),
+          if this.recovered_work.len() == 1 { "" } else { "s" }
+        ),
+        cx,
+      );
+    }
+
     if let Some(path) = initial_path {
       // Initial window creation happens before GPUI has produced stable
       // layout bounds for the resizable document area. Documents opened later
@@ -373,6 +434,70 @@ impl Workspace {
     }
 
     this
+  }
+
+  /// R3-A: open a recovered snapshot WITH PROVENANCE. It opens PATHLESS —
+  /// autosave must never adopt the `.recovery` path (the docx-clobber law) —
+  /// titled after its source document; saving re-homes it deliberately.
+  pub(crate) fn open_recovered_work(&mut self, entry: &RecoveredWorkEntry, window: &mut Window, cx: &mut Context<Self>) {
+    let loaded = (|| -> std::io::Result<_> {
+      let bytes = fs::read(&entry.recovery_path)?;
+      let package = flowstate_document::DocumentPackage::from_bytes(&bytes)?;
+      let runtime = flowstate_collab::crdt_runtime::CrdtRuntime::from_package(package, None).map_err(runtime_io_error)?;
+      let document = runtime.projection_snapshot().map_err(runtime_io_error)?;
+      Ok((document, runtime))
+    })();
+    let source_name = entry
+      .source_path
+      .file_name()
+      .map_or_else(|| "document".to_string(), |name| name.to_string_lossy().to_string());
+    match loaded {
+      Ok((document, runtime)) => {
+        let title = Some(format!("Recovered — {source_name}"));
+        match self.create_document_panel(document, None, title, DocumentRuntimeSource::Runtime(Box::new(runtime)), window, cx) {
+          Ok(_) => {
+            let recovery_path = entry.recovery_path.clone();
+            self
+              .recovered_work
+              .retain(|candidate| candidate.recovery_path != recovery_path);
+            self.report_activity(
+              format!("Opened recovered work from {} — save it where it belongs", entry.source_path.display()),
+              cx,
+            );
+            cx.notify();
+          },
+          Err(error) => self.report_failure(format!("Opening recovered work failed: {error:#}"), None, cx),
+        }
+      },
+      Err(error) => self.report_failure(format!("Opening recovered work failed: {error}"), None, cx),
+    }
+  }
+
+  /// R5-B: the home's resume verb — re-open the persisted session's tabs.
+  pub(crate) fn resume_persisted_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    match load_temporary_workspace_session() {
+      Some(session) => self.restore_temporary_workspace_session(session, window, cx),
+      None => self.report_failure("No previous session to resume", None, cx),
+    }
+  }
+
+  /// R5-B: does a persisted session exist to resume?
+  pub(crate) fn persisted_session_available() -> bool {
+    load_temporary_workspace_session().is_some_and(|session| !session.entries.is_empty())
+  }
+
+  /// R5-B: pin/unpin a recent on the home surface (persisted).
+  pub(crate) fn toggle_recent_pin(&mut self, path: &PathBuf, cx: &mut Context<Self>) {
+    if let Some(ix) = self.pinned_recent_documents.iter().position(|pin| pin == path) {
+      self.pinned_recent_documents.remove(ix);
+    } else {
+      self.pinned_recent_documents.push(path.clone());
+    }
+    let pinned = self.pinned_recent_documents.clone();
+    if let Err(error) = crate::app_settings::save_pinned_recent_documents(pinned) {
+      self.report_failure(format!("Couldn't save the pinned recents: {error}"), None, cx);
+    }
+    cx.notify();
   }
 
   fn create_document_panel(

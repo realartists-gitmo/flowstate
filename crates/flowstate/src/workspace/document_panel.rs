@@ -116,6 +116,12 @@ impl DocumentPanel {
       .map(|range| range.start.paragraph)
   }
 
+  /// R3-A: recovered-work panels must stay pathless; tests pin it here.
+  #[cfg_attr(not(test), allow(dead_code, reason = "headless-test seam"))]
+  pub fn path(&self) -> Option<&PathBuf> {
+    self.path.as_ref()
+  }
+
   pub fn title_text(&self) -> SharedString {
     self.title.clone()
   }
