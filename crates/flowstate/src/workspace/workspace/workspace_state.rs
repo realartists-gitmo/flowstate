@@ -1128,12 +1128,37 @@ impl Workspace {
       return false;
     }
     speech_editor.update(cx, |editor, cx| {
-      editor.move_line_end(cx);
+      // CT-S2 (CT5-B): appends serialize at DOCUMENT END — the old
+      // caret-line-end landing raced under concurrent team sends.
+      editor.move_document_end(cx);
       let target_style = editor.caret_paragraph_style();
       let paragraphs = Self::wrap_with_newline_paragraphs(fragment.paragraphs, target_style);
       editor.insert_toolkit_text_at_caret(paragraphs, cx);
     });
+    self.note_speech_send(cx);
     true
+  }
+
+  /// CT-S2 (CT2-A as amended by Adam): success feedback is the badge — a
+  /// transient sent-count on the speech tab. NO activity-log line ("that's
+  /// clutter"); refusals remain exceptional and may speak.
+  fn note_speech_send(&mut self, cx: &mut Context<Self>) {
+    self.speech_sent_recent = self.speech_sent_recent.saturating_add(1);
+    self.speech_sent_clear_generation = self.speech_sent_clear_generation.wrapping_add(1);
+    let generation = self.speech_sent_clear_generation;
+    cx.spawn(async move |workspace, cx| {
+      cx.background_executor()
+        .timer(std::time::Duration::from_millis(2500))
+        .await;
+      let _ = workspace.update(cx, |workspace, cx| {
+        if workspace.speech_sent_clear_generation == generation {
+          workspace.speech_sent_recent = 0;
+          cx.notify();
+        }
+      });
+    })
+    .detach();
+    cx.notify();
   }
 
   pub(crate) fn send_selection_to_speech_document_end(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
@@ -1154,6 +1179,7 @@ impl Workspace {
       let paragraphs = Self::wrap_with_newline_paragraphs(fragment.paragraphs, target_style);
       editor.insert_toolkit_text_at_caret(paragraphs, cx);
     });
+    self.note_speech_send(cx);
     true
   }
 

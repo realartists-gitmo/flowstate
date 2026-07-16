@@ -106,6 +106,11 @@ pub struct Workspace {
   tab_bar_scroll_handle: ScrollHandle,
   pinned_document_ids: Vec<Uuid>,
   speech_document_id: Option<Uuid>,
+  /// CT-S2: transient sent-count shown beside the speech tab's badge after a
+  /// send (success feedback WITHOUT an activity-log line, per Adam's CT2
+  /// amendment).
+  speech_sent_recent: u64,
+  speech_sent_clear_generation: u64,
   /// W-S1 (W2-B): exactly one window — the first — owns the on-disk workspace
   /// session. Secondary windows neither restore nor persist it, so two windows
   /// can never clobber each other's `flowstate-open-tabs-session.json`.

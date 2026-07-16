@@ -86,7 +86,17 @@ impl RichTextEditor {
     if !self.selection.is_caret() {
       return Some(selected_rich_fragment(&self.document, self.selection.normalized()));
     }
-    let position = self.last_drag_position?;
+    // CT-S2 (CT1-A): point-and-send targets the card under the pointer RIGHT
+    // NOW — `last_drag_position` was a STALE mouse point (a keyboard-driven
+    // send could grab whatever you last clicked, minutes ago). Gated on the
+    // pointer actually being inside the editor: a last-known position outside
+    // the viewport must not fire a phantom hover-send; the caller falls back
+    // to the caret's enclosing card.
+    let position = window.mouse_position();
+    let viewport = self.scroll_handle.bounds();
+    if !viewport.contains(&position) {
+      return None;
+    }
     let paragraph_ix = self
       .hit_test_document_position(position, window, cx)
       .paragraph;

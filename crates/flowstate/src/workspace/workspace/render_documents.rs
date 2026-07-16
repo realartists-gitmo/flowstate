@@ -217,13 +217,32 @@ impl Workspace {
           ));
         }
         if tab.speech {
+          // CT-S2: the send's success feedback — a transient sent-count pulse
+          // beside the badge (no activity-log line, per Adam's CT2 amendment).
+          let recent = self.speech_sent_recent;
           marks.push((
             "Speech document",
-            div()
-              .text_xs()
-              .font_weight(gpui::FontWeight::SEMIBOLD)
-              .text_color(cx.theme().success)
-              .child("S")
+            h_flex()
+              .items_center()
+              .gap_0p5()
+              .child(
+                div()
+                  .text_xs()
+                  .font_weight(gpui::FontWeight::SEMIBOLD)
+                  .text_color(cx.theme().success)
+                  .child("S"),
+              )
+              .when(recent > 0, |this| {
+                this.child(
+                  div()
+                    .text_size(px(9.0))
+                    .px_1()
+                    .rounded_full()
+                    .bg(cx.theme().success.opacity(0.18))
+                    .text_color(cx.theme().success)
+                    .child(format!("+{recent}")),
+                )
+              })
               .into_any_element(),
           ));
         }

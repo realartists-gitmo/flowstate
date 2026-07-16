@@ -240,6 +240,8 @@ impl Workspace {
       tab_bar_scroll_handle: ScrollHandle::new(),
       pinned_document_ids: Vec::new(),
       speech_document_id: None,
+      speech_sent_recent: 0,
+      speech_sent_clear_generation: 0,
       // W-S1: overwritten by `open_workspace_window` before the first frame;
       // defaults to owner so bare `Workspace::new` construction (tests) keeps
       // the historical single-window behavior.
