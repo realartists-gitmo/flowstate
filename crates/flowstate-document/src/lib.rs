@@ -365,6 +365,10 @@ pub fn flowstate_document_theme() -> DocumentTheme {
   theme.set_invisibility_visible_semantic_style(1);
   theme.set_invisibility_visible_highlight_style(1);
   theme.set_invisibility_visible_highlight_style(3);
+  // CT-S5 (CT3-A): HIGHLIGHT_MARKED joins the read view. A mark means "I
+  // stopped reading here" — it used to vanish exactly at read time, the one
+  // moment it exists for.
+  theme.set_invisibility_visible_highlight_style(4);
   theme
 }
 

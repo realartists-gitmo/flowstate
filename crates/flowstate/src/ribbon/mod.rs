@@ -12,7 +12,7 @@ pub use editor_ribbon::{
   EditorRibbon, ModernRibbonOptions, ModernStylesRibbon, OverflowBehavior, RibbonAccent, RibbonCommand, RibbonCommandGroup,
   RibbonCommandId, RibbonDensity, ShortcutVisibility, StylesRibbon,
 };
-pub(crate) use editor_ribbon::{CONDENSE_PILCROW_MARKER, condense_editor_selection, uncondense_editor_selection};
+pub(crate) use editor_ribbon::{CONDENSE_PILCROW_MARKER, apply_shrink_editor_selection, condense_editor_selection, uncondense_editor_selection};
 pub use style_catalog::{
   HIGHLIGHT_STYLE_SPECS, HighlightStyleSpec, PARAGRAPH_STYLE_SPECS, ParagraphStyleSpec, SEMANTIC_STYLE_SPECS, SemanticStyleSpec,
 };

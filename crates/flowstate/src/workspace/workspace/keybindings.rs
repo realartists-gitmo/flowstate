@@ -327,12 +327,12 @@ impl Workspace {
         }
       },
       CommandId::CondensedSelection => {
+        // CT-S5 (CT6-A): ctrl-8 and the ribbon Shrink now agree — a bare
+        // caret shrinks the WHOLE enclosing card (the flowing-speed gesture);
+        // a selection toggles the style over it. The keybinding used to arm
+        // the inline tool instead, so the same verb meant two things.
         if let Some(editor) = self.active_editor.clone() {
-          editor.update(cx, |editor, cx| {
-            if !editor.selection().is_caret() || editor.focus_handle(cx).is_focused(window) {
-              editor.toggle_inline_tool(ArmedInlineTool::Semantic(flowstate_document::SEMANTIC_CONDENSED), cx);
-            }
-          });
+          crate::ribbon::apply_shrink_editor_selection(editor, flowstate_document::SEMANTIC_CONDENSED, window, cx);
           true
         } else {
           false

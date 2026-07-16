@@ -313,7 +313,7 @@ pub(crate) fn uncondense_editor_selection(editor: Entity<RichTextEditor>, window
   });
 }
 
-fn apply_shrink_editor_selection(editor: Entity<RichTextEditor>, semantic: RunSemanticStyle, window: &Window, cx: &mut App) {
+pub(crate) fn apply_shrink_editor_selection(editor: Entity<RichTextEditor>, semantic: RunSemanticStyle, window: &Window, cx: &mut App) {
   editor.update(cx, |editor, cx| {
     if !editor_has_selected_text_or_focused_caret(editor, window, cx) {
       return;
