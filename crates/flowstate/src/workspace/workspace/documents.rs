@@ -267,6 +267,8 @@ impl Workspace {
       active_tub_path: None,
       toolkit_search_input,
       toolkit_search_filter: ToolkitSearchFilter::All,
+      toolkit_operator_hint: None,
+      toolkit_selected_hit: None,
       toolkit_hits: Vec::new(),
       expanded_toolkit_hits: HashSet::new(),
       toolkit_results_scroll_handle: VirtualListScrollHandle::new(),
@@ -631,11 +633,64 @@ impl Workspace {
     self.open_document_path_with_target(path, None, window, cx);
   }
 
-  pub fn open_document_path_at_paragraph(&mut self, path: PathBuf, paragraph_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-    self.open_document_path_with_target(path, Some(paragraph_ix), window, cx);
+  /// T-S2: after the runtime attaches, resolve the durable cursor to its
+  /// CURRENT paragraph and peek it (scroll + arrival flash).
+  fn peek_open_target_cursor(&mut self, cursor: Vec<u8>, fallback: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+    let Some(io) = self
+      .active_document_id
+      .and_then(|id| self.document_runtimes.get(&id).cloned())
+    else {
+      if let Some(paragraph_ix) = fallback {
+        self.peek_active_editor_paragraph(paragraph_ix, window, cx);
+      }
+      return;
+    };
+    let window_handle = window.window_handle();
+    cx.spawn(async move |workspace, cx| {
+      let resolved = io.resolve_cursor_paragraph(cursor).await;
+      let _ = window_handle.update(cx, |_, window, cx| {
+        let _ = workspace.update(cx, |workspace, cx| {
+          let paragraph_ix = match resolved {
+            Ok(Some(paragraph_ix)) => Some(paragraph_ix),
+            _ => fallback,
+          };
+          if let Some(paragraph_ix) = paragraph_ix {
+            workspace.peek_active_editor_paragraph(paragraph_ix, window, cx);
+          }
+        });
+      });
+    })
+    .detach();
   }
 
-  fn open_document_path_with_target(&mut self, path: PathBuf, target_paragraph_ix: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+  pub fn open_document_path_at_paragraph(&mut self, path: PathBuf, paragraph_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+    self.open_document_path_with_target(path, Some(OpenDocumentTarget::paragraph(paragraph_ix)), window, cx);
+  }
+
+  /// T-S2: open landing on a DURABLE cursor target — the tub's cards carry
+  /// Loro cursors, so "open" finds the card even after the document was
+  /// edited since indexing. The paragraph is the phase-V approximation; the
+  /// cursor resolves exactly once the runtime attaches, with an arrival flash.
+  pub fn open_document_path_at_cursor(
+    &mut self,
+    path: PathBuf,
+    cursor: Vec<u8>,
+    fallback_paragraph: Option<usize>,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) {
+    self.open_document_path_with_target(
+      path,
+      Some(OpenDocumentTarget {
+        paragraph: fallback_paragraph,
+        cursor: Some(cursor),
+      }),
+      window,
+      cx,
+    );
+  }
+
+  fn open_document_path_with_target(&mut self, path: PathBuf, target: Option<OpenDocumentTarget>, window: &mut Window, cx: &mut Context<Self>) {
     let window_handle = window.window_handle();
     let path_for_recent = path.clone();
     cx.spawn(async move |workspace, cx| {
@@ -649,7 +704,7 @@ impl Workspace {
         .spawn(async move { read_open_projection_fast(&phase_v_path) })
         .await;
       let pending_panel_id = if let Some(projection) = cached {
-        let scroll_target = target_paragraph_ix;
+        let scroll_target = target.as_ref().and_then(|target| target.paragraph);
         window_handle
           .update(cx, |_, window, cx| {
             workspace
@@ -699,11 +754,22 @@ impl Workspace {
               if let Some(runtime) = fresh_runtime {
                 workspace.add_document_panel_with_title(*document, path, title, runtime, window, cx);
               }
-              if let Some(paragraph_ix) = target_paragraph_ix {
-                workspace.scroll_active_editor_to_paragraph(paragraph_ix, window, cx);
-                cx.on_next_frame(window, move |workspace, window, cx| {
-                  workspace.scroll_active_editor_to_paragraph(paragraph_ix, window, cx);
-                });
+              match target {
+                Some(OpenDocumentTarget { cursor: Some(cursor), paragraph }) => {
+                  // T-S2: resolve the durable cursor against the now-attached
+                  // runtime; fall back to the indexed paragraph if it fails.
+                  workspace.peek_open_target_cursor(cursor, paragraph, window, cx);
+                },
+                Some(OpenDocumentTarget {
+                  cursor: None,
+                  paragraph: Some(paragraph_ix),
+                }) => {
+                  workspace.peek_active_editor_paragraph(paragraph_ix, window, cx);
+                  cx.on_next_frame(window, move |workspace, window, cx| {
+                    workspace.peek_active_editor_paragraph(paragraph_ix, window, cx);
+                  });
+                },
+                _ => {},
               }
             });
           });

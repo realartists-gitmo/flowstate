@@ -165,6 +165,10 @@ pub struct Workspace {
   active_tub_path: Option<PathBuf>,
   toolkit_search_input: Entity<InputState>,
   toolkit_search_filter: ToolkitSearchFilter,
+  /// T-S4: operator feedback (an unrecognized `kind:` value) under the input.
+  toolkit_operator_hint: Option<SharedString>,
+  /// T-S3: keyboard-selected hit index in the results list.
+  toolkit_selected_hit: Option<usize>,
   toolkit_hits: Vec<SearchHit>,
   expanded_toolkit_hits: HashSet<String>,
   toolkit_results_scroll_handle: VirtualListScrollHandle,
@@ -229,6 +233,23 @@ enum LeftNavMode {
 enum ToolkitTool {
   Tub,
   Comments,
+}
+
+/// T-S2: where an "open" should land — an approximate paragraph (phase V)
+/// and/or a durable Loro cursor resolved exactly after the runtime attaches.
+#[derive(Clone, Debug, Default)]
+struct OpenDocumentTarget {
+  paragraph: Option<usize>,
+  cursor: Option<Vec<u8>>,
+}
+
+impl OpenDocumentTarget {
+  fn paragraph(paragraph_ix: usize) -> Self {
+    Self {
+      paragraph: Some(paragraph_ix),
+      cursor: None,
+    }
+  }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

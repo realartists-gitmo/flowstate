@@ -12,7 +12,6 @@ use gpui_component::{
   button::{Button, ButtonVariants},
   h_flex,
   input::Input,
-  menu::{DropdownMenu as _, PopupMenuItem},
   resizable::{h_resizable, resizable_panel},
   tree::{TreeItem, tree},
   v_flex, v_virtual_list,
@@ -456,7 +455,19 @@ impl Workspace {
   }
 
   pub(super) fn refresh_toolkit_search(&mut self, cx: &mut Context<Self>) {
-    let query = self.toolkit_search_input.read(cx).value().to_string();
+    let raw_query = self.toolkit_search_input.read(cx).value().to_string();
+    // T-S4: `kind:` operators ride the query text and drive the same filter
+    // state the chips show (operators → chips reflection).
+    let (query, operator_filter, bad_operator) = parse_toolkit_kind_operator(&raw_query);
+    if let Some(filter) = operator_filter
+      && self.toolkit_search_filter != filter
+    {
+      self.toolkit_search_filter = filter;
+      self.persist_temporary_workspace_session(cx);
+    }
+    self.toolkit_operator_hint = bad_operator
+      .map(|bad| format!("kind:{bad} isn't a thing — try kind:blocks · kind:tags · kind:analytics · kind:all").into());
+    self.toolkit_selected_hit = None;
     let Some(index) = self.tub_index.clone() else {
       self.toolkit_hits.clear();
       self.toolkit_status = "Select a tub to search evidence.".into();
@@ -511,8 +522,18 @@ impl Workspace {
     .detach();
   }
 
-  fn set_toolkit_filter(&mut self, filter: ToolkitSearchFilter, cx: &mut Context<Self>) {
+  fn set_toolkit_filter(&mut self, filter: ToolkitSearchFilter, window: &mut Window, cx: &mut Context<Self>) {
     self.toolkit_search_filter = filter;
+    // T-S4 chips → operators reflection: a chip click wins over any typed
+    // `kind:` operator, so the stale operator leaves the query text.
+    let raw = self.toolkit_search_input.read(cx).value().to_string();
+    let (stripped, operator, _) = parse_toolkit_kind_operator(&raw);
+    if operator.is_some() {
+      self
+        .toolkit_search_input
+        .update(cx, |input, cx| input.set_value(gpui::SharedString::from(stripped), window, cx));
+    }
+    self.persist_temporary_workspace_session(cx);
     self.refresh_toolkit_search(cx);
   }
 
@@ -537,11 +558,47 @@ impl Workspace {
     }
   }
 
+  /// T-S3: arrows/Enter drive the results from the search box.
+  fn on_toolkit_search_key(&mut self, event: &gpui::KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    if self.toolkit_hits.is_empty() {
+      return;
+    }
+    match event.keystroke.key.as_str() {
+      "down" => {
+        let next = self.toolkit_selected_hit.map_or(0, |ix| (ix + 1) % self.toolkit_hits.len());
+        self.toolkit_selected_hit = Some(next);
+        cx.notify();
+        cx.stop_propagation();
+      },
+      "up" => {
+        let len = self.toolkit_hits.len();
+        let next = self.toolkit_selected_hit.map_or(len - 1, |ix| ix.checked_sub(1).unwrap_or(len - 1));
+        self.toolkit_selected_hit = Some(next);
+        cx.notify();
+        cx.stop_propagation();
+      },
+      "enter" if self.toolkit_selected_hit.is_some() => {
+        let ix = self.toolkit_selected_hit.expect("checked");
+        if event.keystroke.modifiers.control || event.keystroke.modifiers.platform {
+          self.insert_toolkit_hit(ix, window, cx);
+        } else {
+          self.open_toolkit_hit(ix, window, cx);
+        }
+        cx.stop_propagation();
+      },
+      _ => {},
+    }
+  }
+
   fn open_toolkit_hit(&mut self, hit_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
     let Some(hit) = self.toolkit_hits.get(hit_ix).cloned() else {
       return;
     };
-    if let Some(paragraph_ix) = hit.paragraph_start {
+    // T-S2: prefer the durable cursor (survives edits since indexing); the
+    // indexed paragraph is the immediate phase-V approximation.
+    if let Some(cursor) = hit.paragraph_start_cursor.clone() {
+      self.open_document_path_at_cursor(hit.path, cursor, hit.paragraph_start, window, cx);
+    } else if let Some(paragraph_ix) = hit.paragraph_start {
       self.open_document_path_at_paragraph(hit.path, paragraph_ix, window, cx);
     } else {
       self.open_document_path(hit.path, window, cx);
@@ -699,19 +756,28 @@ impl Workspace {
             .border_b_1()
             .border_color(cx.theme().border)
             .child(
-              Input::new(&self.toolkit_search_input)
-                .xsmall()
-                .w_full()
-                .cleanable(true)
-                .prefix(
-                  Icon::new(IconName::Search)
+              div()
+                // T-S3: the list is drivable from the search box — arrows
+                // move the selection, Enter opens, ctrl-Enter inserts.
+                .on_key_down(cx.listener(Self::on_toolkit_search_key))
+                .child(
+                  Input::new(&self.toolkit_search_input)
                     .xsmall()
-                    .text_color(cx.theme().muted_foreground),
-                )
-                .suffix(self.render_toolkit_filter_menu(cx))
-                .text_color(cx.theme().foreground)
-                .placeholder_color(cx.theme().muted_foreground),
-            ),
+                    .w_full()
+                    .cleanable(true)
+                    .prefix(
+                      Icon::new(IconName::Search)
+                        .xsmall()
+                        .text_color(cx.theme().muted_foreground),
+                    )
+                    .text_color(cx.theme().foreground)
+                    .placeholder_color(cx.theme().muted_foreground),
+                ),
+            )
+            .child(self.render_toolkit_filter_chips(cx))
+            .when_some(self.toolkit_operator_hint.clone(), |this, hint| {
+              this.child(div().text_xs().text_color(cx.theme().danger).child(hint))
+            }),
         )
       })
       .child(
@@ -756,37 +822,29 @@ impl Workspace {
       .into_any_element()
   }
 
-  fn render_toolkit_filter_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
-    let workspace = cx.entity().downgrade();
+  /// T-S4: the kind chips — one visual language with the operators (each
+  /// chip's tooltip is its operator spelling).
+  fn render_toolkit_filter_chips(&self, cx: &mut Context<Self>) -> impl IntoElement {
     let selected_filter = self.toolkit_search_filter;
     let filters = [
-      ToolkitSearchFilter::All,
-      ToolkitSearchFilter::Blocks,
-      ToolkitSearchFilter::Tags,
-      ToolkitSearchFilter::Analytics,
+      (ToolkitSearchFilter::All, "kind:all"),
+      (ToolkitSearchFilter::Blocks, "kind:blocks"),
+      (ToolkitSearchFilter::Tags, "kind:tags"),
+      (ToolkitSearchFilter::Analytics, "kind:analytics"),
     ];
-
-    Button::new("toolkit-filter-menu")
-      .label(self.toolkit_search_filter.label())
-      .xsmall()
-      .ghost()
-      .tooltip("Search filter")
-      .dropdown_menu(move |menu, _, _| {
-        filters
-          .into_iter()
-          .fold(menu.min_w(px(140.0)), |menu, filter| {
-            let workspace = workspace.clone();
-            menu.item(
-              PopupMenuItem::new(filter.label())
-                .checked(filter == selected_filter)
-                .on_click(move |_, _, cx| {
-                  let _ = workspace.update(cx, |workspace, cx| {
-                    workspace.set_toolkit_filter(filter, cx);
-                  });
-                }),
-            )
-          })
-      })
+    h_flex().gap_1().children(filters.into_iter().map(move |(filter, operator)| {
+      let selected = filter == selected_filter;
+      Button::new(("toolkit-filter-chip", filter as usize))
+        .xsmall()
+        .compact()
+        .tooltip(operator)
+        .when(selected, |this| this.primary())
+        .when(!selected, |this| this.ghost())
+        .label(filter.label())
+        .on_click(cx.listener(move |workspace, _, window, cx| {
+          workspace.set_toolkit_filter(filter, window, cx);
+        }))
+    }))
   }
 
   fn render_toolkit_hit(&self, ix: usize, hit: &flowstate_tub::SearchHit, card_height: Pixels, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -834,7 +892,13 @@ impl Workspace {
       .relative()
       .rounded(card_radius)
       .border_1()
-      .border_color(cx.theme().border)
+      .border_color(if self.toolkit_selected_hit == Some(ix) {
+        // T-S3: the keyboard cursor — an outer ring only; the card anatomy
+        // inside is protected by decree.
+        cx.theme().warning
+      } else {
+        cx.theme().border
+      })
       .bg(preview_bg)
       .p(px(1.0))
       .overflow_hidden()
@@ -1464,4 +1528,30 @@ fn build_tub_tree_dir_items(
   }
 
   items
+}
+
+
+/// T-S4: pull `kind:` operators out of a query. Returns (stripped query,
+/// recognized filter, unrecognized value).
+fn parse_toolkit_kind_operator(raw: &str) -> (String, Option<ToolkitSearchFilter>, Option<String>) {
+  let mut stripped = String::new();
+  let mut filter = None;
+  let mut bad = None;
+  for token in raw.split_whitespace() {
+    if let Some(value) = token.strip_prefix("kind:") {
+      match value.to_ascii_lowercase().as_str() {
+        "block" | "blocks" => filter = Some(ToolkitSearchFilter::Blocks),
+        "tag" | "tags" => filter = Some(ToolkitSearchFilter::Tags),
+        "analytic" | "analytics" | "card" | "cards" => filter = Some(ToolkitSearchFilter::Analytics),
+        "all" | "any" => filter = Some(ToolkitSearchFilter::All),
+        other => bad = Some(other.to_string()),
+      }
+      continue;
+    }
+    if !stripped.is_empty() {
+      stripped.push(' ');
+    }
+    stripped.push_str(token);
+  }
+  (stripped, filter, bad)
 }

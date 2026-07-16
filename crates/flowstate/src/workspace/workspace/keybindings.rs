@@ -153,6 +153,26 @@ impl Workspace {
         self.open_history_takeover(window, cx);
         true
       },
+      CommandId::ToggleTubTool => {
+        self.toggle_toolkit_tool(ToolkitTool::Tub, cx);
+        true
+      },
+      CommandId::FocusTubSearch => {
+        if self.active_toolkit_tool != Some(ToolkitTool::Tub) {
+          self.toggle_toolkit_tool(ToolkitTool::Tub, cx);
+        }
+        self.toolkit_search_input.focus_handle(cx).focus(window);
+        true
+      },
+      CommandId::SwapLeftNav => {
+        self.left_nav_mode = match self.left_nav_mode {
+          LeftNavMode::Outline => LeftNavMode::Tub,
+          LeftNavMode::Tub => LeftNavMode::Outline,
+        };
+        self.persist_temporary_workspace_session(cx);
+        cx.notify();
+        true
+      },
       CommandId::ZoomIn => {
         if let Some(editor) = self.active_editor.clone() {
           editor.update(cx, |editor, cx| editor.zoom_in(cx));

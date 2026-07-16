@@ -62,6 +62,9 @@ pub fn flowstate_command_to_rich_text(command: CommandId) -> Option<RichTextEdit
     CommandId::OpenCommandPalette
     | CommandId::OpenComments
     | CommandId::OpenHistory
+    | CommandId::ToggleTubTool
+    | CommandId::FocusTubSearch
+    | CommandId::SwapLeftNav
     | CommandId::Save
     | CommandId::NewDocument
     | CommandId::OpenDocument

@@ -87,6 +87,12 @@ pub enum IoRequest {
     title: String,
     reply: Sender<Result<u128>>,
   },
+  /// T-S2: resolve a stored body cursor to its current paragraph (tub cards
+  /// carry cursors so "open" lands on the card even after edits).
+  ResolveCursorParagraph {
+    cursor: Vec<u8>,
+    reply: Sender<Result<Option<usize>>>,
+  },
   /// H-S5: two-frontier diff + blame (None = vs now).
   FrontierDiff {
     base_frontier: Vec<u8>,
@@ -225,6 +231,7 @@ fn io_request_kind(request: &IoRequest) -> &'static str {
     IoRequest::CheckpointPackage { .. } => "checkpoint-package",
     IoRequest::RestoreFrontier { .. } => "restore-frontier",
     IoRequest::CreateNamedPin { .. } => "create-named-pin",
+    IoRequest::ResolveCursorParagraph { .. } => "resolve-cursor-paragraph",
     IoRequest::FrontierDiff { .. } => "frontier-diff",
     IoRequest::RenameRevision { .. } => "rename-revision",
     IoRequest::PackageBytes { .. } => "package-bytes",
@@ -351,6 +358,12 @@ impl DocIoHandle {
   pub async fn create_named_pin(&self, title: String) -> Result<u128> {
     self
       .request(|reply| IoRequest::CreateNamedPin { title, reply })
+      .await
+  }
+
+  pub async fn resolve_cursor_paragraph(&self, cursor: Vec<u8>) -> Result<Option<usize>> {
+    self
+      .request(|reply| IoRequest::ResolveCursorParagraph { cursor, reply })
       .await
   }
 
@@ -740,6 +753,14 @@ fn io_loop(core: &Arc<WriteGate<CrdtRuntime>>, receiver: &Receiver<IoRequest>) {
             let title = title.trim();
             anyhow::ensure!(!title.is_empty(), "A checkpoint name cannot be empty");
             runtime.mint_named_pin_now(title)
+          }),
+        );
+      },
+      IoRequest::ResolveCursorParagraph { cursor, reply } => {
+        send_reply(
+          &reply,
+          gate_call(core, GateHolder::DocumentService, |runtime| {
+            Ok(runtime.resolve_selection_anchor(&cursor, &cursor).map(|(head, _)| head.paragraph))
           }),
         );
       },
