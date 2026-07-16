@@ -35,7 +35,7 @@ use crate::crdt_runtime::{
   CrdtRuntime, cursor_for_boundary, delete_projection_object_block, delete_projection_paragraph_metadata, insert_projection_object_block,
   join_projection_paragraphs, mark_run_styles, move_projection_object_block, paragraph_boundary_loro_unicode_index, paragraph_style_value,
   prune_orphaned_body_object_blocks, repair_paragraph_metadata_after_stable_split, replace_projection_equation_source_range,
-  replace_projection_image_alt_text, replace_projection_image_caption, replace_projection_object_block, sentinel_protected_delete_range,
+  replace_projection_image_alt_text, replace_projection_object_block, sentinel_protected_delete_range,
   set_projection_image_layout, table_ops,
 };
 
@@ -119,10 +119,6 @@ pub(crate) enum ResolvedPlan {
   ReplaceImageAltText {
     image: BlockId,
     text: String,
-  },
-  ReplaceImageCaption {
-    image: BlockId,
-    caption: Option<flowstate_document::InputParagraph>,
   },
   SetImageLayout {
     image: BlockId,
@@ -794,15 +790,6 @@ fn resolve_intent(core: &CrdtRuntime, intent: &LocalIntent) -> Result<ResolvedPl
         text: img.text.clone(),
       })
     },
-    LocalIntent::ReplaceImageCaption(img) => {
-      index
-        .block_index(img.image)
-        .ok_or(WriteRejected::UnresolvedBlock(img.image))?;
-      Ok(ResolvedPlan::ReplaceImageCaption {
-        image: img.image,
-        caption: img.caption.clone(),
-      })
-    },
     LocalIntent::SetImageLayout(img) => {
       index
         .block_index(img.image)
@@ -1164,12 +1151,6 @@ fn execute_plan(core: &mut CrdtRuntime, plan: &ResolvedPlan) -> Result<MutationS
     ResolvedPlan::ReplaceImageAltText { image, text } => {
       if !replace_projection_image_alt_text(&doc, *image, text).context("replacing image alt text")? {
         anyhow::bail!("image alt-text replace reported no-op for resolved block");
-      }
-      summary.containers_touched = 1;
-    },
-    ResolvedPlan::ReplaceImageCaption { image, caption } => {
-      if !replace_projection_image_caption(&doc, *image, caption.as_ref()).context("replacing image caption")? {
-        anyhow::bail!("image caption replace reported no-op for resolved block");
       }
       summary.containers_touched = 1;
     },

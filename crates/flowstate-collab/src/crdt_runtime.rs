@@ -2610,11 +2610,10 @@ impl CrdtRuntime {
         unicode_index,
         asset_id,
         alt_text,
-        caption,
         sizing,
         alignment,
       } => {
-        insert_image_block(&self.doc, unicode_index, asset_id, &alt_text, caption.as_deref(), sizing, alignment)
+        insert_image_block(&self.doc, unicode_index, asset_id, &alt_text, sizing, alignment)
           .context("inserting image block into Loro document")?;
         self.doc.commit();
         self.record_undo_checkpoint()?;
@@ -5750,60 +5749,6 @@ pub(crate) fn replace_projection_image_alt_text(doc: &LoroDoc, image_block_id: f
   Ok(true)
 }
 
-pub(crate) fn replace_projection_image_caption(
-  doc: &LoroDoc,
-  image_block_id: flowstate_document::BlockId,
-  caption: Option<&InputParagraph>,
-) -> Result<bool> {
-  let body = body_text(doc);
-  let Some((_, block, _)) = object_loro_block_by_projected_id(doc, &body, image_block_id) else {
-    tracing::warn!(
-      ?image_block_id,
-      "skipping image caption edit because no Loro image maps to the projected block id"
-    );
-    return Ok(false);
-  };
-  if map_string_opt(&block, "kind").as_deref() != Some("image") {
-    return Ok(false);
-  }
-  if let Some(caption) = caption {
-    let caption_flow_id = map_string_opt(&block, "caption_flow_id").unwrap_or_else(|| nested_flow_id("image_caption"));
-    block.insert("caption_flow_id", caption_flow_id.as_str())?;
-    let caption_flow = ensure_flow(doc, &caption_flow_id, "caption")?;
-    let text = caption_flow.ensure_mergeable_text(FLOW_TEXT_KEY)?;
-    let desired = format!(
-      "{SENTINEL_NEWLINE}{}",
-      caption
-        .runs
-        .iter()
-        .map(|run| run.text.as_str())
-        .collect::<String>()
-    );
-    replace_text_incrementally(&text, &desired)?;
-    let len = text.len_unicode();
-    for key in [
-      MARK_PARAGRAPH_STYLE,
-      MARK_RUN_SEMANTIC_STYLE,
-      MARK_HIGHLIGHT_STYLE,
-      MARK_DIRECT_UNDERLINE,
-      MARK_STRIKETHROUGH,
-    ] {
-      text.unmark(0..len, key)?;
-    }
-    text.mark(0..1, MARK_PARAGRAPH_STYLE, paragraph_style_value(caption.style))?;
-    let mut cursor = 1usize;
-    for run in &caption.runs {
-      let run_len = run.text.chars().count();
-      if run_len > 0 {
-        mark_run_styles(&text, cursor..cursor + run_len, run.styles)?;
-      }
-      cursor += run_len;
-    }
-  } else {
-    block.delete("caption_flow_id")?;
-  }
-  Ok(true)
-}
 
 pub(crate) fn set_projection_image_layout(
   doc: &LoroDoc,
@@ -6353,16 +6298,6 @@ fn replace_image_block_from_input(doc: &LoroDoc, block: &LoroMap, image: &flowst
   let alt_flow = ensure_flow(doc, &alt_flow_id, "alt_text")?;
   replace_text(&alt_flow.ensure_mergeable_text(FLOW_TEXT_KEY)?, image.alt_text.as_ref())?;
 
-  if let Some(caption) = &image.caption {
-    let caption_flow_id = map_string_opt(block, "caption_flow_id").unwrap_or_else(|| nested_flow_id("image_caption"));
-    block.insert("caption_flow_id", caption_flow_id.as_str())?;
-    let caption_flow = ensure_flow(doc, &caption_flow_id, "caption")?;
-    let caption_text = caption_flow.ensure_mergeable_text(FLOW_TEXT_KEY)?;
-    replace_text(&caption_text, SENTINEL_NEWLINE)?;
-    append_input_paragraph_text_only(&caption_text, caption)?;
-  } else {
-    block.delete("caption_flow_id")?;
-  }
 
   let attrs = block.ensure_mergeable_map("attrs")?;
   attrs.insert("alignment", alignment_name(image.alignment))?;
@@ -7778,7 +7713,6 @@ fn insert_image_block(
   unicode_index: usize,
   asset_id: u128,
   alt_text: &str,
-  caption: Option<&str>,
   sizing: InputImageSizing,
   alignment: InputBlockAlignment,
 ) -> Result<()> {
@@ -7792,18 +7726,6 @@ fn insert_image_block(
   block.insert("alt_text_flow_id", alt_flow_id.as_str())?;
   let alt_flow = ensure_flow(doc, &alt_flow_id, "alt_text")?;
   replace_text_incrementally(&alt_flow.ensure_mergeable_text(FLOW_TEXT_KEY)?, alt_text)?;
-
-  if let Some(caption) = caption {
-    let caption_flow_id = nested_flow_id("image_caption");
-    block.insert("caption_flow_id", caption_flow_id.as_str())?;
-    let caption_flow = ensure_flow(doc, &caption_flow_id, "caption")?;
-    let caption_text = caption_flow.ensure_mergeable_text(FLOW_TEXT_KEY)?;
-    replace_text(&caption_text, SENTINEL_NEWLINE)?;
-    caption_text.mark(0..1, MARK_PARAGRAPH_STYLE, 0_i64)?;
-    if !caption.is_empty() {
-      caption_text.insert(1, caption)?;
-    }
-  }
 
   let attrs = block.ensure_mergeable_map("attrs")?;
   attrs.insert("alignment", alignment_name(alignment))?;
@@ -8811,7 +8733,6 @@ mod tests {
         flowstate_document::InputBlock::Image(flowstate_document::InputImageBlock {
           asset_id: flowstate_document::AssetId(1),
           alt_text: "img".to_string(),
-          caption: None,
           sizing: flowstate_document::InputImageSizing::Intrinsic,
           alignment: flowstate_document::InputBlockAlignment::Left,
           external_url: None,
@@ -8882,7 +8803,6 @@ mod tests {
       unicode_index: 1,
       asset_id: 7,
       alt_text: "alt".to_string(),
-      caption: Some("caption".to_string()),
       sizing: flowstate_document::InputImageSizing::Fixed {
         width_px: 320,
         height_px: Some(180),
@@ -8911,7 +8831,6 @@ mod tests {
       flowstate_document::Block::Image(image)
         if image.asset_id == flowstate_document::AssetId(7)
           && image.alt_text.as_ref() == "alt"
-          && image.caption.is_some()
     ));
     assert!(matches!(
       &projection.blocks[1],
@@ -9036,7 +8955,6 @@ mod tests {
         InputBlock::Image(flowstate_document::InputImageBlock {
           asset_id: flowstate_document::AssetId(7),
           alt_text: "figure".to_string(),
-          caption: None,
           sizing: InputImageSizing::Intrinsic,
           alignment: InputBlockAlignment::Center,
           external_url: None,
@@ -9257,7 +9175,6 @@ mod tests {
       unicode_index: 1,
       asset_id: 7,
       alt_text: "alt".to_string(),
-      caption: None,
       sizing: InputImageSizing::Intrinsic,
       alignment: InputBlockAlignment::Center,
     })?;

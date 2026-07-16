@@ -145,7 +145,6 @@ fn headerless_dib_asset_exports_as_an_image_not_bracket_text() {
       InputBlock::Image(InputImageBlock {
         asset_id: AssetId(77),
         alt_text: "https://pixel.example/track".into(),
-        caption: None,
         sizing: InputImageSizing::Intrinsic,
         alignment: InputBlockAlignment::Left,
         external_url: None,
@@ -191,7 +190,6 @@ fn external_url_image_roundtrips_as_linked_drawing() {
       InputBlock::Image(InputImageBlock {
         asset_id: AssetId(0xA119),
         alt_text: "linked alt".to_string(),
-        caption: None,
         sizing: InputImageSizing::Fixed {
           width_px: 96,
           height_px: Some(72),
@@ -309,7 +307,6 @@ fn image_alt_text_and_png_part_are_emitted() {
     vec![InputBlock::Image(InputImageBlock {
       asset_id: AssetId(1),
       alt_text: "A red test image".to_string(),
-      caption: None,
       sizing: InputImageSizing::FitWidth,
       alignment: InputBlockAlignment::Center,
       external_url: None,
@@ -340,7 +337,6 @@ fn non_png_image_is_transcoded_and_embedded() {
     vec![InputBlock::Image(InputImageBlock {
       asset_id: AssetId(7),
       alt_text: "Animated source".to_string(),
-      caption: None,
       sizing: InputImageSizing::Intrinsic,
       alignment: InputBlockAlignment::Left,
       external_url: None,

@@ -79,7 +79,6 @@ impl AssetRecord {
 pub struct ImageBlock {
   pub asset_id: AssetId,
   pub alt_text: SharedString,
-  pub caption: Option<Paragraph>,
   pub sizing: ImageSizing,
   pub alignment: BlockAlignment,
   /// §A11.9: a genuinely-LINKED image's external target URL (`a:blip r:link` /

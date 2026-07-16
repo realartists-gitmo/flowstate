@@ -46,7 +46,6 @@ fn rich_document(paragraphs: usize) -> flowstate_document::DocumentProjection {
     InputBlock::Image(InputImageBlock {
       asset_id: AssetId(1),
       alt_text: "figure".to_string(),
-      caption: None,
       sizing: InputImageSizing::Intrinsic,
       alignment: InputBlockAlignment::Left,
       external_url: None,

@@ -88,7 +88,6 @@ fn hash_block(block: &Block, hasher: &mut impl Hasher) {
       1u8.hash(hasher);
       image.asset_id.hash(hasher);
       image.alt_text.as_ref().hash(hasher);
-      hash_optional_paragraph(image.caption.as_ref(), hasher);
       hash_image_sizing(&image.sizing, hasher);
       hash_block_alignment(image.alignment, hasher);
       image.version.hash(hasher);

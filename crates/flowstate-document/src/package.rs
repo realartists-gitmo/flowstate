@@ -3948,13 +3948,6 @@ mod tests {
         InputBlock::Image(InputImageBlock {
           asset_id: AssetId(7),
           alt_text: "diagram alt".to_string(),
-          caption: Some(InputParagraph {
-            style: crate::ParagraphStyle::Normal,
-            runs: vec![InputRun {
-              text: "caption text".to_string(),
-              styles: RunStyles::default(),
-            }],
-          }),
           sizing: InputImageSizing::FitWidth,
           alignment: InputBlockAlignment::Left,
           external_url: None,
@@ -3991,16 +3984,6 @@ mod tests {
       ],
     );
     let doc = document_to_loro(&source, "Search projection")?;
-    let image = first_block_owner_by_kind(&doc, "image")?;
-    let caption_flow_id = test_map_string(&image, "caption_flow_id")?;
-    let root = doc.get_map(crate::ROOT);
-    let flows = test_child_map(&root, crate::FLOWS_BY_ID)?;
-    let caption_flow = test_child_map(&flows, &caption_flow_id)?;
-    let caption_text = test_child_text(&caption_flow, crate::FLOW_TEXT_KEY)?;
-    caption_text
-      .insert(1, "caption text")
-      .map_err(loro_test_error)?;
-    doc.commit();
     let package = DocumentPackage::from_loro_snapshot(&doc, "Search projection")?;
     let units = package.current_search_units();
 
@@ -4013,11 +3996,6 @@ mod tests {
       units
         .iter()
         .any(|unit| unit.unit_kind == "image_alt" && unit.body == "diagram alt")
-    );
-    assert!(
-      units
-        .iter()
-        .any(|unit| unit.unit_kind == "image_caption" && unit.body == "caption text")
     );
     assert!(
       units
@@ -4064,13 +4042,6 @@ mod tests {
         InputBlock::Image(InputImageBlock {
           asset_id,
           alt_text: "diagram alt".to_string(),
-          caption: Some(InputParagraph {
-            style: crate::ParagraphStyle::Custom(1),
-            runs: vec![InputRun {
-              text: "caption".to_string(),
-              styles: RunStyles::default(),
-            }],
-          }),
           sizing: InputImageSizing::Fixed {
             width_px: 320,
             height_px: Some(180),
@@ -4141,7 +4112,6 @@ mod tests {
       Block::Image(image)
         if image.asset_id == asset_id
           && image.alt_text.as_ref() == "diagram alt"
-          && image.caption.as_ref().is_some_and(|caption| caption.style == crate::ParagraphStyle::Custom(1))
     ));
     assert!(matches!(
       &loaded.blocks[2],

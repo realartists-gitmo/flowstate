@@ -19,7 +19,7 @@ use super::gate::{GateHolder, GateMetrics, WriteGate};
 use super::intents::{
   DeleteBlocksIntent, DeleteRangeIntent, InsertObjectIntent, InsertRichFragmentIntent, InsertTextIntent, JoinParagraphsIntent, LocalIntent,
   LocalWriteAuthority, LocalWriteOutcome, MoveBlockIntent, ReplaceEquationSourceRangeIntent, ReplaceImageAltTextIntent,
-  ReplaceImageCaptionIntent, ReplaceMatchesIntent, ReplaceObjectIntent, SetImageLayoutIntent, SetMarksIntent, SetParagraphStyleIntent,
+  ReplaceMatchesIntent, ReplaceObjectIntent, SetImageLayoutIntent, SetMarksIntent, SetParagraphStyleIntent,
   SetParagraphStylesIntent, SplitParagraphIntent, TableIntent, UndoOutcome, WriteRejected,
 };
 use crate::crdt_runtime::{CrdtRuntime, RuntimeEvent, SemanticCommand};
@@ -156,9 +156,6 @@ impl LocalDocHandle {
     self.apply_intent(LocalIntent::ReplaceImageAltText(intent))
   }
 
-  pub fn replace_image_caption(&self, intent: ReplaceImageCaptionIntent) -> Result<LocalWriteOutcome, WriteRejected> {
-    self.apply_intent(LocalIntent::ReplaceImageCaption(intent))
-  }
 
   pub fn set_image_layout(&self, intent: SetImageLayoutIntent) -> Result<LocalWriteOutcome, WriteRejected> {
     self.apply_intent(LocalIntent::SetImageLayout(intent))

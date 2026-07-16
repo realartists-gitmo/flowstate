@@ -967,9 +967,6 @@ impl<'a> Projector<'a> {
         .map(|flow_id| self.plain_flow_text(&flow_id))
         .transpose()?
         .unwrap_or_default(),
-      caption: map_string_opt(block, "caption_flow_id")?
-        .map(|flow_id| self.caption_paragraph(&flow_id))
-        .transpose()?,
       sizing: image_sizing(attrs.as_ref())?,
       alignment: alignment(attrs.as_ref())?,
       // §A11.9: the linked-image URL; absent/empty means an embedded image.
@@ -1189,13 +1186,6 @@ impl<'a> Projector<'a> {
     Ok(text)
   }
 
-  fn caption_paragraph(&self, flow_id: &str) -> io::Result<InputParagraph> {
-    let paragraphs = paragraphs_from_text(&self.flow_text(flow_id)?);
-    Ok(paragraphs.into_iter().next().unwrap_or(InputParagraph {
-      style: gpui_flowtext::ParagraphStyle::Normal,
-      runs: Vec::new(),
-    }))
-  }
 }
 
 /// §5 fidelity integrity invariant for the body projection. The caller gates this
@@ -2347,7 +2337,6 @@ mod tests {
         InputBlock::Image(InputImageBlock {
           asset_id: AssetId(42),
           alt_text: "alt".into(),
-          caption: None,
           sizing: InputImageSizing::FitWidth,
           alignment: InputBlockAlignment::Left,
           external_url: None,
@@ -2446,7 +2435,6 @@ mod tests {
       vec![InputBlock::Image(InputImageBlock {
         asset_id: AssetId(7),
         alt_text: "alt".into(),
-        caption: None,
         sizing: InputImageSizing::FitWidth,
         alignment: InputBlockAlignment::Left,
         external_url: None,
@@ -2488,7 +2476,6 @@ mod tests {
       vec![InputBlock::Image(InputImageBlock {
         asset_id: AssetId(42),
         alt_text: "alt".into(),
-        caption: None,
         sizing: InputImageSizing::FitWidth,
         alignment: InputBlockAlignment::Left,
         external_url: None,

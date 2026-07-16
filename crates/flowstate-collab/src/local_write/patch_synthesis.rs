@@ -436,9 +436,6 @@ pub(crate) fn synthesize_patches(core: &CrdtRuntime, intent: &LocalIntent, plan:
     ResolvedPlan::ReplaceImageAltText { image, text } => {
       image_patch(core, *image, |input| input.alt_text = text.clone()).map(|patches| (patches, body_invalidation(0, 0)))
     },
-    ResolvedPlan::ReplaceImageCaption { image, caption } => {
-      image_patch(core, *image, |input| input.caption = caption.clone()).map(|patches| (patches, body_invalidation(0, 0)))
-    },
     ResolvedPlan::SetImageLayout { image, sizing, alignment } => image_patch(core, *image, |input| {
       input.sizing = sizing.clone();
       input.alignment = *alignment;

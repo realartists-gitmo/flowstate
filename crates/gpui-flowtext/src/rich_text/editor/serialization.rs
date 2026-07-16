@@ -39,7 +39,6 @@ pub fn input_block_from_block(block: &Block) -> InputBlock {
     Block::Image(image) => InputBlock::Image(InputImageBlock {
       asset_id: image.asset_id,
       alt_text: image.alt_text.to_string(),
-      caption: image.caption.as_ref().map(input_paragraph_from_paragraph),
       sizing: match image.sizing {
         ImageSizing::Intrinsic => InputImageSizing::Intrinsic,
         ImageSizing::FitWidth => InputImageSizing::FitWidth,
@@ -67,7 +66,6 @@ pub fn block_from_input_block(block: &InputBlock) -> Block {
     InputBlock::Image(image) => Block::Image(ImageBlock {
       asset_id: image.asset_id,
       alt_text: image.alt_text.clone().into(),
-      caption: image.caption.as_ref().map(paragraph_from_input_paragraph),
       sizing: match image.sizing {
         InputImageSizing::Intrinsic => ImageSizing::Intrinsic,
         InputImageSizing::FitWidth => ImageSizing::FitWidth,

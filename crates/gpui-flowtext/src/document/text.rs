@@ -326,7 +326,6 @@ pub enum InputBlock {
 pub struct InputImageBlock {
   pub asset_id: AssetId,
   pub alt_text: String,
-  pub caption: Option<InputParagraph>,
   pub sizing: InputImageSizing,
   pub alignment: InputBlockAlignment,
   /// §A11.9: external target URL for a genuinely-LINKED image (no embedded

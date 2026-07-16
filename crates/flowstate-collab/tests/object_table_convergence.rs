@@ -26,7 +26,7 @@ mod tests {
   use flowstate_collab::local_write::{
     DeleteBlocksIntent, DeleteRangeIntent, FragmentBlock, GateHolder, InsertObjectIntent, InsertRichFragmentIntent, InsertTextIntent,
     JoinParagraphsIntent, LocalDocHandle, LocalWriteConfig, MoveBlockIntent, ReplaceEquationSourceRangeIntent, ReplaceImageAltTextIntent,
-    ReplaceImageCaptionIntent, ReplaceObjectIntent, SetImageLayoutIntent, SetMarksIntent, SetParagraphStyleIntent, SplitParagraphIntent,
+    ReplaceObjectIntent, SetImageLayoutIntent, SetMarksIntent, SetParagraphStyleIntent, SplitParagraphIntent,
     TableIntent, TextAnchor, WriteGate, WriteRejected,
   };
   use flowstate_document::{
@@ -229,7 +229,6 @@ mod tests {
           if left_image.alt_text != right_image.alt_text
             || left_image.sizing != right_image.sizing
             || left_image.alignment != right_image.alignment
-            || left_image.caption.is_some() != right_image.caption.is_some()
           {
             return Err(format!("block[{ix}] image metadata differs"));
           }
@@ -346,7 +345,6 @@ mod tests {
     InputBlock::Image(InputImageBlock {
       asset_id: AssetId(1),
       alt_text: format!("img{}", rng.below(100)),
-      caption: None,
       sizing: InputImageSizing::Intrinsic,
       alignment: InputBlockAlignment::Left,
       external_url: None,
@@ -726,11 +724,13 @@ mod tests {
               text: format!("alt-{step}"),
             })
             .map(|_| ()),
+          // B-S10b: caption is DELETED from the model (B7-A) — the arm now
+          // exercises alt text again with a different payload shape.
           1 => peer
             .handle
-            .replace_image_caption(ReplaceImageCaptionIntent {
+            .replace_image_alt_text(ReplaceImageAltTextIntent {
               image,
-              caption: (rng.below(2) == 0).then(|| input_paragraph(&format!("cap-{step}"))),
+              text: format!("alt-b-{step}"),
             })
             .map(|_| ()),
           _ => peer

@@ -321,7 +321,6 @@ mod block_seq_tests {
     Block::Image(crate::ImageBlock {
       asset_id: crate::AssetId(1),
       alt_text: "x".into(),
-      caption: None,
       sizing: crate::ImageSizing::Intrinsic,
       alignment: crate::BlockAlignment::Left,
       external_url: None,

@@ -118,7 +118,6 @@ pub enum SemanticCommand {
     unicode_index: usize,
     asset_id: u128,
     alt_text: String,
-    caption: Option<String>,
     sizing: InputImageSizing,
     alignment: InputBlockAlignment,
   },

@@ -136,7 +136,6 @@ pub fn execute_cell_text(doc: &LoroDoc, cell_id: CellId, intent: &LocalIntent) -
     | LocalIntent::MoveBlock(_)
     | LocalIntent::ReplaceEquationSourceRange(_)
     | LocalIntent::ReplaceImageAltText(_)
-    | LocalIntent::ReplaceImageCaption(_)
     | LocalIntent::SetImageLayout(_)
     | LocalIntent::Table(_)
     | LocalIntent::TableCellText(_) => Err(WriteRejected::StructureViolation("flow cells do not contain objects")),

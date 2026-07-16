@@ -214,12 +214,6 @@ pub struct ReplaceImageAltTextIntent {
 }
 
 #[derive(Clone, Debug)]
-pub struct ReplaceImageCaptionIntent {
-  pub image: BlockId,
-  pub caption: Option<InputParagraph>,
-}
-
-#[derive(Clone, Debug)]
 pub struct SetImageLayoutIntent {
   pub image: BlockId,
   pub sizing: InputImageSizing,
@@ -375,7 +369,6 @@ pub enum LocalIntent {
   ReplaceMatches(ReplaceMatchesIntent),
   ReplaceEquationSourceRange(ReplaceEquationSourceRangeIntent),
   ReplaceImageAltText(ReplaceImageAltTextIntent),
-  ReplaceImageCaption(ReplaceImageCaptionIntent),
   SetImageLayout(SetImageLayoutIntent),
   Table(TableIntent),
   TableCellText(TableCellTextIntent),
@@ -402,7 +395,6 @@ impl LocalIntent {
       Self::ReplaceMatches(_) => "replace-matches",
       Self::ReplaceEquationSourceRange(_) => "replace-equation-source",
       Self::ReplaceImageAltText(_) => "replace-image-alt-text",
-      Self::ReplaceImageCaption(_) => "replace-image-caption",
       Self::SetImageLayout(_) => "set-image-layout",
       Self::Table(_) => "table-op",
       Self::TableCellText(_) => "table-cell-text",

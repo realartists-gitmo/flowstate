@@ -305,15 +305,6 @@ fn import_image_block(
   block.insert("alt_text_flow_id", alt_text_flow_id.as_str())?;
   let alt_flow = ensure_flow(flows, &alt_text_flow_id, "alt_text")?;
   replace_text(&alt_flow.ensure_mergeable_text(FLOW_TEXT_KEY)?, image.alt_text.as_ref())?;
-  if let Some(caption) = &image.caption {
-    let caption_flow_id = nested_flow_id("image_caption", &durable_block_id);
-    block.insert("caption_flow_id", caption_flow_id.as_str())?;
-    let caption_flow = ensure_flow(flows, &caption_flow_id, "caption")?;
-    let caption_text = caption_flow.ensure_mergeable_text(FLOW_TEXT_KEY)?;
-    let mut caption_plan = FlowTextImportPlan::new(1, caption.runs.len().saturating_add(1));
-    caption_plan.push_paragraph(caption, "");
-    caption_plan.write_to(None, &caption_text)?;
-  }
   let attrs = block.ensure_mergeable_map("attrs")?;
   attrs.insert("alignment", alignment_name(image.alignment))?;
   match image.sizing {

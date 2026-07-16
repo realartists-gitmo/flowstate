@@ -297,7 +297,6 @@ impl<'ctx> ImageAssets<'ctx> {
               images.push(InputImageBlock {
                 asset_id,
                 alt_text: String::new(),
-                caption: None,
                 sizing,
                 alignment: InputBlockAlignment::Left,
                 external_url: None,
@@ -308,7 +307,6 @@ impl<'ctx> ImageAssets<'ctx> {
               images.push(InputImageBlock {
                 asset_id,
                 alt_text: String::new(),
-                caption: None,
                 sizing,
                 alignment: InputBlockAlignment::Left,
                 external_url: Some(url),
@@ -637,7 +635,6 @@ impl TypedWalker<'_> {
       return Some(InputImageBlock {
         asset_id,
         alt_text,
-        caption: None,
         sizing: sizing_from_extent_emu(extent_cx, extent_cy),
         alignment: InputBlockAlignment::Left,
         external_url: Some(url),
@@ -647,7 +644,6 @@ impl TypedWalker<'_> {
     Some(InputImageBlock {
       asset_id,
       alt_text,
-      caption: None,
       sizing: sizing_from_extent_emu(extent_cx, extent_cy),
       alignment: InputBlockAlignment::Left,
       external_url: None,
@@ -1346,7 +1342,6 @@ impl StructuredWalker<'_> {
       return Some(InputImageBlock {
         asset_id,
         alt_text,
-        caption: None,
         sizing: drawing_sizing(drawing),
         alignment: InputBlockAlignment::Left,
         external_url: None,
@@ -1359,7 +1354,6 @@ impl StructuredWalker<'_> {
     Some(InputImageBlock {
       asset_id,
       alt_text,
-      caption: None,
       sizing: drawing_sizing(drawing),
       alignment: InputBlockAlignment::Left,
       external_url: Some(url),

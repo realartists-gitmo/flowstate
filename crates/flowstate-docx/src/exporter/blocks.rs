@@ -431,11 +431,6 @@ fn export_image(
   context: &SectionContext,
   side: &mut SideChannel,
 ) -> DocxParagraph {
-  // FS-127 fidelity: an image caption has no OOXML representation in this
-  // exporter, so a present caption is silently dropped on export.
-  flowstate_fidelity::check(image.caption.is_none(), FidelityClass::ImportExport, "export-dropped-caption", || {
-    format!("image asset {:?} caption is not written to docx export", image.asset_id)
-  });
   if let Some(asset) = document.assets.assets.get(&image.asset_id)
     && !asset.is_loading_placeholder()
   {

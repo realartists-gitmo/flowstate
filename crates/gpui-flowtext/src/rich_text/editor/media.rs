@@ -264,7 +264,6 @@ impl RichTextEditor {
       blocks.push(Block::Image(ImageBlock {
         asset_id,
         alt_text,
-        caption: None,
         sizing: ImageSizing::FitWidth,
         alignment: BlockAlignment::Center,
         external_url: None,

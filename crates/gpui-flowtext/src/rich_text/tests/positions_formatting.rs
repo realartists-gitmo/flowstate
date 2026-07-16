@@ -20,7 +20,6 @@ fn document_position_round_trips_top_level_text_blocks() {
     Block::Image(ImageBlock {
       asset_id: AssetId(42),
       alt_text: "missing".into(),
-      caption: None,
       sizing: ImageSizing::Intrinsic,
       alignment: BlockAlignment::Center,
       external_url: None,

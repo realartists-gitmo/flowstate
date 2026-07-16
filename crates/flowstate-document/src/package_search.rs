@@ -168,9 +168,6 @@ impl SearchUnitBuilder<'_> {
     if let Some(flow_id) = map_string_opt(block, "alt_text_flow_id") {
       self.push_flow_text_unit(flows, "image_alt", &flow_id, SearchUnitRefs::for_block(block_id))?;
     }
-    if let Some(flow_id) = map_string_opt(block, "caption_flow_id") {
-      self.push_flow_text_unit(flows, "image_caption", &flow_id, SearchUnitRefs::for_block(block_id))?;
-    }
     Ok(())
   }
 

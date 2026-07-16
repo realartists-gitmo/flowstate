@@ -102,7 +102,6 @@ mod tests {
           block: InputBlock::Image(InputImageBlock {
             asset_id: AssetId(1),
             alt_text: format!("img{n}"),
-            caption: None,
             sizing: InputImageSizing::Intrinsic,
             alignment: InputBlockAlignment::Left,
             external_url: None,
