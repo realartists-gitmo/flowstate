@@ -2045,6 +2045,70 @@ impl CrdtRuntime {
     self.finish_comment_mutation(from_frontier, from_vv, if resolved { "comment-resolve" } else { "comment-reopen" })
   }
 
+  /// C-S6: give an orphaned thread a new live anchor. The quoted text follows
+  /// the new target (the card must read as what it now points at), and the
+  /// original `created_frontier` is deliberately left alone — history-jump
+  /// still shows the thread's TRUE original context.
+  pub fn reanchor_comment(&mut self, comment_id: u128, selection: &EditorSelection) -> Result<()> {
+    anyhow::ensure!(selection.anchor != selection.head, "Select text before re-anchoring a comment");
+    let (head_cursor, anchor_cursor) = self
+      .encode_selection_anchor(selection)
+      .context("The selected text cannot be anchored in this document")?;
+    let start = gpui_flowtext::global_byte(&self.projection, selection.anchor.min(selection.head));
+    let end = gpui_flowtext::global_byte(&self.projection, selection.anchor.max(selection.head));
+    let quoted_text = gpui_flowtext::document_text_slice(&self.projection, start..end);
+    let from_frontier = self.doc.state_frontiers();
+    let from_vv = self.doc.state_vv();
+    let thread = existing_comment_thread(&self.doc, comment_id)?;
+    thread.insert("head_cursor", LoroValue::Binary(head_cursor.into()))?;
+    thread.insert("anchor_cursor", LoroValue::Binary(anchor_cursor.into()))?;
+    thread.insert("quoted_text", quoted_text.as_str())?;
+    // A re-anchored thread is no general note (it may have been rendered as
+    // one while orphaned).
+    thread.insert("general", false)?;
+    thread.insert("updated_at", unix_time_secs())?;
+    self.finish_comment_mutation(from_frontier, from_vv, "comment-reanchor")
+  }
+
+  /// C-S6 history-jump: the document as the comment author saw it — a
+  /// read-only projection at the thread's `created_frontier`, plus the
+  /// thread's anchor resolved AT that frontier (cursor bytes are stable ids,
+  /// so the live thread's cursors resolve against the historical fork).
+  pub fn frontier_comment_context(
+    &self,
+    frontier: &[u8],
+    comment_id: u128,
+  ) -> Result<(DocumentProjection, Option<(DocumentOffset, DocumentOffset)>)> {
+    let frontiers = Frontiers::decode(frontier).context("decoding frontier blob for comment context")?;
+    let historical_doc = self
+      .doc
+      .fork_at(&frontiers)
+      .context("forking document at the comment's birth frontier")?;
+    let mut document = document_from_loro(&historical_doc).context("projecting historical comment context")?;
+    if let Some(package) = &self.package {
+      attach_package_assets(&mut document, package);
+    }
+    let anchor = (|| {
+      let thread = existing_comment_thread(&self.doc, comment_id).ok()?;
+      let head_bytes = map_binary_opt(&thread, "head_cursor")?;
+      let anchor_bytes = map_binary_opt(&thread, "anchor_cursor")?;
+      let index = ProjectionRuntimeIndex::from_projection(&document);
+      let text = body_text(&historical_doc);
+      let resolve = |encoded: &[u8]| -> Option<DocumentOffset> {
+        let cursor = Cursor::decode(encoded).ok()?;
+        if cursor.container != text.id() {
+          return None;
+        }
+        let resolved = historical_doc.get_cursor_pos(&cursor).ok()?;
+        let unicode = resolved_cursor_boundary_unicode(&text, &resolved)?;
+        index.offset_for_body_unicode(&document, unicode)
+      };
+      let (head, anchor) = (resolve(&head_bytes)?, resolve(&anchor_bytes)?);
+      Some(if anchor <= head { (anchor, head) } else { (head, anchor) })
+    })();
+    Ok((document, anchor))
+  }
+
   pub fn edit_comment_message(&mut self, comment_id: u128, message_id: u128, body: &str, actor_user_id: u128) -> Result<()> {
     let body = validated_comment_body(body)?;
     let from_frontier = self.doc.state_frontiers();
@@ -7964,6 +8028,62 @@ mod tests {
       assert!(tombstoned.deleted);
       assert!(tombstoned.body.is_empty());
     }
+    Ok(())
+  }
+
+  #[test]
+  fn orphaned_comment_reanchors_and_history_jump_shows_original_context() -> Result<()> {
+    let mut runtime = CrdtRuntime::new_empty("Runtime")?;
+    runtime.command(SemanticCommand::InsertText {
+      unicode_index: 1,
+      text: "target words remain here".to_string(),
+      styles: RunStyles::default(),
+    })?;
+    runtime.set_author_identity(7, Some("Ada".into()))?;
+
+    // Comment on "target" (unicode 1..7 in body space → paragraph bytes 0..6).
+    let selection = EditorSelection::range(DocumentOffset { paragraph: 0, byte: 0 }, DocumentOffset { paragraph: 0, byte: 6 });
+    let comment_id = runtime.create_comment(Some(&selection), "This word is wrong", 7, "Ada")?;
+    let created_frontier = runtime.comments()[0]
+      .created_frontier
+      .clone()
+      .expect("birth frontier recorded");
+
+    // Delete the anchored word: the thread orphans (anchor collapses away).
+    runtime.command(SemanticCommand::DeleteRange {
+      unicode_index: 1,
+      unicode_len: 7,
+    })?;
+    assert!(
+      runtime.comments()[0].anchor.is_none(),
+      "deleting the anchored text must orphan the thread"
+    );
+
+    // C-S6 history-jump: the birth-frontier checkout shows the original text
+    // and resolves the ORIGINAL anchor inside it.
+    let (historical, anchor) = runtime.frontier_comment_context(&created_frontier, comment_id)?;
+    assert_eq!(flowstate_document::paragraph_text(&historical, 0), "target words remain here");
+    let (start, end) = anchor.expect("original anchor resolves at the birth frontier");
+    assert_eq!((start.paragraph, start.byte), (0, 0));
+    assert_eq!((end.paragraph, end.byte), (0, 6));
+    // The live document is untouched by the checkout.
+    assert_eq!(flowstate_document::paragraph_text(&runtime.projection_snapshot()?, 0), "words remain here");
+
+    // C-S6 re-anchor: attach the thread to "words" and it stops being an orphan.
+    let new_selection = EditorSelection::range(DocumentOffset { paragraph: 0, byte: 0 }, DocumentOffset { paragraph: 0, byte: 5 });
+    runtime.reanchor_comment(comment_id, &new_selection)?;
+    let thread = &runtime.comments()[0];
+    assert_eq!(thread.quoted_text, "words");
+    assert!(!thread.general);
+    let (start, end) = thread.anchor.expect("re-anchored thread has a live anchor");
+    assert_eq!((start.paragraph, start.byte), (0, 0));
+    assert_eq!((end.paragraph, end.byte), (0, 5));
+    // The birth frontier is untouched: history-jump still shows the TRUE origin.
+    assert_eq!(
+      thread.created_frontier.as_deref(),
+      Some(created_frontier.as_slice()),
+      "re-anchoring must not rewrite the thread's birth frontier"
+    );
     Ok(())
   }
 

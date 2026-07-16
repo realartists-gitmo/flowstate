@@ -40,6 +40,13 @@ const IO_REQUEST_CHANNEL_CAPACITY: usize = 256;
 /// gate hold-time budget is the real bound; this caps pathological queues.
 const IMPORT_COALESCE_MAX: usize = 16;
 
+/// C-S6: a comment's original context — the historical projection at the
+/// thread's birth frontier and the anchor resolved within it.
+pub type CommentHistoryContext = (
+  Box<DocumentProjection>,
+  Option<(gpui_flowtext::DocumentOffset, gpui_flowtext::DocumentOffset)>,
+);
+
 pub enum IoRequest {
   ImportRemoteUpdate {
     bytes: Vec<u8>,
@@ -112,6 +119,18 @@ pub enum IoRequest {
     comment_id: u128,
     resolved: bool,
     reply: Sender<Result<()>>,
+  },
+  ReanchorComment {
+    comment_id: u128,
+    selection: gpui_flowtext::EditorSelection,
+    reply: Sender<Result<()>>,
+  },
+  /// C-S6 history-jump: the projection at a comment's birth frontier plus its
+  /// anchor resolved at that frontier.
+  FrontierCommentContext {
+    frontier: Vec<u8>,
+    comment_id: u128,
+    reply: Sender<Result<CommentHistoryContext>>,
   },
   EditCommentMessage {
     comment_id: u128,
@@ -190,6 +209,8 @@ fn io_request_kind(request: &IoRequest) -> &'static str {
     IoRequest::CreateComment { .. } => "create-comment",
     IoRequest::ReplyToComment { .. } => "reply-to-comment",
     IoRequest::SetCommentResolved { .. } => "set-comment-resolved",
+    IoRequest::ReanchorComment { .. } => "reanchor-comment",
+    IoRequest::FrontierCommentContext { .. } => "frontier-comment-context",
     IoRequest::EditCommentMessage { .. } => "edit-comment-message",
     IoRequest::DeleteComment { .. } => "delete-comment",
     IoRequest::DeleteCommentMessage { .. } => "delete-comment-message",
@@ -353,6 +374,18 @@ impl DocIoHandle {
         author_display_name,
         reply,
       })
+      .await
+  }
+
+  pub async fn reanchor_comment(&self, comment_id: u128, selection: gpui_flowtext::EditorSelection) -> Result<()> {
+    self
+      .request(|reply| IoRequest::ReanchorComment { comment_id, selection, reply })
+      .await
+  }
+
+  pub async fn frontier_comment_context(&self, frontier: Vec<u8>, comment_id: u128) -> Result<CommentHistoryContext> {
+    self
+      .request(|reply| IoRequest::FrontierCommentContext { frontier, comment_id, reply })
       .await
   }
 
@@ -833,6 +866,24 @@ fn io_loop(core: &Arc<WriteGate<CrdtRuntime>>, receiver: &Receiver<IoRequest>) {
           &reply,
           gate_call(core, GateHolder::DocumentService, |runtime| {
             runtime.set_comment_resolved(comment_id, resolved)
+          }),
+        );
+      },
+      IoRequest::ReanchorComment { comment_id, selection, reply } => {
+        send_reply(
+          &reply,
+          gate_call(core, GateHolder::DocumentService, |runtime| {
+            runtime.reanchor_comment(comment_id, &selection)
+          }),
+        );
+      },
+      IoRequest::FrontierCommentContext { frontier, comment_id, reply } => {
+        send_reply(
+          &reply,
+          gate_call(core, GateHolder::DocumentService, |runtime| {
+            runtime
+              .frontier_comment_context(&frontier, comment_id)
+              .map(|(document, anchor)| (Box::new(document), anchor))
           }),
         );
       },

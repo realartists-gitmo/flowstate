@@ -837,6 +837,59 @@ impl CommentsPanel {
                 );
               })),
           )
+          // C-S6: orphan recovery — the anchor text is gone, but the thread's
+          // birth frontier still knows where it lived.
+          .when(orphaned && thread.created_frontier.is_some(), |this| {
+            this.child(
+              Button::new(("comment-view-original", comment_id as u64))
+                .text()
+                .compact()
+                .tooltip("Open a read-only view of the document as this comment was written")
+                .child(div().text_xs().text_color(cx.theme().muted_foreground).child("View original"))
+                .on_click(cx.listener(move |panel, _, window, cx| {
+                  let Some(panel_id) = panel.panel_id else { return };
+                  let Some(thread) = panel.threads.iter().find(|thread| thread.comment_id == comment_id) else {
+                    return;
+                  };
+                  let Some(frontier) = thread.created_frontier.clone() else { return };
+                  let quote = thread.quoted_text.clone();
+                  let _ = panel.workspace.update(cx, |workspace, cx| {
+                    workspace.open_comment_history_view(panel_id, comment_id, frontier, quote, window, cx);
+                  });
+                })),
+            )
+          })
+          .when(orphaned, |this| {
+            let has_live_selection = self.editor.as_ref().is_some_and(|editor| {
+              let selection = editor.read(cx).selection();
+              selection.anchor != selection.head
+            });
+            this.child(
+              Button::new(("comment-reanchor", comment_id as u64))
+                .text()
+                .compact()
+                .disabled(busy || !has_live_selection)
+                .tooltip(if has_live_selection {
+                  "Attach this thread to the selected text"
+                } else {
+                  "Select text in the document first"
+                })
+                .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Re-anchor"))
+                .on_click(cx.listener(move |panel, _, _, cx| {
+                  let Some(selection) = panel.editor.as_ref().map(|editor| editor.read(cx).selection().clone()) else {
+                    return;
+                  };
+                  if selection.anchor == selection.head {
+                    return;
+                  }
+                  panel.thread_action(
+                    comment_id,
+                    move |io| async move { io.reanchor_comment(comment_id, selection).await },
+                    cx,
+                  );
+                })),
+            )
+          })
           .when(is_thread_author, |this| {
             this.child(
               Button::new(("comment-delete", comment_id as u64))

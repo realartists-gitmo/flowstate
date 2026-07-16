@@ -1197,6 +1197,62 @@ impl Workspace {
     id
   }
 
+  /// C-S6 history-jump: open a read-only tab showing the document as the
+  /// comment's author saw it — a checkout at the thread's birth frontier —
+  /// and flash the original anchor. The tab reuses the phase-V pending-panel
+  /// shape (no write authority ⇒ read-only display surface); no runtime ever
+  /// attaches, so it stays a view.
+  pub(crate) fn open_comment_history_view(
+    &mut self,
+    panel_id: Uuid,
+    comment_id: u128,
+    created_frontier: Vec<u8>,
+    quote: String,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) {
+    let Some(io) = self.document_runtimes.get(&panel_id).cloned() else {
+      self.report_failure("Opening the comment's original context failed: the document is still opening", None, cx);
+      return;
+    };
+    let window_handle = window.window_handle();
+    cx.spawn(async move |workspace, cx| {
+      let result = io.frontier_comment_context(created_frontier, comment_id).await;
+      let _ = window_handle.update(cx, |_, window, cx| {
+        let _ = workspace.update(cx, |workspace, cx| match result {
+          Ok((document, anchor)) => {
+            let mut short_quote: String = quote.chars().take(24).collect();
+            if short_quote.len() < quote.len() {
+              short_quote.push('…');
+            }
+            let title = if short_quote.is_empty() {
+              "Original context".to_string()
+            } else {
+              format!("Original context — “{short_quote}”")
+            };
+            workspace.create_pending_document_panel(*document, None, Some(title), window, cx);
+            if let Some((start, end)) = anchor
+              && let Some(editor) = workspace.active_editor.clone()
+            {
+              editor.update(cx, |editor, cx| {
+                editor.peek_paragraph(start.paragraph, crate::rich_text_element::DEFAULT_JUMP_FLASH_RGB, window, cx);
+                editor.flash_range(
+                  crate::rich_text_element::EditorSelection::range(start, end),
+                  crate::rich_text_element::DEFAULT_JUMP_FLASH_RGB,
+                  cx,
+                );
+              });
+            }
+          },
+          Err(error) => {
+            workspace.report_failure(format!("Opening the comment's original context failed: {error:#}"), None, cx);
+          },
+        });
+      });
+    })
+    .detach();
+  }
+
   /// §act-three C (phase G): attach the freshly-loaded runtime to a panel
   /// opened read-only by [`Self::create_pending_document_panel`]. Installs the
   /// write authority + I/O hooks (making the editor editable and swapping in
