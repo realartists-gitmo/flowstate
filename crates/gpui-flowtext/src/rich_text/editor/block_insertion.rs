@@ -98,7 +98,11 @@ impl RichTextEditor {
         mime_type: asset.mime_type.clone().into(),
         original_name: asset.original_name.clone().map(Into::into),
         content_hash: asset.content_hash,
+        dimensions: imagesize::blob_size(&asset.bytes)
+          .ok()
+          .map(|size| (size.width as u32, size.height as u32)),
         bytes: Arc::new(asset.bytes.clone()),
+        render_image: Arc::default(),
       };
       self.document.assets.assets.insert(asset.id, record);
     }

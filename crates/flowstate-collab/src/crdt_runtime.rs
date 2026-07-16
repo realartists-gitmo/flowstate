@@ -5954,7 +5954,7 @@ pub(crate) fn move_projection_object_block(
 /// before a paragraph lands on its boundary `\n` (clamped past the sentinel), which
 /// attaches the object to the previous block's tail exactly as `push_flow_blocks`
 /// re-segments it.
-fn projection_block_lead_pos_in_loro(doc: &LoroDoc, projection: &DocumentProjection, body: &LoroText, block_ix: usize) -> usize {
+pub(crate) fn projection_block_lead_pos_in_loro(doc: &LoroDoc, projection: &DocumentProjection, body: &LoroText, block_ix: usize) -> usize {
   let Some(block) = projection.blocks.get(block_ix) else {
     return body.len_unicode();
   };

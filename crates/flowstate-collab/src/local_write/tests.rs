@@ -9,7 +9,8 @@ use super::commit::INJECT_FRAGMENT_FAULT;
 use super::gate::{GateHolder, WriteGate};
 use super::handle::{LocalDocHandle, LocalWriteConfig};
 use super::intents::{
-  DeleteRangeIntent, FragmentBlock, InsertRichFragmentIntent, InsertTextIntent, SetMarksIntent, SetParagraphStylesIntent, SplitParagraphIntent,
+  DeleteBlocksIntent, DeleteRangeIntent, FragmentBlock, InsertObjectIntent, InsertRichFragmentIntent, InsertTextIntent,
+  ReplaceEquationSourceRangeIntent, SetMarksIntent, SetParagraphStylesIntent, SplitParagraphIntent,
   TextAnchor, WriteRejected,
 };
 use crate::crdt_runtime::{CrdtRuntime, RuntimeEvent};
@@ -2897,4 +2898,145 @@ fn recorded_inverse_chains_full_typing_session() {
   }
   assert_eq!(stack_depths(&gate), (4, 0), "ALL redos stayed on the fast path");
   assert_live_equals_canonical(&handle, &gate, "session replay");
+}
+
+/// B-S2 (blocks floor): the object intents capture recorded inverses. Before
+/// this, ONE equation keystroke or image insert both took the O(history)
+/// checkout slow path on its own undo AND cleared every deeper captured fast
+/// path — poisoning the whole session's undo. `stack_depths` is the proof:
+/// every fast step MOVES an entry undo→redo; the slow path clears both.
+#[test]
+fn object_ops_capture_and_chain_fast_undos() {
+  let (handle, gate) = new_handle("recorded-inverse-objects");
+  let projection = handle.projection().expect("projection");
+  let paragraph = first_paragraph(&projection);
+
+  // 1) Insert an equation (InsertObject capture).
+  handle
+    .insert_object(InsertObjectIntent {
+      at: TextAnchor::new(paragraph, 0),
+      block: flowstate_document::InputBlock::Equation(flowstate_document::InputEquationBlock {
+        source: "e = mc^2".into(),
+        syntax: flowstate_document::InputEquationSyntax::Latex,
+        display: flowstate_document::InputEquationDisplay::Display,
+      }),
+    })
+    .expect("equation inserts");
+  let equation_id = {
+    let projection = handle.projection().expect("projection");
+    let ix = projection
+      .blocks
+      .iter()
+      .position(|block| matches!(block, flowstate_document::Block::Equation(_)))
+      .expect("equation block present");
+    projection.ids.block_ids[ix]
+  };
+
+  // 2) Two equation-source keystrokes (ReplaceEquationSourceRange captures).
+  handle
+    .replace_equation_source_range(ReplaceEquationSourceRangeIntent {
+      equation: equation_id,
+      range: 0..0,
+      text: "E".into(),
+    })
+    .expect("source keystroke 1");
+  handle
+    .replace_equation_source_range(ReplaceEquationSourceRangeIntent {
+      equation: equation_id,
+      range: 1..4,
+      text: String::new(),
+    })
+    .expect("source keystroke 2");
+  let source_of = |handle: &LocalDocHandle| -> String {
+    let projection = handle.projection().expect("projection");
+    projection
+      .blocks
+      .iter()
+      .find_map(|block| match block {
+        flowstate_document::Block::Equation(equation) => Some(equation.source.to_string()),
+        _ => None,
+      })
+      .unwrap_or_default()
+  };
+  assert_eq!(source_of(&handle), "E mc^2", "two source splices applied");
+  assert_eq!(stack_depths(&gate), (3, 0), "insert + two source keystrokes all captured");
+
+  // 3) Undo all three — EACH must stay on the fast path (undo→redo moves).
+  for _ in 0..3 {
+    assert!(handle.apply_undo().expect("undo runs").applied);
+  }
+  assert_eq!(stack_depths(&gate), (0, 3), "all three object undos replayed via the fast path");
+  let projection = handle.projection().expect("projection");
+  assert!(
+    !projection
+      .blocks
+      .iter()
+      .any(|block| matches!(block, flowstate_document::Block::Equation(_))),
+    "undo chain removed the equation again"
+  );
+
+  // 4) Redo all three — back to the edited equation, all fast.
+  for _ in 0..3 {
+    assert!(handle.apply_redo().expect("redo runs").applied);
+  }
+  assert_eq!(stack_depths(&gate), (3, 0), "all three redos replayed via the fast path");
+  assert_eq!(source_of(&handle), "E mc^2", "redo chain restored the edited source");
+}
+
+/// B-S2: deleting the selected object captures too — and an object op no
+/// longer clears deeper TEXT captures (the poisoning half of the defect).
+#[test]
+fn object_delete_captures_and_preserves_deeper_text_captures() {
+  let (handle, gate) = new_handle("recorded-inverse-object-delete");
+  let projection = handle.projection().expect("projection");
+  let paragraph = first_paragraph(&projection);
+
+  // A text keystroke first (captured), then an image insert, then its delete.
+  handle
+    .insert_text(InsertTextIntent {
+      at: TextAnchor::new(paragraph, 0),
+      text: "lead ".into(),
+      style_override: None,
+    })
+    .expect("keystroke commits");
+  handle
+    .insert_object(InsertObjectIntent {
+      at: TextAnchor::new(paragraph, 5),
+      block: flowstate_document::InputBlock::Equation(flowstate_document::InputEquationBlock {
+        source: "x".into(),
+        syntax: flowstate_document::InputEquationSyntax::Latex,
+        display: flowstate_document::InputEquationDisplay::Display,
+      }),
+    })
+    .expect("object inserts");
+  let object_id = {
+    let projection = handle.projection().expect("projection");
+    let ix = projection
+      .blocks
+      .iter()
+      .position(|block| matches!(block, flowstate_document::Block::Equation(_)))
+      .expect("object present");
+    projection.ids.block_ids[ix]
+  };
+  handle
+    .delete_blocks(DeleteBlocksIntent { blocks: vec![object_id] })
+    .expect("object deletes");
+
+  // All three ops captured — the object ops did NOT clear the keystroke's
+  // entry beneath them.
+  assert_eq!(
+    stack_depths(&gate),
+    (3, 0),
+    "text keystroke + object insert + object delete all hold captures"
+  );
+  for _ in 0..3 {
+    assert!(handle.apply_undo().expect("undo runs").applied);
+  }
+  assert_eq!(stack_depths(&gate), (0, 3), "the whole mixed chain undoes on the fast path");
+  let projection = handle.projection().expect("projection");
+  assert!(!projection.blocks.iter().any(|block| matches!(block, flowstate_document::Block::Equation(_))));
+  assert!(
+    !paragraph_text(&projection, 0).starts_with("lead "),
+    "the keystroke undid too"
+  );
 }

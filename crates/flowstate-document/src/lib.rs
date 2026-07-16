@@ -116,7 +116,12 @@ pub fn attach_package_assets(document: &mut DocumentProjection, assets: &[AssetC
         mime_type: asset.mime_type.clone().into(),
         original_name: None,
         content_hash: AssetRecord::stable_content_hash(&bytes),
+        // B-S2: one header sniff at load — layout reads the stored value.
+        dimensions: imagesize::blob_size(&bytes)
+          .ok()
+          .map(|size| (size.width as u32, size.height as u32)),
         bytes: Arc::new(bytes),
+        render_image: Arc::default(),
       },
     );
   }
@@ -130,7 +135,9 @@ pub fn attach_package_assets(document: &mut DocumentProjection, assets: &[AssetC
         mime_type: "application/octet-stream".into(),
         original_name: None,
         content_hash: AssetRecord::stable_content_hash(&[]),
+        dimensions: None,
         bytes: Arc::new(Vec::new()),
+        render_image: Arc::default(),
       });
   }
 }

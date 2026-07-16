@@ -207,7 +207,12 @@ impl<'ctx> ImageAssets<'ctx> {
           mime_type: mime_from_path(&target).into(),
           original_name: Some(file_name(&target).into()),
           content_hash: AssetRecord::stable_content_hash(bytes),
+          // B-S2: one header sniff at import — layout reads the stored value.
+          dimensions: imagesize::blob_size(bytes)
+            .ok()
+            .map(|size| (size.width as u32, size.height as u32)),
           bytes: Arc::new(bytes.to_vec()),
+          render_image: Arc::default(),
         },
       ));
     }

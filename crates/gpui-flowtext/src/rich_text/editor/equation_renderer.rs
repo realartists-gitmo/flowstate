@@ -9,6 +9,11 @@ use typst::World;
 
 struct EquationRenderer;
 
+/// B-S2: layout-facing intrinsic size (logical px) for an equation block.
+pub(crate) fn equation_intrinsic_size(equation: &EquationBlock) -> Result<(f32, f32), String> {
+  EquationRenderer::intrinsic_size(equation)
+}
+
 #[hotpath::measure_all]
 impl EquationRenderer {
   fn clear_entries(keys: impl IntoIterator<Item = (SharedString, bool)>) {
@@ -26,6 +31,14 @@ impl EquationRenderer {
     }
 
     if let Some(cache) = EQUATION_PNG_CACHE.get()
+      && let Ok(mut cache) = cache.lock()
+    {
+      for key in &keys {
+        cache.remove(key);
+      }
+    }
+
+    if let Some(cache) = EQUATION_IMAGE_CACHE.get()
       && let Ok(mut cache) = cache.lock()
     {
       for key in &keys {
@@ -60,6 +73,34 @@ impl EquationRenderer {
     let result = Self::svg_bytes(equation)
       .and_then(|svg| rasterize_svg_to_png(svg.as_ref()))
       .map(Arc::new);
+    if let Ok(mut cache) = cache.lock() {
+      cache.insert(key, result.clone());
+    }
+    result
+  }
+
+  /// B-S2: the equation's INTRINSIC render size in logical pixels (the raster
+  /// runs at [`EQUATION_RASTER_SCALE`]×). Layout and paint size the box from
+  /// this instead of the old fixed 60px height + `len × 26px` width guess.
+  fn intrinsic_size(equation: &EquationBlock) -> Result<(f32, f32), String> {
+    let png = Self::png_bytes(equation)?;
+    let size = imagesize::blob_size(png.as_ref()).map_err(|error| error.to_string())?;
+    Ok((
+      size.width as f32 / EQUATION_RASTER_SCALE,
+      size.height as f32 / EQUATION_RASTER_SCALE,
+    ))
+  }
+
+  /// B-S2: the shared gpui image handle — building `Image::from_bytes` cloned
+  /// the full PNG on every paint of every visible equation.
+  fn render_image(equation: &EquationBlock) -> Result<Arc<gpui::Image>, String> {
+    let display = matches!(equation.display, EquationDisplay::Display);
+    let key = (equation.source.clone(), display);
+    let cache = EQUATION_IMAGE_CACHE.get_or_init(|| Mutex::new(FxHashMap::default()));
+    if let Some(cached) = cache.lock().ok().and_then(|cache| cache.get(&key).cloned()) {
+      return cached;
+    }
+    let result = Self::png_bytes(equation).map(|png| Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Png, png.as_ref().clone())));
     if let Ok(mut cache) = cache.lock() {
       cache.insert(key, result.clone());
     }
@@ -166,8 +207,10 @@ impl World for EquationWorld {
 }
 
 #[hotpath::measure]
+/// Raster oversampling factor — headroom for zoomed display without re-render.
+const EQUATION_RASTER_SCALE: f32 = 4.0;
+
 fn rasterize_svg_to_png(svg: &[u8]) -> Result<Vec<u8>, String> {
-  const EQUATION_RASTER_SCALE: f32 = 4.0;
   let tree = resvg::usvg::Tree::from_data(svg, &resvg::usvg::Options::default()).map_err(|error| error.to_string())?;
   let svg_size = tree.size();
   let width = (svg_size.width() * EQUATION_RASTER_SCALE).ceil().max(1.0) as u32;

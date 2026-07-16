@@ -4103,7 +4103,9 @@ mod tests {
         mime_type: "image/png".into(),
         original_name: Some("diagram.png".into()),
         content_hash: AssetRecord::stable_content_hash(&asset_bytes),
+        dimensions: None,
         bytes: Arc::new(asset_bytes.clone()),
+        render_image: Arc::default(),
       },
     );
 

@@ -62,23 +62,35 @@ fn image_asset_intrinsic_size(asset: &AssetRecord) -> Option<(Pixels, Pixels)> {
   if asset.is_loading_placeholder() {
     return None;
   }
-  let size = imagesize::blob_size(asset.bytes.as_ref()).ok()?;
-  if size.width == 0 || size.height == 0 {
+  // B-S2: the stored dimensions (CRDT asset map / intake sniff) are the fast
+  // path; the byte-header sniff survives only as a legacy-record fallback.
+  let (width, height) = match asset.dimensions {
+    Some(dimensions) => dimensions,
+    None => {
+      let size = imagesize::blob_size(asset.bytes.as_ref()).ok()?;
+      (size.width as u32, size.height as u32)
+    },
+  };
+  if width == 0 || height == 0 {
     return None;
   }
-  Some((px(size.width as f32), px(size.height as f32)))
+  Some((px(width as f32), px(height as f32)))
 }
 
 #[hotpath::measure]
 fn image_asset_from_path(path: &Path) -> Result<(AssetRecord, SharedString), String> {
   // B-S1: refusals carry a REASON — oversized and unsupported files used to
   // vanish silently on insert (picker and drag-drop both).
-  const MAX_IMAGE_BYTES: u64 = 25 * 1024 * 1024;
+  // B-S2: the cap equals the collaboration blob transport's per-blob limit
+  // (flowstate-collab net/blobs.rs). It was 25 MiB against a 16 MiB transport
+  // — an 18 MiB image inserted fine and was permanently un-syncable, peers
+  // stuck on "Loading image" forever.
+  const MAX_IMAGE_BYTES: u64 = 16 * 1024 * 1024;
   let name = path.file_name().map(|name| name.to_string_lossy().to_string()).unwrap_or_default();
   let metadata = fs::metadata(path).map_err(|error| format!("Couldn't read {name}: {error}"))?;
   if metadata.len() > MAX_IMAGE_BYTES {
     return Err(format!(
-      "{name} is {} MB — images over 25 MB can't be inserted (they also exceed the collaboration transfer limit).",
+      "{name} is {} MB — images over 16 MB can't be inserted (the collaboration transfer limit).",
       metadata.len() / (1024 * 1024)
     ));
   }
@@ -96,7 +108,12 @@ fn image_asset_from_path(path: &Path) -> Result<(AssetRecord, SharedString), Str
       mime_type: format.mime_type().into(),
       original_name: original_name.map(Into::into),
       content_hash,
+      // B-S2: sniff ONCE at intake; layout reads the stored dimensions.
+      dimensions: imagesize::blob_size(&bytes)
+        .ok()
+        .map(|size| (size.width as u32, size.height as u32)),
       bytes: Arc::new(bytes),
+      render_image: Arc::default(),
     },
     alt_text,
   ))
@@ -106,13 +123,18 @@ fn image_asset_from_path(path: &Path) -> Result<(AssetRecord, SharedString), Str
 fn image_asset_from_image(image: Image) -> (AssetRecord, SharedString) {
   let asset_id = AssetId(uuid::Uuid::new_v4().as_u128());
   let content_hash = AssetRecord::stable_content_hash(&image.bytes);
+  let dimensions = imagesize::blob_size(&image.bytes)
+    .ok()
+    .map(|size| (size.width as u32, size.height as u32));
   (
     AssetRecord {
       id: asset_id,
       mime_type: image.format.mime_type().into(),
       original_name: None,
       content_hash,
+      dimensions,
       bytes: Arc::new(image.bytes),
+      render_image: Arc::default(),
     },
     // B-S1: pasted images used to ship the literal string "Pasted image" as
     // their exported accessibility description. Empty means "no description"

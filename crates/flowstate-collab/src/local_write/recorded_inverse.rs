@@ -47,9 +47,10 @@ use loro::{CounterSpan, TextDelta, UndoOrRedo, cursor::PosType};
 use super::commit::ResolvedPlan;
 use super::resolve::ResolvedTextPosition;
 use crate::crdt_runtime::{
-  CrdtRuntime, ProjectionInvalidation, RuntimeEvent, delete_projection_paragraph_metadata, paragraph_style_value, projection_text_delta,
-  prune_orphaned_body_object_blocks, repair_paragraph_metadata_after_stable_split, restore_input_object_block_containers,
-  sentinel_protected_delete_range,
+  CrdtRuntime, ProjectionInvalidation, RuntimeEvent, delete_projection_object_block, delete_projection_paragraph_metadata,
+  insert_projection_object_block, paragraph_style_value, projection_block_lead_pos_in_loro, projection_text_delta,
+  prune_orphaned_body_object_blocks, repair_paragraph_metadata_after_stable_split, replace_projection_equation_source_range,
+  replace_projection_image_alt_text, restore_input_object_block_containers, sentinel_protected_delete_range, set_projection_image_layout,
 };
 
 /// Minimum deleted-range size (unicode chars) worth a `DeleteRange` capture.
@@ -130,6 +131,33 @@ enum RecordedMutation {
   MarkRunRanges {
     spans: Vec<(usize, usize, flowstate_document::RunStyles)>,
   },
+  /// B-S2: splice the equation's NESTED source flow (either direction) via the
+  /// same executor the forward op uses. Body-position-stable — the U+FFFC
+  /// placeholder never moves; only invalidation ranges carry a body position.
+  SpliceEquationSource {
+    equation: BlockId,
+    range: std::ops::Range<usize>,
+    text: String,
+  },
+  /// B-S2: set an image's alt text (either direction). Body-position-stable.
+  SetImageAltText { image: BlockId, text: String },
+  /// B-S2: set an image's sizing/alignment (either direction).
+  /// Body-position-stable.
+  SetImageLayout {
+    image: BlockId,
+    sizing: flowstate_document::InputImageSizing,
+    alignment: flowstate_document::InputBlockAlignment,
+  },
+  /// B-S2: (re)insert an object block through the SAME executor the forward
+  /// `InsertObject` uses (placeholder + registry + nested containers, original
+  /// durable id). Valid at replay because the fast path is frontier-exact.
+  InsertObjectBlock {
+    block_id: BlockId,
+    block_ix: usize,
+    input: InputBlock,
+  },
+  /// B-S2: delete an object block through the `DeleteBlocks` executor.
+  DeleteObjectBlock { block_id: BlockId },
 }
 
 /// One rich splice: replace `[start, start+delete_len)` with `insert` (a
@@ -224,6 +252,15 @@ pub(crate) struct PendingInverseCapture {
   redo_replace_finalize: Option<Vec<ReplaceFinalize>>,
 }
 
+impl PendingInverseCapture {
+  /// B-S2: whether this capture can outlive a `PatchPlan::FullRebuild` — true
+  /// when NEITHER direction depends on op-synthesized patches (both replay
+  /// their mutations and reproject via the derive ladder).
+  pub(crate) fn survives_full_rebuild(&self) -> bool {
+    self.redo_derive && self.redo_replace_finalize.is_none() && matches!(self.undo.reproject, Reproject::Derive)
+  }
+}
+
 /// Deferred redo-splice capture for replace-all (see `redo_replace_finalize`).
 struct ReplaceFinalize {
   redo_start: usize,
@@ -253,8 +290,209 @@ pub(crate) fn capture_before_execute(core: &CrdtRuntime, plan: &ResolvedPlan) ->
     ResolvedPlan::JoinParagraphs { .. } => capture_join_paragraphs(core, plan),
     ResolvedPlan::SetMarks { .. } => capture_set_marks(core, plan),
     ResolvedPlan::SetParagraphStyle { .. } => capture_set_paragraph_style(core, plan),
+    // B-S2 (blocks floor): the object intents. An uncaptured object op both
+    // took the O(history) checkout slow path on its own undo AND cleared every
+    // deeper captured fast path — ONE image insert or equation keystroke
+    // poisoned the whole session's undo. Table structural ops remain
+    // uncaptured (durable row/column/cell ids cannot be re-minted losslessly);
+    // so does multi-block delete (only the single selected-block delete is the
+    // product gesture today).
+    ResolvedPlan::ReplaceEquationSourceRange { .. } => capture_equation_source(core, plan),
+    ResolvedPlan::ReplaceImageAltText { .. } => capture_image_alt_text(core, plan),
+    ResolvedPlan::SetImageLayout { .. } => capture_image_layout(core, plan),
+    ResolvedPlan::InsertObject { .. } => capture_insert_object(core, plan),
+    ResolvedPlan::DeleteBlocks { .. } => capture_delete_blocks(core, plan),
     _ => None,
   }
+}
+
+/// B-S2: the body-unicode position of a block's placeholder — the invalidation
+/// anchor for object captures (frontier-exact replay keeps it valid).
+fn block_placeholder_unicode(core: &CrdtRuntime, block_ix: usize) -> usize {
+  let doc = core.doc();
+  let body = body_text(doc);
+  projection_block_lead_pos_in_loro(doc, core.projection_ref(), &body, block_ix)
+}
+
+fn block_ix_for_block_id(core: &CrdtRuntime, block_id: BlockId) -> Option<usize> {
+  core
+    .projection_ref()
+    .ids
+    .block_ids
+    .iter()
+    .position(|candidate| *candidate == block_id)
+}
+
+/// B-S2: equation-source splices capture like keystrokes — undo restores the
+/// prior slice, redo re-applies the new text, both through the forward
+/// executor. This is THE equation-typing op (one per keystroke in the source
+/// strip), so leaving it uncaptured made editing an equation kill fast undo.
+fn capture_equation_source(core: &CrdtRuntime, plan: &ResolvedPlan) -> Option<PendingInverseCapture> {
+  let ResolvedPlan::ReplaceEquationSourceRange { equation, range, text } = plan else {
+    return None;
+  };
+  let block_ix = block_ix_for_block_id(core, *equation)?;
+  let projection = core.projection_ref();
+  let Some(Block::Equation(block)) = projection.blocks.get(block_ix) else {
+    return None;
+  };
+  let source: &str = block.source.as_ref();
+  if range.start > range.end
+    || range.end > source.len()
+    || !source.is_char_boundary(range.start)
+    || !source.is_char_boundary(range.end)
+  {
+    return None;
+  }
+  let prior = source[range.clone()].to_string();
+  let placeholder = block_placeholder_unicode(core, block_ix);
+  Some(PendingInverseCapture {
+    undo: RecordedDelta {
+      mutation: RecordedMutation::SpliceEquationSource {
+        equation: *equation,
+        // Post-op the replaced slice occupies [start, start+text.len()).
+        range: range.start..range.start + text.len(),
+        text: prior,
+      },
+      reproject: Reproject::Derive,
+      invalidation_ranges: vec![(placeholder, 1)],
+    },
+    redo_mutation: RecordedMutation::SpliceEquationSource {
+      equation: *equation,
+      range: range.clone(),
+      text: text.clone(),
+    },
+    redo_invalidation_ranges: vec![(placeholder, 1)],
+    redo_derive: true,
+    redo_replace_finalize: None,
+  })
+}
+
+fn capture_image_alt_text(core: &CrdtRuntime, plan: &ResolvedPlan) -> Option<PendingInverseCapture> {
+  let ResolvedPlan::ReplaceImageAltText { image, text } = plan else {
+    return None;
+  };
+  let block_ix = block_ix_for_block_id(core, *image)?;
+  let projection = core.projection_ref();
+  let Some(Block::Image(block)) = projection.blocks.get(block_ix) else {
+    return None;
+  };
+  let placeholder = block_placeholder_unicode(core, block_ix);
+  Some(PendingInverseCapture {
+    undo: RecordedDelta {
+      mutation: RecordedMutation::SetImageAltText {
+        image: *image,
+        text: block.alt_text.to_string(),
+      },
+      reproject: Reproject::Derive,
+      invalidation_ranges: vec![(placeholder, 1)],
+    },
+    redo_mutation: RecordedMutation::SetImageAltText {
+      image: *image,
+      text: text.clone(),
+    },
+    redo_invalidation_ranges: vec![(placeholder, 1)],
+    redo_derive: true,
+    redo_replace_finalize: None,
+  })
+}
+
+fn capture_image_layout(core: &CrdtRuntime, plan: &ResolvedPlan) -> Option<PendingInverseCapture> {
+  let ResolvedPlan::SetImageLayout { image, sizing, alignment } = plan else {
+    return None;
+  };
+  let block_ix = block_ix_for_block_id(core, *image)?;
+  let projection = core.projection_ref();
+  let block = projection.blocks.get(block_ix)?;
+  let InputBlock::Image(prior) = input_block_from_block(block) else {
+    return None;
+  };
+  let placeholder = block_placeholder_unicode(core, block_ix);
+  Some(PendingInverseCapture {
+    undo: RecordedDelta {
+      mutation: RecordedMutation::SetImageLayout {
+        image: *image,
+        sizing: prior.sizing,
+        alignment: prior.alignment,
+      },
+      reproject: Reproject::Derive,
+      invalidation_ranges: vec![(placeholder, 1)],
+    },
+    redo_mutation: RecordedMutation::SetImageLayout {
+      image: *image,
+      sizing: sizing.clone(),
+      alignment: *alignment,
+    },
+    redo_invalidation_ranges: vec![(placeholder, 1)],
+    redo_derive: true,
+    redo_replace_finalize: None,
+  })
+}
+
+fn capture_insert_object(core: &CrdtRuntime, plan: &ResolvedPlan) -> Option<PendingInverseCapture> {
+  let ResolvedPlan::InsertObject {
+    at, block_ix, new_block, block, ..
+  } = plan
+  else {
+    return None;
+  };
+  if matches!(block, InputBlock::Table(_)) {
+    // Durable row/column/cell ids cannot be re-minted losslessly.
+    return None;
+  }
+  let _ = core;
+  let pos = at.body_unicode;
+  Some(PendingInverseCapture {
+    undo: RecordedDelta {
+      mutation: RecordedMutation::DeleteObjectBlock { block_id: *new_block },
+      reproject: Reproject::Derive,
+      invalidation_ranges: vec![(pos, 1)],
+    },
+    redo_mutation: RecordedMutation::InsertObjectBlock {
+      block_id: *new_block,
+      block_ix: *block_ix,
+      input: block.clone(),
+    },
+    redo_invalidation_ranges: vec![(pos, 1)],
+    redo_derive: true,
+    redo_replace_finalize: None,
+  })
+}
+
+fn capture_delete_blocks(core: &CrdtRuntime, plan: &ResolvedPlan) -> Option<PendingInverseCapture> {
+  let ResolvedPlan::DeleteBlocks { blocks } = plan else {
+    return None;
+  };
+  // The product gesture is the single selected-block delete/cut; multi-block
+  // deletes stay on the slow path.
+  let [(block_id, block_ix)] = blocks.as_slice() else {
+    return None;
+  };
+  let projection = core.projection_ref();
+  let block = projection.blocks.get(*block_ix)?;
+  if matches!(block, Block::Table(_)) {
+    return None;
+  }
+  if projection.ids.block_ids.get(*block_ix).copied() != Some(*block_id) {
+    return None;
+  }
+  let input = input_block_from_block(block);
+  let pos = block_placeholder_unicode(core, *block_ix);
+  Some(PendingInverseCapture {
+    undo: RecordedDelta {
+      mutation: RecordedMutation::InsertObjectBlock {
+        block_id: *block_id,
+        block_ix: *block_ix,
+        input,
+      },
+      reproject: Reproject::Derive,
+      invalidation_ranges: vec![(pos, 1)],
+    },
+    redo_mutation: RecordedMutation::DeleteObjectBlock { block_id: *block_id },
+    redo_invalidation_ranges: vec![(pos, 1)],
+    redo_derive: true,
+    redo_replace_finalize: None,
+  })
 }
 
 /// §oom-leads #9 (keystroke undo): EVERY text insert records its inverse — the
@@ -1042,6 +1280,13 @@ fn delta_min_coordinate(delta: &RecordedDelta) -> Option<usize> {
         fold(*start);
       }
     },
+    // B-S2: id-addressed object mutations carry no body coordinates of their
+    // own — the invalidation ranges (folded below) anchor the rebase laws.
+    RecordedMutation::SpliceEquationSource { .. }
+    | RecordedMutation::SetImageAltText { .. }
+    | RecordedMutation::SetImageLayout { .. }
+    | RecordedMutation::InsertObjectBlock { .. }
+    | RecordedMutation::DeleteObjectBlock { .. } => {},
   }
   for (start, _) in &delta.invalidation_ranges {
     fold(*start);
@@ -1075,6 +1320,18 @@ fn shift_delta_coordinates(delta: &mut RecordedDelta, by: isize) -> bool {
     RecordedMutation::SpliceRichRanges { splices } => splices.iter_mut().all(|splice| shift(&mut splice.start)),
     RecordedMutation::CreateBoundary { at, .. } => shift(at),
     RecordedMutation::MarkRunRanges { spans } => spans.iter_mut().all(|(start, _, _)| shift(start)),
+    // B-S2: id-addressed — nothing in the mutation shifts. NOTE: a captured
+    // `block_ix` (InsertObjectBlock) is row-addressed; the content-hull law
+    // only keeps entries when EVERY remote op lands after the entry's min
+    // coordinate, and a `structure_neutral == false` import downgrades
+    // patches to derive — but a remote change may still shift row indices
+    // without touching this hull. rebase_entry handles that below by
+    // declining structure-changing imports for row-addressed entries.
+    RecordedMutation::SpliceEquationSource { .. }
+    | RecordedMutation::SetImageAltText { .. }
+    | RecordedMutation::SetImageLayout { .. }
+    | RecordedMutation::InsertObjectBlock { .. }
+    | RecordedMutation::DeleteObjectBlock { .. } => true,
   };
   mutation_ok
     && delta
@@ -1227,6 +1484,15 @@ fn rebase_entry(
     // the coupling local.)
     structure_neutral && !undo_dropped && !redo_dropped
   } else {
+    // B-S2: entries whose replay is ROW-addressed (InsertObjectBlock carries a
+    // block_ix) are only safe when the import changed no structure — a remote
+    // paragraph split/join shifts row indices without necessarily touching
+    // the entry's coordinate hull.
+    let row_addressed = matches!(entry.undo.mutation, RecordedMutation::InsertObjectBlock { .. })
+      || matches!(entry.redo.mutation, RecordedMutation::InsertObjectBlock { .. });
+    if row_addressed && !structure_neutral {
+      return false;
+    }
     // Content entries (restore/delete/splice) keep the v1 law against their
     // OWN hull: all remote ops proven before it, so every recorded coordinate
     // shifts by the net's total length delta.
@@ -1693,6 +1959,40 @@ fn apply_recorded_mutation(core: &mut CrdtRuntime, kind: UndoOrRedo) -> Result<(
         body
           .apply_delta(&delta)
           .context("applying recorded-inverse rich splice")?;
+      }
+    },
+    // B-S2: the object mutations replay through the SAME executors the forward
+    // ops use — frontier-exact gating guarantees the captured block indices
+    // and ranges are still true at replay time.
+    RecordedMutation::SpliceEquationSource { equation, range, text } => {
+      if !replace_projection_equation_source_range(&doc, *equation, range, text)
+        .context("replaying recorded-inverse equation source splice")?
+      {
+        anyhow::bail!("recorded-inverse equation splice reported no-op");
+      }
+    },
+    RecordedMutation::SetImageAltText { image, text } => {
+      if !replace_projection_image_alt_text(&doc, *image, text).context("replaying recorded-inverse image alt text")? {
+        anyhow::bail!("recorded-inverse image alt-text replay reported no-op");
+      }
+    },
+    RecordedMutation::SetImageLayout { image, sizing, alignment } => {
+      if !set_projection_image_layout(&doc, *image, sizing, *alignment).context("replaying recorded-inverse image layout")? {
+        anyhow::bail!("recorded-inverse image layout replay reported no-op");
+      }
+    },
+    RecordedMutation::InsertObjectBlock { block_id, block_ix, input } => {
+      let (block_id, block_ix, input) = (*block_id, *block_ix, input.clone());
+      let projection = core.projection_ref().clone();
+      if !insert_projection_object_block(&doc, &projection, block_id, block_ix, &input)
+        .context("replaying recorded-inverse object insert")?
+      {
+        anyhow::bail!("recorded-inverse object insert reported no-op");
+      }
+    },
+    RecordedMutation::DeleteObjectBlock { block_id } => {
+      if !delete_projection_object_block(&doc, *block_id).context("replaying recorded-inverse object delete")? {
+        anyhow::bail!("recorded-inverse object delete reported no-op");
       }
     },
   }

@@ -165,7 +165,9 @@ impl ImageAssetMeta {
       mime_type: SharedString::from(self.mime.clone()),
       original_name: self.original_name.clone().map(SharedString::from),
       content_hash: local_cache_hash(&self.content_hash),
+      dimensions: None,
       bytes: Arc::new(Vec::new()),
+      render_image: Arc::default(),
     }
   }
 
@@ -184,7 +186,11 @@ impl ImageAssetMeta {
       mime_type: SharedString::from(self.mime.clone()),
       original_name: self.original_name.clone().map(SharedString::from),
       content_hash,
+      dimensions: imagesize::blob_size(&bytes)
+        .ok()
+        .map(|size| (size.width as u32, size.height as u32)),
       bytes: Arc::new(bytes),
+      render_image: Arc::default(),
     })
   }
 }

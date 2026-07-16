@@ -300,11 +300,19 @@ fn image_intrinsic_size(document: &DocumentProjection, image: &ImageBlock) -> Op
   if asset.is_loading_placeholder() {
     return None;
   }
-  let size = imagesize::blob_size(asset.bytes.as_ref()).ok()?;
-  if size.width == 0 || size.height == 0 {
+  // B-S2: stored dimensions first (CRDT asset map / intake sniff); the
+  // byte-header sniff in THE LAYOUT HOT PATH survives only for legacy records.
+  let (width, height) = match asset.dimensions {
+    Some(dimensions) => dimensions,
+    None => {
+      let size = imagesize::blob_size(asset.bytes.as_ref()).ok()?;
+      (size.width as u32, size.height as u32)
+    },
+  };
+  if width == 0 || height == 0 {
     return None;
   }
-  Some((px(size.width as f32), px(size.height as f32)))
+  Some((px(width as f32), px(height as f32)))
 }
 
 #[hotpath::measure]
@@ -321,6 +329,11 @@ fn image_height_for_width(intrinsic: Option<(Pixels, Pixels)>, width: Pixels) ->
 
 #[hotpath::measure]
 fn equation_placeholder_height(document: &DocumentProjection, equation: &EquationBlock) -> Pixels {
+  // B-S2: rendered equations size to their intrinsic math height × zoom; the
+  // font-size heuristic below survives as the pre-render estimate.
+  if let Ok((_, height)) = crate::rich_text::editor::equation_intrinsic_size(equation) {
+    return px((height * document.theme.zoom_factor.max(0.01)).max(16.0)) + px(8.0);
+  }
   match equation.display {
     EquationDisplay::Display => (document.theme.body_font_size * document.theme.zoom_factor.max(0.01) * 3.7).max(px(72.0)),
     EquationDisplay::InlineLikeParagraph => (document.theme.body_font_size * document.theme.zoom_factor.max(0.01) * 2.75).max(px(56.0)),

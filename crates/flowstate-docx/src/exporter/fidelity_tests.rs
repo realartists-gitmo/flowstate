@@ -108,7 +108,9 @@ fn insert_asset(document: &mut DocumentProjection, id: AssetId, mime: &'static s
       mime_type: mime.into(),
       original_name: Some(name.into()),
       content_hash,
+      dimensions: None,
       bytes: Arc::new(bytes),
+      render_image: Arc::default(),
     },
   );
 }

@@ -15,6 +15,7 @@ clap = { workspace = true }
 dirs = { workspace = true }
 fff-search = { workspace = true }
 flowstate-document = { workspace = true }
+imagesize = { workspace = true }
 flowstate-docx = { workspace = true }
 flowstate-collab = { workspace = true }
 flowstate-flow = { workspace = true }

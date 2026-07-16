@@ -3140,6 +3140,7 @@ dependencies = [
  "gpui-component-assets",
  "gpui-symbols",
  "hotpath",
+ "imagesize",
  "iroh",
  "loro",
  "memchr",

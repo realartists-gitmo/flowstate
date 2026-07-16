@@ -21,10 +21,12 @@ fn render_image_block(
       .child("Unsupported image")
       .into_any_element();
   };
-  let gpui_image = Image::from_bytes(format, asset.bytes.as_ref().clone());
+  // B-S2: the shared per-asset handle — `Image::from_bytes` cloned the whole
+  // byte buffer on every paint of every visible image.
+  let gpui_image = asset.render_image(format);
   image_object_frame(document, image, asset, row_size, selected)
     .child(
-      img(Arc::new(gpui_image))
+      img(gpui_image)
         .size_full()
         .object_fit(gpui::ObjectFit::Contain)
         .with_loading(|| div().size_full().bg(rgb(0xffffff)).into_any_element())
@@ -140,12 +142,24 @@ fn render_equation_block(
 ) -> gpui::AnyElement {
   let _ = block_ix;
   let frame = reserved_object_frame(document, row_size, selected);
-  let equation_width = {
-    let source_width = equation.source.len().max(4) as f32 * 26.0;
-    let max_width: f32 = (row_size.width - document.theme.pageless_inset_x * 2.0)
-      .max(px(240.0))
-      .into();
-    px(source_width.clamp(240.0, max_width))
+  // B-S2: the box tracks the INTRINSIC math size × document zoom — the old
+  // fixed 60px height + `len × 26px` width guess squished tall equations and
+  // ignored zoom entirely. Falls back to the legacy guess until rendered.
+  let zoom = document.theme.zoom_factor.max(0.01);
+  let intrinsic = EquationRenderer::intrinsic_size(equation).ok();
+  let max_width: f32 = (row_size.width - document.theme.pageless_inset_x * 2.0)
+    .max(px(240.0))
+    .into();
+  let (equation_width, equation_height) = match intrinsic {
+    Some((width, height)) => {
+      let scaled_width = (width * zoom).clamp(24.0, max_width);
+      let scale = if width * zoom > 0.0 { scaled_width / (width * zoom) } else { 1.0 };
+      (px(scaled_width), px((height * zoom * scale).max(16.0)))
+    },
+    None => {
+      let source_width = equation.source.len().max(4) as f32 * 26.0;
+      (px(source_width.clamp(240.0, max_width)), px(60.0))
+    },
   };
   let source_strip = || {
     div()
@@ -165,9 +179,8 @@ fn render_equation_block(
       .children(equation_source_text_elements(&equation.source, source_selection))
       .into_any_element()
   };
-  match EquationRenderer::png_bytes(equation) {
-    Ok(png) => {
-      let image = Image::from_bytes(ImageFormat::Png, png.as_ref().clone());
+  match EquationRenderer::render_image(equation) {
+    Ok(image) => {
       frame
         .child(
           div()
@@ -178,9 +191,9 @@ fn render_equation_block(
             .justify_center()
             .gap_1()
             .child(
-              img(Arc::new(image))
+              img(image)
                 .w(equation_width)
-                .h(px(60.0))
+                .h(equation_height)
                 .object_fit(gpui::ObjectFit::ScaleDown)
                 .with_loading(|| div().size_full().bg(rgb(0xffffff)).into_any_element())
                 .with_fallback(|| {
@@ -285,3 +298,6 @@ type EquationRenderCache = FxHashMap<EquationCacheKey, Result<Arc<Vec<u8>>, Stri
 
 static EQUATION_SVG_CACHE: OnceLock<Mutex<EquationRenderCache>> = OnceLock::new();
 static EQUATION_PNG_CACHE: OnceLock<Mutex<EquationRenderCache>> = OnceLock::new();
+/// B-S2: shared gpui image handles per (source, display) — no per-paint clone.
+type EquationImageCache = FxHashMap<EquationCacheKey, Result<Arc<gpui::Image>, String>>;
+static EQUATION_IMAGE_CACHE: OnceLock<Mutex<EquationImageCache>> = OnceLock::new();

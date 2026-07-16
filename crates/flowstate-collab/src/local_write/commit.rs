@@ -287,8 +287,18 @@ pub(crate) fn apply_local_intent(core: &mut CrdtRuntime, intent: &LocalIntent) -
     },
     PatchPlan::FullRebuild { invalidation, reason } => {
       counters.full_rebuild = true;
-      // §act-three B.1: no patch material to replay on redo — drop any capture.
-      core.clear_recorded_inverse();
+      // §act-three B.1: no patch material to replay on redo — drop any capture
+      // that DEPENDS on patches. B-S2: the object captures don't — both their
+      // directions replay mutations and reproject via the derive ladder, so
+      // an object insert (whose patch plan is a full rebuild) stays
+      // fast-undoable instead of poisoning the stack.
+      match pending_inverse {
+        Some(pending) if pending.survives_full_rebuild() => {
+          let op_span = loro::CounterSpan::new(peer_counter_before, local_peer_counter_end(core));
+          super::recorded_inverse::finalize_capture(core, pending, op_span, &[]);
+        },
+        _ => core.clear_recorded_inverse(),
+      }
       tracing::warn!(class = intent.class(), reason, "full-rebuild-after-local-write");
       let mut invalidation = invalidation;
       core.merge_subscription_invalidation(&mut invalidation);
