@@ -23,6 +23,8 @@ pub struct RuntimeRevisionInfo {
   pub summary: String,
   /// H-S1: the minting tier (named pin / session save / autosave grain).
   pub kind: flowstate_document::RevisionKind,
+  /// H-S2: the encoded frontier this record points at (tape checkouts).
+  pub frontier: Vec<u8>,
   pub created_at_unix_secs: i64,
   pub author_user_id: Option<u128>,
   pub author_display_name: Option<String>,

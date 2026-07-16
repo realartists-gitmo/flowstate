@@ -61,6 +61,7 @@ pub fn flowstate_command_to_rich_text(command: CommandId) -> Option<RichTextEdit
     CommandId::InsertSoftLineBreak => RichTextEditorCommand::InsertSoftLineBreak,
     CommandId::OpenCommandPalette
     | CommandId::OpenComments
+    | CommandId::OpenHistory
     | CommandId::Save
     | CommandId::NewDocument
     | CommandId::OpenDocument

@@ -123,6 +123,7 @@ pub(crate) fn action_for_command(command: CommandId) -> Option<Box<dyn Action>> 
     CommandId::Save => Box::new(Save),
     CommandId::OpenCommandPalette => Box::new(super::OpenCommandPaletteAction),
     CommandId::OpenComments => return None,
+    CommandId::OpenHistory => return None,
     CommandId::Undo => Box::new(Undo),
     CommandId::Redo => Box::new(Redo),
     CommandId::SetParagraphPocket => Box::new(SetParagraphStyle0),

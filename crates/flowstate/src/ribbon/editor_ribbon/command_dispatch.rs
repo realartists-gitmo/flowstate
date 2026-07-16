@@ -33,8 +33,9 @@ pub(crate) fn perform_ribbon_command_in_workspace(
 ) {
   match command_id {
     RibbonCommandId::Revisions => {
+      // H-S3: history is a takeover instrument now, not a list dialog.
       if let Some(workspace) = workspace {
-        let _ = workspace.update(cx, |workspace, cx| workspace.open_revision_dialog(window, cx));
+        let _ = workspace.update(cx, |workspace, cx| workspace.open_history_takeover(window, cx));
       }
     },
     RibbonCommandId::ToggleSpeechDocument => {

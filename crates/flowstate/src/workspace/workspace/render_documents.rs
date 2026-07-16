@@ -33,9 +33,23 @@ impl Workspace {
           .flex()
           .flex_col()
           .when_some(active_search_bar, |this, search_bar| this.child(search_bar))
-          .when_some(self.active_editor.clone(), |this, editor| {
-            this.child(div().flex_1().overflow_hidden().child(editor))
-          })
+          // H-S3: history mode commandeers the viewport for its panel.
+          .when_some(
+            self
+              .history_takeover
+              .clone()
+              .filter(|takeover| Some(takeover.read(cx).panel_id) == self.active_document_id),
+            |this, takeover| this.child(div().flex_1().overflow_hidden().child(takeover)),
+          )
+          .when_some(
+            self.active_editor.clone().filter(|_| {
+              self
+                .history_takeover
+                .as_ref()
+                .is_none_or(|takeover| Some(takeover.read(cx).panel_id) != self.active_document_id)
+            }),
+            |this, editor| this.child(div().flex_1().overflow_hidden().child(editor)),
+          )
           .when_some(self.active_flow.clone(), |this, editor| {
             this.child(div().flex_1().overflow_hidden().child(editor))
           })

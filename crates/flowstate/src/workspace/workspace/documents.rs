@@ -229,6 +229,7 @@ impl Workspace {
       autosave_flow_in_flight: FxHashSet::default(),       // §perf: FxHash for trusted Uuid keys
       collaboration_dialog: None,
       revision_dialog: None,
+      history_takeover: None,
       collab_notice_subscriptions: FxHashMap::default(), // §perf: FxHash for trusted SessionId keys
       collab_incompatible_version_notices: HashSet::new(),
       file_search_overlay: None,
@@ -415,6 +416,34 @@ impl Workspace {
     })
     .detach();
     Some(rx)
+  }
+
+  /// H-S3: toggle the history takeover for the active document. History is
+  /// comparative reading — it commandeers the viewport (rail-vs-takeover law).
+  pub fn open_history_takeover(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    if let Some(takeover) = &self.history_takeover {
+      if Some(takeover.read(cx).panel_id) == self.active_document_id {
+        self.close_history_takeover(cx);
+        return;
+      }
+      self.history_takeover = None;
+    }
+    let Some(panel_id) = self.active_document_id else { return };
+    let Some(editor) = self.active_editor.clone() else { return };
+    let Some(io) = self.document_runtimes.get(&panel_id).cloned() else {
+      self.report_failure("History is not available yet: the document is still opening", None, cx);
+      return;
+    };
+    let workspace = cx.entity().downgrade();
+    let takeover =
+      cx.new(|cx| crate::workspace::history_takeover::HistoryTakeover::new(workspace, panel_id, io, editor, window, cx));
+    self.history_takeover = Some(takeover);
+    cx.notify();
+  }
+
+  pub fn close_history_takeover(&mut self, cx: &mut Context<Self>) {
+    self.history_takeover = None;
+    cx.notify();
   }
 
   pub fn open_revision_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {

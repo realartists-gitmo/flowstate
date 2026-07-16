@@ -21,4 +21,5 @@ mod comments;
 mod dialogs;
 mod documents;
 mod flows_and_keystrokes;
+mod history;
 mod tabs_and_overlays;

@@ -134,6 +134,9 @@ pub struct Workspace {
   autosave_flow_in_flight: FxHashSet<Uuid>,
   collaboration_dialog: Option<Entity<crate::collab::share_dialog::CollabShareDialog>>,
   revision_dialog: Option<Entity<crate::workspace::revision_dialog::RevisionDialog>>,
+  /// H-S3: the history takeover — commandeers the viewport when Some and
+  /// its panel is active.
+  history_takeover: Option<Entity<crate::workspace::history_takeover::HistoryTakeover>>,
   // §perf: SessionId keys are locally generated and trusted; use FxHash to avoid SipHash overhead.
   collab_notice_subscriptions: FxHashMap<flowstate_collab::SessionId, Subscription>,
   collab_incompatible_version_notices: HashSet<String>,

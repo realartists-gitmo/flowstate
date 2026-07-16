@@ -76,6 +76,17 @@ pub enum IoRequest {
     stamp: flowstate_document::RevisionStamp,
     reply: Sender<Result<Vec<RuntimeEvent>>>,
   },
+  /// H-S4: restore the document to a historical frontier as a forward op
+  /// (always preceded by a safety pin — the runtime enforces the law).
+  RestoreFrontier {
+    frontier: Vec<u8>,
+    reply: Sender<Result<Vec<RuntimeEvent>>>,
+  },
+  /// H-S3 "Checkpoint now": mint a named pin at the current frontier.
+  CreateNamedPin {
+    title: String,
+    reply: Sender<Result<u128>>,
+  },
   /// H-S1: rename a revision record (naming pins it as a `named` tier).
   RenameRevision {
     revision_id: u128,
@@ -206,6 +217,8 @@ fn io_request_kind(request: &IoRequest) -> &'static str {
     IoRequest::ExportUpdatesFor { .. } => "export-updates-for",
     IoRequest::SnapshotBytes { .. } => "snapshot-bytes",
     IoRequest::CheckpointPackage { .. } => "checkpoint-package",
+    IoRequest::RestoreFrontier { .. } => "restore-frontier",
+    IoRequest::CreateNamedPin { .. } => "create-named-pin",
     IoRequest::RenameRevision { .. } => "rename-revision",
     IoRequest::PackageBytes { .. } => "package-bytes",
     IoRequest::SavePackageTo { .. } => "save-package-to",
@@ -319,6 +332,18 @@ impl DocIoHandle {
   ) -> Result<Vec<RuntimeEvent>> {
     self
       .request(|reply| IoRequest::CheckpointPackage { title, path, stamp, reply })
+      .await
+  }
+
+  pub async fn restore_frontier(&self, frontier: Vec<u8>) -> Result<Vec<RuntimeEvent>> {
+    self
+      .request(|reply| IoRequest::RestoreFrontier { frontier, reply })
+      .await
+  }
+
+  pub async fn create_named_pin(&self, title: String) -> Result<u128> {
+    self
+      .request(|reply| IoRequest::CreateNamedPin { title, reply })
       .await
   }
 
@@ -680,6 +705,22 @@ fn io_loop(core: &Arc<WriteGate<CrdtRuntime>>, receiver: &Receiver<IoRequest>) {
             .context("exporting Loro snapshot from fork")
         });
         send_reply(&reply, result);
+      },
+      IoRequest::RestoreFrontier { frontier, reply } => {
+        send_reply(
+          &reply,
+          gate_call(core, GateHolder::DocumentService, |runtime| runtime.restore_frontier(&frontier)),
+        );
+      },
+      IoRequest::CreateNamedPin { title, reply } => {
+        send_reply(
+          &reply,
+          gate_call(core, GateHolder::DocumentService, |runtime| {
+            let title = title.trim();
+            anyhow::ensure!(!title.is_empty(), "A checkpoint name cannot be empty");
+            runtime.mint_named_pin_now(title)
+          }),
+        );
       },
       IoRequest::RenameRevision { revision_id, title, reply } => {
         send_reply(

@@ -1871,6 +1871,7 @@ impl CrdtRuntime {
               title: revision.title.clone(),
               summary: revision.summary.clone(),
               kind: revision.kind,
+              frontier: revision.frontier.clone(),
               created_at_unix_secs: revision.created_at_unix_secs,
               author_user_id: revision.author_user_id,
               author_display_name,
@@ -4159,6 +4160,82 @@ impl CrdtRuntime {
       record_revision: true,
     };
     Ok(Some((job, events)))
+  }
+
+  /// H-S4: mint a named pin at the CURRENT frontier without touching disk —
+  /// the restore safety checkpoint. Thinning-exempt by kind.
+  pub fn mint_named_pin_now(&mut self, title: &str) -> Result<u128> {
+    let revision_id = Uuid::new_v4().as_u128();
+    let frontiers = self.doc.state_frontiers();
+    match &mut self.package {
+      Some(package) => {
+        // Writes the doc-side record, persists it as a journaled segment, and
+        // adds the manifest entry + load accelerator in one motion.
+        package.create_named_revision_at_with_id(
+          &self.doc,
+          revision_id,
+          &frontiers,
+          title,
+          "",
+          flowstate_document::RevisionKind::Named,
+          self.author_user_id,
+          Some(self.doc.peer_id() as u128),
+        )?;
+      },
+      None => {
+        // Package-less (never-saved) documents still get the doc-side record;
+        // it syncs into the package at first save.
+        flowstate_document::record_revision(
+          &self.doc,
+          revision_id,
+          frontiers.encode(),
+          title,
+          flowstate_document::RevisionKind::Named,
+          self.author_user_id,
+        )
+        .map_err(|error| anyhow::anyhow!(error))?;
+      },
+    }
+    // Meta-origin commits: keep the recorded fast-undo timelines alive.
+    crate::local_write::recorded_inverse::rearm_recorded_inverse_frontier(self);
+    Ok(revision_id)
+  }
+
+  /// H-S4 restore-in-place, as a FORWARD operation. LAW: every restore is
+  /// preceded by a safety checkpoint of the present (a named pin), so a
+  /// restore can never lose the now. `revert_to` generates ordinary local
+  /// inverse ops — undoable, and collab peers see a normal edit (convergent).
+  pub fn restore_frontier(&mut self, frontier: &[u8]) -> Result<Vec<RuntimeEvent>> {
+    let target = Frontiers::decode(frontier).context("decoding frontier for restore")?;
+    let current = self.doc.state_frontiers();
+    if current == target {
+      return Ok(Vec::new());
+    }
+    self.mint_named_pin_now("Before restore")?;
+    let from_frontier = self.doc.state_frontiers();
+    let from_vv = self.doc.state_vv();
+    flowstate_document::touch_document_metadata(&self.doc).context("updating document metadata for restore")?;
+    // A whole-doc mutation invalidates the recorded inverse eagerly (the
+    // frontier check would catch it; this frees the capture).
+    self.clear_recorded_inverse();
+    self
+      .doc
+      .revert_to(&target)
+      .map_err(|error| anyhow::anyhow!(error.to_string()))
+      .context("reverting document to historical frontier")?;
+    let mut projection_invalidation = ProjectionInvalidation {
+      frontier_before: from_frontier.encode(),
+      frontier_after: self.doc.state_frontiers().encode(),
+      changed_flows: vec![ROOT_BODY_FLOW_ID.to_string()],
+      // A restore can move anything (styles, objects, tables, comments):
+      // force the full rebuild instead of the regional ladder.
+      rebuild_required: true,
+      ..ProjectionInvalidation::default()
+    };
+    let drained = self.merge_subscription_invalidation(&mut projection_invalidation);
+    let mut events = self.events_after_local_change(from_frontier, from_vv, projection_invalidation.clone(), false)?;
+    self.derive_body_projection_events(projection_invalidation, &drained, "restore", &mut events)?;
+    Ok(events)
   }
 
   /// H-S1 thinning: prune AUTO-grain revision records as they age. Retention:
@@ -8139,6 +8216,63 @@ mod tests {
       assert!(tombstoned.deleted);
       assert!(tombstoned.body.is_empty());
     }
+    Ok(())
+  }
+
+  #[test]
+  fn restore_is_a_forward_op_with_a_safety_pin_undoable_and_convergent() -> Result<()> {
+    use flowstate_document::{RevisionKind, RevisionStamp};
+    let base = flowstate_document::new_loro_document("Restore")?;
+    let mut source = CrdtRuntime::from_doc(base.fork(), None, None)?;
+    let mut target = CrdtRuntime::from_doc(base, None, None)?;
+
+    source.command(SemanticCommand::InsertText {
+      unicode_index: 1,
+      text: "alpha".to_string(),
+      styles: RunStyles::default(),
+    })?;
+    let historical = source.doc().state_frontiers().encode();
+    source.command(SemanticCommand::InsertText {
+      unicode_index: 6,
+      text: " beta".to_string(),
+      styles: RunStyles::default(),
+    })?;
+    // A package so the safety pin lands somewhere visible.
+    source.checkpoint_package("Doc", None, &RevisionStamp::session())?;
+    assert_eq!(flowstate_document::paragraph_text(&source.projection_snapshot()?, 0), "alpha beta");
+
+    let events = source.restore_frontier(&historical)?;
+    assert!(!events.is_empty(), "restore produces local-update events for peers");
+    assert_eq!(
+      flowstate_document::paragraph_text(&source.projection_snapshot()?, 0),
+      "alpha",
+      "the document reads as it did at the historical frontier"
+    );
+    // LAW: the present was pinned before the restore touched anything.
+    assert!(
+      source
+        .revisions()
+        .iter()
+        .any(|revision| revision.kind == RevisionKind::Named && revision.title == "Before restore"),
+      "restore is always preceded by a safety checkpoint"
+    );
+
+    // Convergence: peers see the restore as a normal edit.
+    let update = source.doc().export(ExportMode::all_updates()).expect("export");
+    target.import_remote_update(&update)?;
+    assert_eq!(
+      flowstate_document::paragraph_text(&target.projection_snapshot()?, 0),
+      "alpha",
+      "the restore converges like any local edit"
+    );
+
+    // Forward op: a single undo returns the pre-restore text.
+    source.command(SemanticCommand::Undo)?;
+    assert_eq!(
+      flowstate_document::paragraph_text(&source.projection_snapshot()?, 0),
+      "alpha beta",
+      "restore is undoable"
+    );
     Ok(())
   }
 
