@@ -833,13 +833,13 @@ mod speech_word_count_tests {
     let mut cache = SpeechWordCountParagraphCache::default();
 
     // Cold count == the oracle, every paragraph recounted.
-    let (initial, recounted) = speech_word_count_incremental(&base, &mut cache);
+    let (initial, _, recounted) = speech_word_count_incremental(&base, &mut cache);
     assert_eq!(initial, speech_word_count_reference(&base));
     assert_eq!(initial, 14, "fixture semantics moved: tag=6, cite-straddle=3, two-run straddle=3, filtered=2, uncounted=0");
     assert_eq!(recounted, base.paragraphs.len());
 
     // Unchanged document: everything served from the memo.
-    let (unchanged, recounted) = speech_word_count_incremental(&base, &mut cache);
+    let (unchanged, _, recounted) = speech_word_count_incremental(&base, &mut cache);
     assert_eq!(unchanged, initial);
     assert_eq!(recounted, 0);
 
@@ -851,7 +851,7 @@ mod speech_word_count_tests {
     let mut bumped = edited.paragraphs[1].clone();
     bumped.version = bumped.version.wrapping_add(1);
     edited.paragraphs.set(1, bumped);
-    let (count, recounted) = speech_word_count_incremental(&edited, &mut cache);
+    let (count, _, recounted) = speech_word_count_incremental(&edited, &mut cache);
     assert_eq!(count, speech_word_count_reference(&edited));
     assert_eq!(count, 13);
     assert_eq!(recounted, 1, "only the edited paragraph recounts");
@@ -863,7 +863,7 @@ mod speech_word_count_tests {
     let mut bumped = edited.paragraphs[1].clone();
     bumped.version = bumped.version.wrapping_add(1);
     edited.paragraphs.set(1, bumped);
-    let (count, recounted) = speech_word_count_incremental(&edited, &mut cache);
+    let (count, _, recounted) = speech_word_count_incremental(&edited, &mut cache);
     assert_eq!(count, speech_word_count_reference(&edited));
     assert_eq!(count, 18);
     assert_eq!(recounted, 1);
@@ -874,7 +874,7 @@ mod speech_word_count_tests {
     let mut remaining_ids = ids.clone();
     remaining_ids.remove(1);
     let deleted = build_document(inputs, &remaining_ids);
-    let (count, recounted) = speech_word_count_incremental(&deleted, &mut cache);
+    let (count, _, recounted) = speech_word_count_incremental(&deleted, &mut cache);
     assert_eq!(count, speech_word_count_reference(&deleted));
     assert_eq!(count, 11);
     assert_eq!(recounted, 0, "surviving paragraphs are all memo hits");
@@ -894,7 +894,7 @@ mod speech_word_count_tests {
     let mut inserted_ids = remaining_ids.clone();
     inserted_ids.insert(2, 99);
     let inserted = build_document(inputs, &inserted_ids);
-    let (count, recounted) = speech_word_count_incremental(&inserted, &mut cache);
+    let (count, _, recounted) = speech_word_count_incremental(&inserted, &mut cache);
     assert_eq!(count, speech_word_count_reference(&inserted));
     assert_eq!(count, 15);
     assert_eq!(recounted, 1, "only the inserted paragraph recounts");
