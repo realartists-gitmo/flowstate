@@ -14,15 +14,52 @@ fn pending_flow() -> &'static Mutex<Option<DropboxPkceFlow>> {
   PENDING.get_or_init(|| Mutex::new(None))
 }
 
+/// R7: the connection ceremony's visible state — the Hub's Discovery room
+/// renders it so connect/failure/revoke never live only in a transient
+/// prompt.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum DropboxOauthStatus {
+  #[default]
+  Idle,
+  /// `begin` opened the browser; the callback hasn't landed yet.
+  Pending,
+  Failed(String),
+}
+
+fn status_register() -> &'static Mutex<DropboxOauthStatus> {
+  static STATUS: OnceLock<Mutex<DropboxOauthStatus>> = OnceLock::new();
+  STATUS.get_or_init(|| Mutex::new(DropboxOauthStatus::Idle))
+}
+
+pub fn status() -> DropboxOauthStatus {
+  status_register()
+    .lock()
+    .map(|status| status.clone())
+    .unwrap_or_default()
+}
+
+fn set_status(status: DropboxOauthStatus) {
+  if let Ok(mut register) = status_register().lock() {
+    *register = status;
+  }
+}
+
 /// Begin Dropbox desktop OAuth using PKCE. The verifier remains process-local
 /// and the callback state is checked before any token is accepted.
 pub fn begin(cx: &mut App) -> Result<()> {
   let settings = load_app_settings().dropbox_collaboration;
-  let flow = DropboxPkceFlow::begin(settings.app_key, REDIRECT_URI)?;
+  let flow = match DropboxPkceFlow::begin(settings.app_key, REDIRECT_URI) {
+    Ok(flow) => flow,
+    Err(error) => {
+      set_status(DropboxOauthStatus::Failed(format!("{error:#}")));
+      return Err(error);
+    },
+  };
   let authorization_url = flow.authorization_url.to_string();
   *pending_flow()
     .lock()
     .expect("Dropbox OAuth state mutex poisoned") = Some(flow);
+  set_status(DropboxOauthStatus::Pending);
   cx.open_url(&authorization_url);
   Ok(())
 }
@@ -50,6 +87,10 @@ pub fn route_callback(url: &str, cx: &mut App) -> bool {
     }
     .await;
 
+    match &result {
+      Ok(()) => set_status(DropboxOauthStatus::Idle),
+      Err(error) => set_status(DropboxOauthStatus::Failed(format!("{error:#}"))),
+    }
     let _ = cx.update(|cx| {
       if result.is_ok() {
         crate::collab::reconfigure_discovery(cx);
@@ -99,5 +140,6 @@ pub fn cancel_pending() -> Result<()> {
   if removed.is_none() {
     bail!("No Dropbox connection is pending");
   }
+  set_status(DropboxOauthStatus::Idle);
   Ok(())
 }

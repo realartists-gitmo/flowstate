@@ -41,6 +41,108 @@ impl CollabShareDialog {
       .child(self.discovery_panel(cx))
       .child(crate::workspace::render_collaboration_discovery_pause(workspace.clone(), window, cx))
       .child(crate::workspace::render_collaboration_bluetooth(workspace, window, cx))
+      .child(section_title("Dropbox discovery", cx))
+      .child(Self::render_dropbox_card(cx))
+      .into_any_element()
+  }
+
+  /// R7: the OAuth ceremony's states live HERE — connected (with revoke),
+  /// waiting-on-browser (with cancel), failed (with the reason + retry), and
+  /// not-connected (with connect). The app key/root inputs stay in Settings.
+  fn render_dropbox_card(cx: &mut Context<Self>) -> AnyElement {
+    let settings = crate::app_settings::load_app_settings().dropbox_collaboration;
+    let connected = settings.enabled && !settings.access_token.is_empty();
+    let has_app_key = !settings.app_key.trim().is_empty();
+    let status = crate::collab::dropbox_oauth::status();
+
+    let (state_line, state_color) = if connected {
+      (
+        if settings.root.trim().is_empty() {
+          "Connected".to_string()
+        } else {
+          format!("Connected · {}", settings.root)
+        },
+        cx.theme().success,
+      )
+    } else {
+      match &status {
+        crate::collab::dropbox_oauth::DropboxOauthStatus::Pending => {
+          ("Waiting for the browser to finish authorizing…".to_string(), cx.theme().warning)
+        },
+        crate::collab::dropbox_oauth::DropboxOauthStatus::Failed(reason) => {
+          (format!("Connection failed: {reason}"), cx.theme().danger)
+        },
+        crate::collab::dropbox_oauth::DropboxOauthStatus::Idle => ("Not connected".to_string(), cx.theme().muted_foreground),
+      }
+    };
+
+    let verb: AnyElement = if connected {
+      Button::new("hub-dropbox-revoke")
+        .label("Revoke")
+        .small()
+        .outline()
+        .on_click(cx.listener(|_, _, _, cx| {
+          if let Err(error) = crate::app_settings::disconnect_dropbox_collaboration() {
+            tracing::warn!(%error, "revoking the Dropbox connection failed");
+            return;
+          }
+          crate::collab::reconfigure_discovery(cx);
+          cx.notify();
+        }))
+        .into_any_element()
+    } else if matches!(status, crate::collab::dropbox_oauth::DropboxOauthStatus::Pending) {
+      Button::new("hub-dropbox-cancel")
+        .label("Cancel")
+        .small()
+        .outline()
+        .on_click(cx.listener(|_, _, _, cx| {
+          let _ = crate::collab::dropbox_oauth::cancel_pending();
+          cx.notify();
+        }))
+        .into_any_element()
+    } else if has_app_key {
+      Button::new("hub-dropbox-connect")
+        .label(if matches!(status, crate::collab::dropbox_oauth::DropboxOauthStatus::Failed(_)) {
+          "Retry"
+        } else {
+          "Connect Dropbox"
+        })
+        .small()
+        .primary()
+        .on_click(cx.listener(|_, _, _, cx| {
+          if let Err(error) = crate::collab::dropbox_oauth::begin(cx) {
+            tracing::warn!(error = %format_args!("{error:#}"), "starting the Dropbox connection failed");
+          }
+          cx.notify();
+        }))
+        .into_any_element()
+    } else {
+      div()
+        .text_xs()
+        .text_color(cx.theme().muted_foreground)
+        .child("Set the Dropbox app key in Settings ▸ Collaboration first")
+        .into_any_element()
+    };
+
+    h_flex()
+      .w_full()
+      .items_center()
+      .justify_between()
+      .gap_3()
+      .px_3()
+      .py_2()
+      .rounded(px(6.0))
+      .border_1()
+      .border_color(cx.theme().border)
+      .bg(cx.theme().secondary)
+      .child(
+        div()
+          .min_w_0()
+          .text_sm()
+          .text_color(state_color)
+          .child(state_line),
+      )
+      .child(verb)
       .into_any_element()
   }
 
