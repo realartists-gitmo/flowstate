@@ -12,6 +12,8 @@ pub(crate) enum PaletteAction {
   ToggleAutosave,
   ToggleSmartWordSelection,
   ToggleReduceMotion,
+  /// R10-A: the go-to navigation provider — peek a heading's paragraph.
+  GoToParagraph(usize),
 }
 
 /// A palette entry: display label, the action, and the shortcut hint.
@@ -26,7 +28,7 @@ impl Workspace {
   /// Every action the palette can run: all registered commands plus the
   /// settings quick-toggles (S3 decision). Labels for toggles show the state
   /// they will SET, so the entry reads as the outcome.
-  pub(crate) fn palette_entries(&self) -> Vec<PaletteEntry> {
+  pub(crate) fn palette_entries(&self, cx: &App) -> Vec<PaletteEntry> {
     let mut entries: Vec<PaletteEntry> = crate::commands::COMMAND_SPECS
       .iter()
       .filter(|spec| spec.id != CommandId::OpenCommandPalette)
@@ -65,6 +67,33 @@ impl Workspace {
       action: PaletteAction::ToggleReduceMotion,
       shortcut: None,
     });
+    // R10-A: the go-to navigation provider — every heading in the active
+    // document, peekable by fuzzy title. ScrollToParagraph finally has a
+    // caller.
+    if let Some(editor) = &self.active_editor {
+      let document = editor.read(cx).document();
+      for node in document.outline.iter() {
+        let Some(paragraph_ix) = paragraph_index_for_id(document, node.heading_paragraph) else {
+          continue;
+        };
+        let heading = crate::rich_text_element::paragraph_text(document, paragraph_ix);
+        let heading = heading.trim();
+        if heading.is_empty() {
+          continue;
+        }
+        let mut label = format!("Go to: {heading}");
+        if label.len() > 72 {
+          label.truncate(69);
+          label.push('…');
+        }
+        entries.push(PaletteEntry {
+          label,
+          action: PaletteAction::GoToParagraph(paragraph_ix),
+          shortcut: None,
+        });
+      }
+    }
+
     entries
   }
 
@@ -82,6 +111,9 @@ impl Workspace {
         let enabled = !crate::app_settings::load_app_settings().editor.smart_word_selection;
         let workspace = cx.entity().downgrade();
         update_smart_word_selection(cx, &workspace, enabled);
+      },
+      PaletteAction::GoToParagraph(paragraph_ix) => {
+        self.peek_active_editor_paragraph(paragraph_ix, window, cx);
       },
       PaletteAction::ToggleReduceMotion => {
         let enabled = !crate::app_settings::load_app_settings().editor.reduce_motion;

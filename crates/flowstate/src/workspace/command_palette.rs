@@ -37,7 +37,7 @@ impl CommandPalette {
     });
     let entries = workspace
       .upgrade()
-      .map(|workspace| workspace.read(cx).palette_entries())
+      .map(|workspace| workspace.read(cx).palette_entries(cx))
       .unwrap_or_default();
     let filtered = (0..entries.len()).collect();
     Self {
