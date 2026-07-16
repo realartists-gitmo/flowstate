@@ -9,6 +9,7 @@ anyhow.workspace = true
 flowstate-collab = { version = "0.1.0", path = "../flowstate-collab" }
 flowstate-document = { version = "0.1.0", path = "../flowstate-document" }
 flowstate-docx = { version = "0.1.0", path = "../flowstate-docx" }
+flowstate-flow = { version = "0.1.0", path = "../flowstate-flow" }
 tempfile.workspace = true
 gpui.workspace = true
 gpui-component.workspace = true
@@ -20,6 +21,7 @@ loro = "1.13"
 mimalloc.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+uuid.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
 
 # Profiler features (mirror the app's, for the `hotpath_bench` bin). Off by default,
