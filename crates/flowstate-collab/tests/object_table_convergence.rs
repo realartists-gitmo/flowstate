@@ -447,6 +447,50 @@ mod tests {
   /// objects flanked by empty paragraphs (projection coalescing vs live-body
   /// coordinates), and an intra-paragraph U+2028 soft break. Built as ONE rich
   /// fragment (which also exercises the compound paste intent).
+  /// B-S3 (the B9-A ruling, named): an empty paragraph the user keeps next to
+  /// an object is REAL — the canonical rebuild preserves it; only the
+  /// record-less phantom coalesces. Pins docs/collab-coalescing-parity.md
+  /// Fork B as product law with a directed test (the structural fuzz covers it
+  /// statistically).
+  #[test]
+  fn empty_paragraphs_beside_objects_are_real() {
+    let mut rng = Rng(0xB9A);
+    let peer = Peer::new("empties-are-real", 1);
+    let projection = peer.projection();
+    let paragraph = projection.ids.paragraph_ids[0];
+    peer
+      .handle
+      .insert_rich_fragment(InsertRichFragmentIntent {
+        at: TextAnchor::new(paragraph, 0),
+        blocks: vec![
+          FragmentBlock::Paragraph(input_paragraph("before the image")),
+          FragmentBlock::Object(image_input(&mut rng)),
+          FragmentBlock::Paragraph(input_paragraph("")),
+          FragmentBlock::Paragraph(input_paragraph("after the image")),
+        ],
+      })
+      .expect("fragment seeds");
+
+    let live = peer.projection();
+    let empty_count = live
+      .paragraphs
+      .iter()
+      .filter(|paragraph| flowstate_document::paragraph_text_len(paragraph) == 0)
+      .count();
+    assert!(empty_count >= 1, "the kept empty paragraph beside the image survives the live projection");
+
+    // The CANONICAL rebuild agrees — this was the divergence: the full
+    // materializer used to coalesce every object-adjacent empty.
+    let canonical = {
+      let guard = peer.gate.lock(GateHolder::ExportUpdates).expect("gate");
+      flowstate_document::document_from_loro(guard.doc()).expect("canonical rebuild")
+    };
+    assert_eq!(
+      canonical.ids.paragraph_ids, live.ids.paragraph_ids,
+      "canonical rebuild and live projection agree on paragraph identity (incl. the kept empty)"
+    );
+  }
+
   fn seed_structural(peer: &Peer, rng: &mut Rng) {
     let projection = peer.projection();
     let paragraph = projection.ids.paragraph_ids[0];
