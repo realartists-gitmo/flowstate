@@ -30,7 +30,7 @@ fn main() {
   eprintln!("[open-probe] CRDT import: {:?}", t1.elapsed());
   let t2 = std::time::Instant::now();
   runtime
-    .checkpoint_package("open-probe", Some(db8_path.clone()))
+    .checkpoint_package("open-probe", Some(db8_path.clone()), &flowstate_document::RevisionStamp::session())
     .expect("checkpoint");
   eprintln!("[open-probe] checkpoint (.db8 write): {:?}", t2.elapsed());
   drop(runtime);
@@ -54,7 +54,7 @@ fn main() {
   if let Some(mut runtime) = last {
     let t = std::time::Instant::now();
     let (job, _events) = runtime
-      .begin_checkpoint("open-probe-routine", Some(db8_path.clone()))
+      .begin_checkpoint("open-probe-routine", Some(db8_path.clone()), &flowstate_document::RevisionStamp::auto())
       .expect("begin checkpoint")
       .expect("package present");
     let begin_time = t.elapsed();
