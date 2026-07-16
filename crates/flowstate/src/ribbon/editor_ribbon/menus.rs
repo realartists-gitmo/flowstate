@@ -270,14 +270,14 @@ fn modern_condensed_menu(
     .into_any_element()
 }
 
-const CONDENSE_PILCROW_MARKER: char = '\u{f8ff}';
-const CARD_SECTION_SLOTS: &[u8] = &[0, 1, 2, 3];
+pub(crate) const CONDENSE_PILCROW_MARKER: char = '\u{f8ff}';
+const CARD_SECTION_SLOTS: &[u8] = flowstate_document::CARD_BOUNDARY_STYLE_SLOTS;
 
 fn editor_has_selected_text_or_focused_caret(editor: &RichTextEditor, window: &Window, cx: &App) -> bool {
   !editor.selection().is_caret() || editor.focus_handle(cx).is_focused(window)
 }
 
-fn condense_editor_selection(editor: Entity<RichTextEditor>, separator: char, window: &Window, cx: &mut App) {
+pub(crate) fn condense_editor_selection(editor: Entity<RichTextEditor>, separator: char, window: &Window, cx: &mut App) {
   editor.update(cx, |editor, cx| {
     if !editor_has_selected_text_or_focused_caret(editor, window, cx) {
       return;
@@ -295,7 +295,7 @@ fn condense_editor_selection(editor: Entity<RichTextEditor>, separator: char, wi
   });
 }
 
-fn uncondense_editor_selection(editor: Entity<RichTextEditor>, window: &Window, cx: &mut App) {
+pub(crate) fn uncondense_editor_selection(editor: Entity<RichTextEditor>, window: &Window, cx: &mut App) {
   editor.update(cx, |editor, cx| {
     if !editor_has_selected_text_or_focused_caret(editor, window, cx) {
       return;
@@ -837,7 +837,10 @@ fn modern_speech_send_menu(
         .ghost()
         .h(chip_height)
         .px(metrics.chip_padding_x)
-        .tooltip("Send to speech")
+        // CT-S1: the full-card law, stated where the verb lives — a send in
+        // invisibility mode carries the COMPLETE card (hidden text included),
+        // never the filtered view. Evidence integrity over WYSIWYG.
+        .tooltip("Send to speech \u{2014} sends the full card, including text hidden by invisibility mode")
         .when_some(label.icon_path, |this, path| {
           this.child(
             Icon::default()

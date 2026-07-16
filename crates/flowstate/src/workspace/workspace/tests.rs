@@ -30,6 +30,7 @@ mod tests {
         speech: false,
         dirty: false,
         pathless: false,
+        flow: false,
       },
       DocumentTab {
         id: second,
@@ -40,6 +41,7 @@ mod tests {
         speech: false,
         dirty: false,
         pathless: false,
+        flow: false,
       },
       DocumentTab {
         id: third,
@@ -50,6 +52,7 @@ mod tests {
         speech: false,
         dirty: false,
         pathless: false,
+        flow: false,
       },
     ];
 

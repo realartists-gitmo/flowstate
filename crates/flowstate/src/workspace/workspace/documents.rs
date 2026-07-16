@@ -937,6 +937,7 @@ impl Workspace {
         collapsed_outline_items,
         outline_scrolled_paragraph,
         viewport_paragraph,
+        invisibility: panel.editor().read(cx).invisibility_mode(),
       });
     }
 
@@ -956,6 +957,7 @@ impl Workspace {
         collapsed_outline_items: Vec::new(),
         outline_scrolled_paragraph: None,
         viewport_paragraph: None,
+        invisibility: false,
       });
     }
 
@@ -1050,6 +1052,7 @@ impl Workspace {
       let Some(loaded) = loaded else {
         continue;
       };
+      let mut is_flow_panel = false;
       let id = match loaded {
         LoadedWorkspaceDocument::Document {
           document,
@@ -1071,11 +1074,16 @@ impl Workspace {
             }
             panel.outline_scrolled_paragraph = entry.outline_scrolled_paragraph;
           });
+          // CT-S1: restore the tab's read view.
+          if entry.invisibility {
+            panel.read(cx).editor().update(cx, |editor, cx| editor.set_invisibility_mode(true, cx));
+          }
           viewport_scrolls.push((panel_id, entry.viewport_paragraph));
           panel_id
         },
         LoadedWorkspaceDocument::Flow { document, path } => {
           let panel = self.create_flow_panel(FlowRuntimeSource::FromDocument(Box::new(document)), Some(path), window, cx);
+          is_flow_panel = true;
           panel.read(cx).id()
         },
       };
@@ -1085,7 +1093,9 @@ impl Workspace {
       if pinned_indices.contains(&entry_index) {
         pinned_ids.push(id);
       }
-      if speech_index == Some(entry_index) {
+      // CT-S1: a flow can never be the speech document — a legacy session that
+      // marked one is corrected here rather than restoring the lying badge.
+      if speech_index == Some(entry_index) && !is_flow_panel {
         speech_id = Some(id);
       }
     }
@@ -2203,6 +2213,10 @@ struct TemporaryWorkspaceSessionEntry {
   outline_scrolled_paragraph: Option<usize>,
   #[serde(default)]
   viewport_paragraph: Option<usize>,
+  /// CT-S1: invisibility mode survives a restart per tab — a debater
+  /// re-opening mid-round gets their read view back.
+  #[serde(default)]
+  invisibility: bool,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]

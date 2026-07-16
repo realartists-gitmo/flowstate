@@ -113,7 +113,7 @@ fn perform_editor_ribbon_command(editor: &mut RichTextEditor, command_id: Ribbon
     },
     RibbonCommandId::MarkCard => {
       if editor_has_selected_text_or_focused_caret(editor, window, cx) {
-        editor.set_highlight_from_caret_to_enclosing_section_end(flowstate_document::HIGHLIGHT_MARKED, &[0, 1, 2, 3], cx);
+        editor.set_highlight_from_caret_to_enclosing_section_end(flowstate_document::HIGHLIGHT_MARKED, flowstate_document::CARD_BOUNDARY_STYLE_SLOTS, cx);
       }
     },
     RibbonCommandId::HighlightMenu => {},

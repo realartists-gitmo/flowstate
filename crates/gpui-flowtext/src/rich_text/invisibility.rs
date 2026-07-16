@@ -145,6 +145,105 @@ pub(super) fn run_is_visible_for_theme(theme: &DocumentTheme, styles: RunStyles)
   }
 }
 
+/// CT-S1: the editor-side remap cache shape — paragraph index → (paragraph
+/// version, remap outcome). `None` = the paragraph lays out verbatim.
+pub(super) type InvisibilityRemapCache = rustc_hash::FxHashMap<usize, (u64, Option<std::rc::Rc<InvisibilityRemap>>)>;
+
+/// CT-S1: one visible piece of a projected paragraph — a doc-local byte range
+/// and where it starts in the projected ("display") text.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InvisibilitySegment {
+  pub doc_start: usize,
+  pub doc_end: usize,
+  pub display_start: usize,
+}
+
+/// CT-S1: the bidirectional byte map for ONE projected paragraph. Everything
+/// stored on the editor (selection, comment anchors, find matches, presence)
+/// lives in REAL document bytes; the invisibility layout lays out projected
+/// text. This is the translation at that boundary — overlays map doc→display
+/// before painting, hit tests map display→doc before touching the model.
+/// Empty `segments` = the paragraph is fully hidden (never laid out).
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct InvisibilityRemap {
+  pub segments: Vec<InvisibilitySegment>,
+  pub display_len: usize,
+}
+
+impl InvisibilityRemap {
+  /// Doc-local byte → display byte. `round_up` decides which way a byte inside
+  /// HIDDEN text snaps: range STARTS round up (to the next visible piece) and
+  /// range ENDS round down (to the previous visible piece's end), so a range
+  /// spanning hidden text maps to the envelope of its visible content.
+  pub fn display_for_doc(&self, byte: usize, round_up: bool) -> usize {
+    let mut previous_end = 0usize;
+    for segment in &self.segments {
+      if byte < segment.doc_start {
+        return if round_up { segment.display_start } else { previous_end };
+      }
+      if byte <= segment.doc_end {
+        return segment.display_start + (byte - segment.doc_start);
+      }
+      previous_end = segment.display_start + (segment.doc_end - segment.doc_start);
+    }
+    previous_end
+  }
+
+  /// Display byte → doc-local byte. Separator spaces (elision punctuation
+  /// between pieces) snap forward to the next visible piece, so a click on the
+  /// gap lands at real text.
+  pub fn doc_for_display(&self, byte: usize) -> usize {
+    let mut last_doc_end = 0usize;
+    for segment in &self.segments {
+      if byte < segment.display_start {
+        return segment.doc_start;
+      }
+      let display_end = segment.display_start + (segment.doc_end - segment.doc_start);
+      if byte <= display_end {
+        return segment.doc_start + (byte - segment.display_start);
+      }
+      last_doc_end = segment.doc_end;
+    }
+    last_doc_end
+  }
+}
+
+/// CT-S1: build the remap for a paragraph under invisibility. Returns `None`
+/// when the paragraph lays out VERBATIM (its style is in the visible set — no
+/// projection happens); `Some` with empty segments when it is fully hidden.
+/// The walk mirrors `projected_visible_paragraph_text_and_runs` (and the prep
+/// twin) exactly: same visibility test, same contiguity separator rule — the
+/// unit tests below pin the three against each other.
+pub(super) fn invisibility_paragraph_remap(theme: &DocumentTheme, paragraph: &Paragraph) -> Option<InvisibilityRemap> {
+  if paragraph_style_is_visible_for_theme(theme, paragraph.style) {
+    return None;
+  }
+  let paragraph_len = paragraph_text_len(paragraph);
+  let mut segments = Vec::new();
+  let mut display_len = 0usize;
+  let mut byte = 0usize;
+  let mut last_doc_end = None;
+  for run in &paragraph.runs {
+    let start = byte;
+    let end = start + run.len;
+    byte = end;
+    if start >= end || end > paragraph_len || !run_is_visible_for_theme(theme, run.styles) {
+      continue;
+    }
+    if display_len > 0 && last_doc_end != Some(start) {
+      display_len += 1;
+    }
+    segments.push(InvisibilitySegment {
+      doc_start: start,
+      doc_end: end,
+      display_start: display_len,
+    });
+    display_len += end - start;
+    last_doc_end = Some(end);
+  }
+  Some(InvisibilityRemap { segments, display_len })
+}
+
 #[hotpath::measure]
 pub(super) fn encode_remainder_item_ix(item_ix: usize) -> u32 {
   let encoded = u32::try_from(item_ix).expect("virtual item index exceeds u32::MAX");
@@ -209,4 +308,145 @@ pub(super) fn projected_visible_paragraph_text_and_runs(document: &DocumentProje
   }
 
   (!text.is_empty()).then_some((text, runs))
+}
+
+#[cfg(test)]
+mod invisibility_remap_tests {
+  use super::*;
+
+  fn cite() -> RunStyles {
+    RunStyles {
+      semantic: RunSemanticStyle::Custom(1),
+      ..Default::default()
+    }
+  }
+
+  fn spoken() -> RunStyles {
+    RunStyles {
+      highlight: Some(HighlightStyle::Custom(1)),
+      ..Default::default()
+    }
+  }
+
+  fn fixture() -> DocumentProjection {
+    let mut theme = DocumentTheme::default();
+    theme.set_invisibility_visible_semantic_style(1);
+    theme.set_invisibility_visible_highlight_style(1);
+    document_from_input(
+      theme,
+      vec![InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![
+          InputRun {
+            text: "hidden lead ".into(),
+            styles: RunStyles::default(),
+          },
+          InputRun {
+            text: "Author '24".into(),
+            styles: cite(),
+          },
+          // Contiguous with the cite run: NO separator between them.
+          InputRun {
+            text: " spoken tail".into(),
+            styles: spoken(),
+          },
+          InputRun {
+            text: " hidden middle ".into(),
+            styles: RunStyles::default(),
+          },
+          InputRun {
+            text: "more spoken".into(),
+            styles: spoken(),
+          },
+        ],
+      }],
+    )
+  }
+
+  /// The remap walk and the projected-text walk must agree byte-for-byte:
+  /// segments slice the doc text into exactly the projected text.
+  #[test]
+  fn remap_agrees_with_projected_text() {
+    let document = fixture();
+    let paragraph = &document.paragraphs[0];
+    let (text, _) = projected_visible_paragraph_text_and_runs(&document, 0).expect("projected text");
+    let remap = invisibility_paragraph_remap(&document.theme, paragraph).expect("projected paragraph");
+
+    assert_eq!(remap.display_len, text.len(), "remap length must equal projected text length");
+    let doc_text = document.text.to_string();
+    for segment in &remap.segments {
+      assert_eq!(
+        &text[segment.display_start..segment.display_start + (segment.doc_end - segment.doc_start)],
+        &doc_text[segment.doc_start..segment.doc_end],
+        "segment content must match"
+      );
+    }
+    // Contiguous cite+spoken must NOT be separated; hidden middle must be.
+    assert_eq!(text, "Author '24 spoken tail more spoken");
+  }
+
+  #[test]
+  fn doc_and_display_round_trip_in_visible_text() {
+    let document = fixture();
+    let remap = invisibility_paragraph_remap(&document.theme, &document.paragraphs[0]).expect("projected");
+    // A byte inside the cite run ("hidden lead " is 12 bytes, so doc 12.. is visible).
+    for doc_byte in [12usize, 15, 21, 23, 30] {
+      let display = remap.display_for_doc(doc_byte, true);
+      assert_eq!(remap.doc_for_display(display), doc_byte, "round trip for visible doc byte {doc_byte}");
+    }
+  }
+
+  #[test]
+  fn hidden_bytes_snap_directionally() {
+    let document = fixture();
+    let remap = invisibility_paragraph_remap(&document.theme, &document.paragraphs[0]).expect("projected");
+    // Byte 4 is inside "hidden lead " — a range START there snaps up to the
+    // cite piece; a range END there snaps down to display 0 (nothing before).
+    assert_eq!(remap.display_for_doc(4, true), 0);
+    assert_eq!(remap.display_for_doc(4, false), 0);
+    // "hidden middle" starts at doc 34 ("hidden lead "=12 + "Author '24"=10 +
+    // " spoken tail"=12). A START in it snaps to the "more spoken" piece; an
+    // END snaps back to the end of " spoken tail".
+    let spoken_tail_display_end = remap.display_for_doc(34, false);
+    let more_spoken_display_start = remap.display_for_doc(40, true);
+    assert!(spoken_tail_display_end < more_spoken_display_start);
+    assert_eq!(remap.doc_for_display(more_spoken_display_start), 49, "snaps to 'more spoken' doc start");
+  }
+
+  #[test]
+  fn fully_hidden_paragraph_yields_empty_segments() {
+    let mut theme = DocumentTheme::default();
+    theme.set_invisibility_visible_semantic_style(1);
+    let document = document_from_input(
+      theme,
+      vec![InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![InputRun {
+          text: "all hidden".into(),
+          styles: RunStyles::default(),
+        }],
+      }],
+    );
+    let remap = invisibility_paragraph_remap(&document.theme, &document.paragraphs[0]).expect("hidden paragraph still remaps");
+    assert!(remap.segments.is_empty());
+    assert_eq!(remap.display_len, 0);
+  }
+
+  /// Style-visible paragraphs lay out verbatim — no remap.
+  #[test]
+  fn style_visible_paragraph_has_no_remap() {
+    let mut theme = DocumentTheme::default();
+    theme.set_invisibility_visible_paragraph_style(3);
+    let document = document_from_input(
+      theme,
+      vec![InputParagraph {
+        style: ParagraphStyle::Custom(3),
+        runs: vec![InputRun {
+          text: "a tag".into(),
+          styles: RunStyles::default(),
+        }],
+      }],
+    );
+    assert!(invisibility_paragraph_remap(&document.theme, &document.paragraphs[0]).is_none());
+  }
 }

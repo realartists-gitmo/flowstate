@@ -494,6 +494,37 @@ impl Workspace {
       .when_some(failure_text, |this, text| {
         this.child(div().text_size(px(10.0)).text_color(cx.theme().danger).child(text))
       })
+      // CT-S1: the invisibility MODE INDICATOR. The ribbon chip's selected
+      // tint was the only signal that the document is showing a filtered
+      // read view — a mode that changes what every keystroke means deserves
+      // a standing marker in the identity zone.
+      .when(self.active_editor_invisibility_mode(cx), |this| {
+        this.child(
+          div()
+            .id("invisibility-mode-chip")
+            .text_size(px(9.0))
+            .px_1()
+            .rounded_sm()
+            .border_1()
+            .border_color(cx.theme().primary.opacity(0.7))
+            .text_color(cx.theme().primary)
+            .tooltip(|window, cx| {
+              gpui_component::tooltip::Tooltip::new(
+                "Invisibility mode \u{2014} showing only what gets read in round. Typing on hidden text restyles its paragraph to Analytic.",
+              )
+              .build(window, cx)
+            })
+            .child("INVIS"),
+        )
+      })
+  }
+
+  /// CT-S1: whether the active tab's editor is in invisibility mode.
+  fn active_editor_invisibility_mode(&self, cx: &App) -> bool {
+    self
+      .active_editor
+      .as_ref()
+      .is_some_and(|editor| editor.read(cx).invisibility_mode())
   }
 
   fn render_activity_slot(&self, event: &ActivityEvent, cx: &mut Context<Self>) -> impl IntoElement {

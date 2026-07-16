@@ -271,20 +271,28 @@ impl Element for VirtualParagraphChunkElement {
       active_search_highlight,
     ) = {
       let editor = self.editor.read(cx);
-      let drag_selection = editor.drag_source_selection();
+      // CT-S1: every offset handed to paint is remapped into the projected
+      // ("display") byte space when this paragraph is invisibility-projected —
+      // overlays and carets otherwise land on the wrong words in read mode.
+      let drag_selection = editor
+        .drag_source_selection()
+        .map(|selection| editor.display_selection_for_paragraph(&selection, self.paragraph_ix));
       let external_carets = editor.external_carets_for_paragraph(self.paragraph_ix);
       let external_selections = editor.external_selections_for_paragraph(self.paragraph_ix);
       let annotation_selections = editor.annotation_selections_for_paragraph(self.paragraph_ix);
       let jump_flash = editor.jump_flash_for_paragraph(self.paragraph_ix);
       (
-        editor.selection.clone(),
+        editor.paint_selection_for_paragraph(self.paragraph_ix),
         drag_selection,
         (editor.selection.is_caret()
           && editor.selected_block.is_none()
           && editor.selection.head.paragraph == self.paragraph_ix
           && editor.caret_visible
           && editor.focus_handle.is_focused(window))
-        .then_some(editor.selection.head),
+        .then(|| DocumentOffset {
+          paragraph: editor.selection.head.paragraph,
+          byte: editor.display_byte_for_doc(editor.selection.head.paragraph, editor.selection.head.byte, false),
+        }),
         editor.caret_paint_width(),
         editor.local_caret_color_rgb(),
         // The caret's fallback color = the configured caret color (flow cells
@@ -299,7 +307,7 @@ impl Element for VirtualParagraphChunkElement {
         external_selections,
         annotation_selections,
         jump_flash,
-        editor.search_highlights.clone(),
+        editor.search_highlights_for_paint(self.paragraph_ix),
         editor.active_search_highlight,
       )
     };

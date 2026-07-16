@@ -42,7 +42,12 @@ impl RichTextEditor {
     let new_offset = clamp_scroll_offset(&self.scroll_handle, point(old_offset.x, old_offset.y + signed_delta));
     self.scroll_handle.set_offset(new_offset);
 
-    let Some(caret) = caret_bounds(&layout, head, self.selection.head_gravity, bounds.origin) else {
+    // CT-S1: caret geometry lives in display space under invisibility.
+    let display_head = DocumentOffset {
+      paragraph: head.paragraph,
+      byte: self.display_byte_for_doc(head.paragraph, head.byte, false),
+    };
+    let Some(caret) = caret_bounds(&layout, display_head, self.selection.head_gravity, bounds.origin) else {
       cx.notify();
       return;
     };
@@ -52,7 +57,7 @@ impl RichTextEditor {
     };
     let target = self
       .hit_test_cached_position(point(caret.origin.x, target_y))
-      .unwrap_or_else(|| layout.hit_test(point(caret.origin.x, target_y)));
+      .unwrap_or_else(|| self.doc_offset_from_display(layout.hit_test(point(caret.origin.x, target_y))));
     self.move_to_offset(target, SelectionAffinity::Neutral, VisualGravity::Neutral, extend, cx);
   }
 

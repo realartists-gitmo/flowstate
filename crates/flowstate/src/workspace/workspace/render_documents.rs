@@ -267,10 +267,26 @@ impl Workspace {
             let left_workspace = workspace.clone();
             let right_workspace = workspace.clone();
             let tear_workspace = workspace.clone();
+            let speech_workspace = workspace.clone();
             menu
               .item(PopupMenuItem::new(if tab.pinned { "Unpin tab" } else { "Pin tab" }).on_click(move |_, _, cx| {
                 let _ = pin_workspace.update(cx, |workspace, cx| workspace.toggle_tab_pin(panel_id, cx));
               }))
+              // CT-S1: speech designation is reachable where the tab lives —
+              // it was ribbon/palette-only. Flows can't be the speech doc.
+              .item(
+                PopupMenuItem::new(if tab.speech {
+                  "Unmark speech document"
+                } else if tab.flow {
+                  "Mark as speech document (flows can't)"
+                } else {
+                  "Mark as speech document"
+                })
+                .disabled(tab.flow)
+                .on_click(move |_, _, cx| {
+                  let _ = speech_workspace.update(cx, |workspace, cx| workspace.toggle_speech_document(panel_id, cx));
+                }),
+              )
               // TB-S3: reorder within the tab's zone (pins stay a zone).
               .item(PopupMenuItem::new("Move tab left").on_click(move |_, _, cx| {
                 let _ = left_workspace.update(cx, |workspace, cx| workspace.move_document_tab(panel_id, -1, cx));

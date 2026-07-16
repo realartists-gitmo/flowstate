@@ -1,3 +1,7 @@
+/// CT-S1: the "nothing to mark" refusal flash color — a danger red, painted at
+/// the gesture site through the transient-flash overlay.
+const MARK_REFUSAL_FLASH_RGB: u32 = 0x00E5_484D;
+
 #[hotpath::measure_all]
 impl RichTextEditor {
   pub fn toggle_underline(&mut self, cx: &mut Context<Self>) {
@@ -237,6 +241,10 @@ impl RichTextEditor {
     // undo unit.
     let spans = highlighted_spans_in_range(&self.document, range_start..range_end, highlight);
     if spans.is_empty() {
+      // CT-S1 (CT7-B): never a silent no-op. Mark Card recolors EXISTING
+      // highlights only, so an unhighlighted card pushes back at the gesture
+      // site — a brief refusal flash over the range it would have marked.
+      self.flash_range(EditorSelection::range(range_start, range_end), MARK_REFUSAL_FLASH_RGB, cx);
       return;
     }
     self.pending_styles = None;

@@ -54,6 +54,17 @@ pub const PARAGRAPH_TAG: ParagraphStyle = ParagraphStyle::Custom(3);
 pub const PARAGRAPH_ANALYTIC: ParagraphStyle = ParagraphStyle::Custom(4);
 pub const PARAGRAPH_UNDERTAG: ParagraphStyle = ParagraphStyle::Custom(6);
 
+/// CT-S1: THE "enclosing card" boundary set, shared by every cutting verb.
+/// Before unification each verb had its own idea of where a card ends —
+/// send-to-speech used {Block, Tag, Analytic} while condense and mark-card
+/// used {Pocket, Hat, Block, Tag} — so "the enclosing section" meant different
+/// bounds depending on which key you pressed. One law: every structural
+/// heading style (and Analytic, which is its own argument unit) bounds a card.
+/// NOTE: this is the CUTTING-verb boundary; the outline's section-collapse
+/// hierarchy keeps its own heading set deliberately (Analytic does not open an
+/// outline section).
+pub const CARD_BOUNDARY_STYLE_SLOTS: &[u8] = &[0, 1, 2, 3, 4];
+
 pub const SEMANTIC_CITE: RunSemanticStyle = RunSemanticStyle::Custom(1);
 pub const SEMANTIC_EMPHASIS: RunSemanticStyle = RunSemanticStyle::Custom(2);
 pub const SEMANTIC_UNDERLINE: RunSemanticStyle = RunSemanticStyle::Custom(3);

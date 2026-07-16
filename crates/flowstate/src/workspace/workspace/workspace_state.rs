@@ -926,6 +926,17 @@ impl Workspace {
   }
 
   pub(crate) fn toggle_speech_document(&mut self, panel_id: Uuid, cx: &mut Context<Self>) {
+    // CT-S1: the flow-speech trap dies here. A flow used to accept the "S"
+    // designation and then silently swallow every send (sends only look up
+    // document panels) — the badge was a lie. Refuse out loud instead.
+    if self.flow_panels.iter().any(|panel| panel.read(cx).id() == panel_id) {
+      self.report_failure(
+        "A flow can't be the speech document — cards are sent into a rich-text document.",
+        None,
+        cx,
+      );
+      return;
+    }
     self.speech_document_id = if self.speech_document_id == Some(panel_id) {
       None
     } else {
@@ -980,7 +991,7 @@ impl Workspace {
       if !editor.focus_handle(cx).is_focused(window) {
         return false;
       }
-      let Some(fragment) = editor.fragment_at_selection_or_enclosing_section(&[0, 1, 2, 3]) else {
+      let Some(fragment) = editor.fragment_at_selection_or_enclosing_section(flowstate_document::CARD_BOUNDARY_STYLE_SLOTS) else {
         return false;
       };
       let paragraphs = if editor.selection().is_caret() {
@@ -991,7 +1002,7 @@ impl Workspace {
       if paragraphs.is_empty() {
         return false;
       }
-      editor.replace_selection_or_enclosing_section_with_paragraphs(paragraphs, &[0, 1, 2, 3], cx);
+      editor.replace_selection_or_enclosing_section_with_paragraphs(paragraphs, flowstate_document::CARD_BOUNDARY_STYLE_SLOTS, cx);
       true
     })
   }
@@ -1014,27 +1025,45 @@ impl Workspace {
     wrapped
   }
 
-  pub(crate) fn send_selection_to_speech_document(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+  /// CT-S1: the send guards refuse OUT LOUD. `None` = refused (already
+  /// reported); `Some` = (source, target) editors ready.
+  fn speech_send_editors(&mut self, cx: &mut Context<Self>) -> Option<(Entity<RichTextEditor>, Entity<RichTextEditor>)> {
     let Some(speech_document_id) = self.speech_document_id else {
-      return false;
+      self.report_failure(
+        "No speech document is set — right-click a document tab (or use the ribbon) and mark it as the speech document first.",
+        None,
+        cx,
+      );
+      return None;
     };
     if self.active_document_id == Some(speech_document_id) {
-      return false;
+      self.report_failure("This IS the speech document — send from the document you're cutting.", None, cx);
+      return None;
     }
-    let Some(source_editor) = self.active_editor.clone() else {
-      return false;
-    };
+    let source_editor = self.active_editor.clone()?;
     let Some(speech_editor) = self
       .document_panels
       .iter()
       .find(|panel| panel.read(cx).id() == speech_document_id)
       .map(|panel| panel.read(cx).editor())
     else {
+      self.report_failure(
+        "The speech document's tab is gone — mark another document as the speech document.",
+        None,
+        cx,
+      );
+      return None;
+    };
+    Some((source_editor, speech_editor))
+  }
+
+  pub(crate) fn send_selection_to_speech_document(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    let Some((source_editor, speech_editor)) = self.speech_send_editors(cx) else {
       return false;
     };
     let fragment = source_editor.update(cx, |editor, cx| {
       editor
-        .speech_send_fragment_at_selection_or_hover(&[2, 3, 4], window, cx)
+        .speech_send_fragment_at_selection_or_hover(flowstate_document::CARD_BOUNDARY_STYLE_SLOTS, window, cx)
         .unwrap_or_else(|| selected_fragment_or_enclosing_section(editor.document(), editor.selection()))
     });
     if fragment.paragraphs.is_empty() && fragment.blocks.is_empty() {
@@ -1050,26 +1079,12 @@ impl Workspace {
   }
 
   pub(crate) fn send_selection_to_speech_document_end(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-    let Some(speech_document_id) = self.speech_document_id else {
-      return false;
-    };
-    if self.active_document_id == Some(speech_document_id) {
-      return false;
-    }
-    let Some(source_editor) = self.active_editor.clone() else {
-      return false;
-    };
-    let Some(speech_editor) = self
-      .document_panels
-      .iter()
-      .find(|panel| panel.read(cx).id() == speech_document_id)
-      .map(|panel| panel.read(cx).editor())
-    else {
+    let Some((source_editor, speech_editor)) = self.speech_send_editors(cx) else {
       return false;
     };
     let fragment = source_editor.update(cx, |editor, cx| {
       editor
-        .speech_send_fragment_at_selection_or_hover(&[2, 3, 4], window, cx)
+        .speech_send_fragment_at_selection_or_hover(flowstate_document::CARD_BOUNDARY_STYLE_SLOTS, window, cx)
         .unwrap_or_else(|| selected_fragment_or_enclosing_section(editor.document(), editor.selection()))
     });
     if fragment.paragraphs.is_empty() && fragment.blocks.is_empty() {
@@ -1218,6 +1233,7 @@ impl Workspace {
           speech: self.speech_document_id == Some(id),
           dirty,
           pathless,
+          flow: false,
         }
       })
       .collect::<Vec<_>>();
@@ -1234,9 +1250,12 @@ impl Workspace {
         active: Some(id) == self.active_document_id,
         pinned: false,
         pin_index: None,
-        speech: self.speech_document_id == Some(id),
+        // CT-S1: a flow can never be the speech document (designation refuses),
+        // so its tab never wears the badge — legacy state included.
+        speech: false,
         dirty,
         pathless,
+        flow: true,
       }
     }));
     ordered_document_tabs(tabs, &self.pinned_document_ids)
@@ -1416,7 +1435,7 @@ fn selected_fragment_or_enclosing_section(
     );
   }
   let caret = selection.head;
-  let (start_paragraph, end_paragraph_exclusive) = enclosing_section_bounds(document, caret.paragraph, &[2, 3, 4]).unwrap_or((
+  let (start_paragraph, end_paragraph_exclusive) = enclosing_section_bounds(document, caret.paragraph, flowstate_document::CARD_BOUNDARY_STYLE_SLOTS).unwrap_or((
     caret.paragraph,
     caret
       .paragraph

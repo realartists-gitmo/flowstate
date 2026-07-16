@@ -32,7 +32,10 @@ impl RichTextEditor {
         point(viewport.left(), viewport.top() + self.scroll_handle.offset().y + row_top),
         size(width, layout.size.height),
       );
-      return layout.hit_test_at_bounds(position, bounds);
+      // CT-S1: layout bytes are display-space under invisibility — clicks must
+      // land in REAL document bytes or the caret (and every subsequent edit)
+      // targets the wrong text.
+      return self.doc_offset_from_display(layout.hit_test_at_bounds(position, bounds));
     }
     self.ensure_next_paragraph_chunk(paragraph_ix, width, window, cx);
     let Some(layout) = self.paragraph_chunk_layout_state(paragraph_ix, 0, width) else {
@@ -48,7 +51,7 @@ impl RichTextEditor {
       point(viewport.left(), viewport.top() + self.scroll_handle.offset().y + row_top),
       size(width, layout.size.height),
     );
-    layout.hit_test_at_bounds(position, bounds)
+    self.doc_offset_from_display(layout.hit_test_at_bounds(position, bounds))
   }
 
   fn virtual_text_item_at_content_y(
@@ -88,22 +91,28 @@ impl RichTextEditor {
   // without any renderer changes.
   fn move_line_edge(&mut self, start: bool, extend: bool, cx: &mut Context<Self>) {
     let head = self.selection.head;
+    // CT-S1: locate the caret's line in DISPLAY space (the layout's byte space
+    // under invisibility), then map the chosen edge back to a real doc byte.
+    let display_head = DocumentOffset {
+      paragraph: head.paragraph,
+      byte: self.display_byte_for_doc(head.paragraph, head.byte, false),
+    };
     let new_byte = {
       let Some(layout) = self.layout_for_offset(head) else {
         return;
       };
       // Resolve the caret's current visual line using its stored gravity so the
       // line edges we snap to match where the caret is actually painted.
-      let Some((p_ix, l_ix)) = locate_line(&layout, head, self.selection.head_gravity) else {
+      let Some((p_ix, l_ix)) = locate_line(&layout, display_head, self.selection.head_gravity) else {
         return;
       };
       let line = &layout.paragraphs[p_ix].lines[l_ix];
       if start { line.start_byte } else { line.end_byte }
     };
-    let new = DocumentOffset {
+    let new = self.doc_offset_from_display(DocumentOffset {
       paragraph: head.paragraph,
       byte: new_byte,
-    };
+    });
     // §16: line-start gravitates downstream (start of the lower visual line),
     // line-end gravitates upstream (end of the upper visual line). This is the
     // canonical wrap-seam case — without Upstream gravity, "End" on a wrapped

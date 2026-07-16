@@ -208,6 +208,8 @@ struct DocumentTab {
   /// W-S1: no backing file yet — tear-off ("Move to new window") is disabled
   /// for these instead of silently no-oping.
   pathless: bool,
+  /// CT-S1: flow tabs can't be the speech document — the menu entry disables.
+  flow: bool,
 }
 
 type FontFamilySelectDelegate = SearchableVec<SharedString>;

@@ -181,6 +181,8 @@ pub(crate) fn action_for_command(command: CommandId) -> Option<Box<dyn Action>> 
     | CommandId::SendToSpeechDocument
     | CommandId::SendToSpeechDocumentEnd
     | CommandId::CondenseSelection
+    | CommandId::CondenseSelectionPilcrows
+    | CommandId::UncondensePilcrows
     | CommandId::CondensedSelection
     | CommandId::ToggleSpeechDocument
     | CommandId::ExportFormat

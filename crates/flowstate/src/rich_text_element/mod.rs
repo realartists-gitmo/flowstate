@@ -95,6 +95,8 @@ pub fn flowstate_command_to_rich_text(command: CommandId) -> Option<RichTextEdit
     | CommandId::SendToSpeechDocument
     | CommandId::SendToSpeechDocumentEnd
     | CommandId::CondenseSelection
+    | CommandId::CondenseSelectionPilcrows
+    | CommandId::UncondensePilcrows
     | CommandId::CondensedSelection
     | CommandId::ToggleSpeechDocument
     | CommandId::ExportFormat

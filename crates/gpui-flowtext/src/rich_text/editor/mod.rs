@@ -1036,6 +1036,11 @@ pub struct RichTextEditor {
   // entries for deleted paragraphs (same policy as the estimate cache below).
   paragraph_prep_cache: FxHashMap<ParagraphId, ParagraphPrepSlot>,
   paragraph_shaping_cache: FxHashMap<ParagraphId, ParagraphShapingCacheEntry>,
+  /// CT-S1: per-paragraph invisibility byte remaps (doc ⇄ projected/display),
+  /// cached by paragraph version. `None` in a slot = the paragraph lays out
+  /// verbatim under the mode (style-visible). `RefCell` because paint/hit-test
+  /// read paths hold `&self`.
+  invisibility_remap_cache: std::cell::RefCell<InvisibilityRemapCache>,
   // §perf-heaven T7.14: keyed by STABLE `ParagraphId`, not by `paragraph_ix`.
   // A positional `Vec` shifted on any mid-document insert/delete, turning every
   // trailing paragraph's estimate into a stale-slot MISS → an O(document) tail

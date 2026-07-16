@@ -303,6 +303,13 @@ fn projected_visible_paragraph_text_and_runs_from_text(
   let mut output = String::with_capacity(visible_text_len.saturating_add(visible_run_count.saturating_sub(1)));
   let mut runs = Vec::with_capacity(visible_run_count.saturating_mul(2).saturating_sub(1));
   let mut byte = 0usize;
+  // CT-S1: contiguity rule unified with `projected_visible_paragraph_text_and_runs`
+  // (invisibility.rs) and `invisibility_paragraph_remap`: a separator space is
+  // elision punctuation — it appears only where hidden text was cut between two
+  // visible pieces, never between contiguous visible runs. Before unification
+  // this builder always injected a space, so the prep-cache path and the
+  // projected-document path could lay the same paragraph out one byte apart.
+  let mut last_doc_end = None;
 
   for run in &paragraph.runs {
     let start = byte;
@@ -311,7 +318,7 @@ fn projected_visible_paragraph_text_and_runs_from_text(
     if start >= end || end > paragraph_len || !run_is_visible_for_theme(theme, run.styles) {
       continue;
     }
-    if !output.is_empty() {
+    if !output.is_empty() && last_doc_end != Some(start) {
       output.push(' ');
       runs.push(TextRun {
         len: 1,
@@ -328,6 +335,7 @@ fn projected_visible_paragraph_text_and_runs_from_text(
       len: piece_len,
       styles: run.styles,
     });
+    last_doc_end = Some(end);
   }
 
   (!output.is_empty()).then_some((output, runs))

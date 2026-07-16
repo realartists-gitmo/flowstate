@@ -277,6 +277,22 @@ impl Workspace {
       CommandId::SendToSpeechDocument => self.send_selection_to_speech_document(window, cx),
       CommandId::SendToSpeechDocumentEnd => self.send_selection_to_speech_document_end(window, cx),
       CommandId::CondenseSelection => self.condense_active_selection(window, cx),
+      CommandId::CondenseSelectionPilcrows => {
+        if let Some(editor) = self.active_editor.clone() {
+          crate::ribbon::condense_editor_selection(editor, crate::ribbon::CONDENSE_PILCROW_MARKER, window, cx);
+          true
+        } else {
+          false
+        }
+      },
+      CommandId::UncondensePilcrows => {
+        if let Some(editor) = self.active_editor.clone() {
+          crate::ribbon::uncondense_editor_selection(editor, window, cx);
+          true
+        } else {
+          false
+        }
+      },
       CommandId::CondensedSelection => {
         if let Some(editor) = self.active_editor.clone() {
           editor.update(cx, |editor, cx| {
@@ -293,7 +309,7 @@ impl Workspace {
         if let Some(editor) = self.active_editor.clone() {
           editor.update(cx, |editor, cx| {
             if editor.focus_handle(cx).is_focused(window) {
-              editor.set_highlight_from_caret_to_enclosing_section_end(flowstate_document::HIGHLIGHT_MARKED, &[0, 1, 2, 3], cx);
+              editor.set_highlight_from_caret_to_enclosing_section_end(flowstate_document::HIGHLIGHT_MARKED, flowstate_document::CARD_BOUNDARY_STYLE_SLOTS, cx);
             }
           });
           true

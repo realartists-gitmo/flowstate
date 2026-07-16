@@ -131,6 +131,7 @@ impl RichTextEditor {
       paragraph_chunk_layout_cache: vec![None; paragraph_count],
       paragraph_prep_cache: FxHashMap::default(),
       paragraph_shaping_cache: FxHashMap::default(),
+      invisibility_remap_cache: std::cell::RefCell::new(FxHashMap::default()),
       paragraph_estimate_height_cache: FxHashMap::default(),
       pending_layout_prep_task: None,
       pending_layout_prep_request: None,
@@ -481,12 +482,111 @@ impl RichTextEditor {
     }
   }
 
+  // -- CT-S1: the invisibility byte-remap boundary ------------------------
+  //
+  // Model state (selection, comment anchors, find matches, presence) lives in
+  // REAL document bytes, always. Under invisibility the layout for a
+  // style-hidden paragraph holds PROJECTED text (visible runs + elision
+  // spaces), so every offset crossing the model⇄geometry boundary translates
+  // here: overlays doc→display before painting, hit tests display→doc before
+  // touching the model. Before this boundary existed, comment underlines and
+  // find highlights painted on the wrong words in read mode, and a click in a
+  // projected paragraph wrote a PROJECTED byte into the real selection.
+
+  /// The remap for `paragraph_ix`, or `None` when the paragraph lays out
+  /// verbatim (mode off, or its style is invisibility-visible).
+  pub(super) fn invisibility_remap_for(&self, paragraph_ix: usize) -> Option<std::rc::Rc<InvisibilityRemap>> {
+    if !self.invisibility_mode {
+      return None;
+    }
+    let paragraph = self.document.paragraphs.get(paragraph_ix)?;
+    let mut cache = self.invisibility_remap_cache.borrow_mut();
+    if let Some((version, entry)) = cache.get(&paragraph_ix)
+      && *version == paragraph.version
+    {
+      return entry.clone();
+    }
+    let entry = invisibility_paragraph_remap(&self.document.theme, paragraph).map(std::rc::Rc::new);
+    cache.insert(paragraph_ix, (paragraph.version, entry.clone()));
+    entry
+  }
+
+  /// Display-space offset (from a layout hit test) → real document offset.
+  pub(super) fn doc_offset_from_display(&self, offset: DocumentOffset) -> DocumentOffset {
+    match self.invisibility_remap_for(offset.paragraph) {
+      None => offset,
+      Some(remap) => DocumentOffset {
+        paragraph: offset.paragraph,
+        byte: remap.doc_for_display(offset.byte),
+      },
+    }
+  }
+
+  /// Real document byte → display byte within `paragraph_ix`. Range starts
+  /// round up (next visible piece), range ends round down.
+  pub(super) fn display_byte_for_doc(&self, paragraph_ix: usize, byte: usize, round_up: bool) -> usize {
+    match self.invisibility_remap_for(paragraph_ix) {
+      None => byte,
+      Some(remap) => remap.display_for_doc(byte, round_up),
+    }
+  }
+
+  /// A selection with any endpoint in `paragraph_ix` remapped into display
+  /// space for painting. Endpoints in other paragraphs are untouched — each
+  /// paragraph's paint pass only ever reads its own endpoints.
+  pub(super) fn display_selection_for_paragraph(&self, selection: &EditorSelection, paragraph_ix: usize) -> EditorSelection {
+    if !self.invisibility_mode || selection.is_caret() {
+      return selection.clone();
+    }
+    let range = selection.normalized();
+    let mut start = range.start;
+    let mut end = range.end;
+    if start.paragraph == paragraph_ix {
+      start.byte = self.display_byte_for_doc(paragraph_ix, start.byte, true);
+    }
+    if end.paragraph == paragraph_ix {
+      end.byte = self.display_byte_for_doc(paragraph_ix, end.byte, false);
+    }
+    if start.paragraph == end.paragraph && start.byte > end.byte {
+      // The range lived entirely in hidden text: collapse it so nothing paints.
+      end = start;
+    }
+    EditorSelection::range(start, end)
+  }
+
+  /// The local selection as the paint pass for `paragraph_ix` should see it.
+  pub(super) fn paint_selection_for_paragraph(&self, paragraph_ix: usize) -> EditorSelection {
+    self.display_selection_for_paragraph(&self.selection, paragraph_ix)
+  }
+
+  /// Search highlights with endpoints in `paragraph_ix` mapped to display
+  /// space (dropping highlights that live entirely in hidden text there).
+  pub(super) fn search_highlights_for_paint(&self, paragraph_ix: usize) -> Vec<std::ops::Range<DocumentOffset>> {
+    if !self.invisibility_mode {
+      return self.search_highlights.clone();
+    }
+    self
+      .search_highlights
+      .iter()
+      .map(|highlight| {
+        let selection = EditorSelection::range(highlight.start, highlight.end);
+        self.display_selection_for_paragraph(&selection, paragraph_ix).normalized()
+      })
+      .collect()
+  }
+
   pub fn external_carets_for_paragraph(&self, paragraph_ix: usize) -> Vec<ExternalCaret> {
     self
       .external_carets
       .iter()
       .filter(|caret| caret.offset.paragraph == paragraph_ix)
-      .cloned()
+      .map(|caret| {
+        // CT-S1: presence carets in a projected paragraph snap to the nearest
+        // visible position rather than painting mid-wrong-word.
+        let mut caret = caret.clone();
+        caret.offset.byte = self.display_byte_for_doc(paragraph_ix, caret.offset.byte, false);
+        caret
+      })
       .collect()
   }
 
@@ -540,7 +640,10 @@ impl RichTextEditor {
         let range = external.selection.normalized();
         range.start.paragraph <= paragraph_ix && range.end.paragraph >= paragraph_ix
       })
-      .cloned()
+      .map(|external| ExternalSelection {
+        selection: self.display_selection_for_paragraph(&external.selection, paragraph_ix),
+        color_rgb: external.color_rgb,
+      })
       .collect()
   }
 
@@ -555,7 +658,15 @@ impl RichTextEditor {
         let range = annotation.selection.normalized();
         range.start.paragraph <= paragraph_ix && range.end.paragraph >= paragraph_ix
       })
-      .map(|(ix, annotation)| (annotation.clone(), self.hovered_annotation == Some(ix)))
+      .map(|(ix, annotation)| {
+        (
+          ExternalSelection {
+            selection: self.display_selection_for_paragraph(&annotation.selection, paragraph_ix),
+            color_rgb: annotation.color_rgb,
+          },
+          self.hovered_annotation == Some(ix),
+        )
+      })
       .collect()
   }
 
@@ -563,7 +674,7 @@ impl RichTextEditor {
     let flash = self.jump_flash.as_ref()?;
     let range = flash.selection.normalized();
     (range.start.paragraph <= paragraph_ix && range.end.paragraph >= paragraph_ix).then(|| ExternalSelection {
-      selection: flash.selection.clone(),
+      selection: self.display_selection_for_paragraph(&flash.selection, paragraph_ix),
       color_rgb: flash.color_rgb,
     })
   }

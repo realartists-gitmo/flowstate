@@ -170,18 +170,24 @@ impl RichTextEditor {
     let _ = self.paragraph_item_sizes(window, cx);
     // Compute the new head while only reading layout snapshots. Use a local
     // scope so we can mutate selection afterwards without borrow conflicts.
+    // CT-S1: line location and x-goal run in DISPLAY space (the layout's byte
+    // space under invisibility); the landing byte maps back to a doc byte.
+    let display_head = DocumentOffset {
+      paragraph: head.paragraph,
+      byte: self.display_byte_for_doc(head.paragraph, head.byte, false),
+    };
     let (new_head, used_goal_x) = {
       let Some(layout) = self.layout_for_offset(head) else {
         return;
       };
-      let Some((p_ix, l_ix)) = locate_line(&layout, head, self.selection.head_gravity) else {
+      let Some((p_ix, l_ix)) = locate_line(&layout, display_head, self.selection.head_gravity) else {
         cx.notify();
         return;
       };
       let cur_line = &layout.paragraphs[p_ix].lines[l_ix];
       let cur_x = self
         .goal_x
-        .unwrap_or_else(|| x_for_byte(cur_line, head.byte));
+        .unwrap_or_else(|| x_for_byte(cur_line, display_head.byte));
       let next = match dir {
         VDir::Up => find_line_above(&layout, p_ix, l_ix),
         VDir::Down => find_line_below(&layout, p_ix, l_ix),
@@ -191,10 +197,10 @@ impl RichTextEditor {
       };
       let target_line = &layout.paragraphs[np].lines[nl];
       let new_byte = target_line.hit_test_x(cur_x);
-      let new_head = DocumentOffset {
+      let new_head = self.doc_offset_from_display(DocumentOffset {
         paragraph: layout.paragraphs[np].index,
         byte: new_byte,
-      };
+      });
       (new_head, cur_x)
     };
     // Vertical motion lands on a fresh column position; reset to neutral
@@ -251,7 +257,15 @@ impl RichTextEditor {
           VDir::Down => paragraph.lines.first(),
         };
         line
-          .map(|line| line.hit_test_x(goal_x))
+          .map(|line| {
+            // CT-S1: display→doc for the landing byte.
+            self
+              .doc_offset_from_display(DocumentOffset {
+                paragraph: target_paragraph,
+                byte: line.hit_test_x(goal_x),
+              })
+              .byte
+          })
           .unwrap_or_else(|| match dir {
             VDir::Up => paragraph_text_len(&self.document.paragraphs[target_paragraph]),
             VDir::Down => 0,

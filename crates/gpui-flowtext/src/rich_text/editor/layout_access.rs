@@ -108,7 +108,8 @@ impl RichTextEditor {
           point(viewport.left(), viewport.top() + self.scroll_handle.offset().y + row_top),
           size(width, layout.size.height),
         );
-        Some(layout.hit_test_at_bounds(position, bounds))
+        // CT-S1: display→doc at the geometry boundary (invisibility remap).
+        Some(self.doc_offset_from_display(layout.hit_test_at_bounds(position, bounds)))
       },
       Some(VirtualItem::ParagraphRemainder { paragraph_ix, .. }) => {
         let paragraph_len = self
