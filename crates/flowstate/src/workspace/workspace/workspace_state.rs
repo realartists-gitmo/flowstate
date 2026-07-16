@@ -333,6 +333,8 @@ impl Workspace {
       let comment_workspace = workspace.clone();
       let speech_workspace = workspace.clone();
       let siblings_workspace = workspace.clone();
+      let move_up_workspace = workspace.clone();
+      let move_down_workspace = workspace.clone();
       menu
         .min_w(px(180.0))
         .item(
@@ -395,6 +397,28 @@ impl Workspace {
               workspace.outline_context_menu = None;
               if let Some(paragraph_ix) = paragraph_ix {
                 workspace.send_outline_section_to_speech(paragraph_ix, window, cx);
+              }
+            });
+          }),
+        )
+        // O-S5: whole-section restructure (menu-driven; the Living Grid drag
+        // rides the sidebar drag machinery when it lands).
+        .item(
+          PopupMenuItem::new("Move section up").on_click(move |_, _, cx| {
+            let _ = move_up_workspace.update(cx, |workspace, cx| {
+              workspace.outline_context_menu = None;
+              if let Some(paragraph_ix) = paragraph_ix {
+                workspace.move_outline_section(paragraph_ix, true, cx);
+              }
+            });
+          }),
+        )
+        .item(
+          PopupMenuItem::new("Move section down").on_click(move |_, _, cx| {
+            let _ = move_down_workspace.update(cx, |workspace, cx| {
+              workspace.outline_context_menu = None;
+              if let Some(paragraph_ix) = paragraph_ix {
+                workspace.move_outline_section(paragraph_ix, false, cx);
               }
             });
           }),
@@ -527,6 +551,49 @@ impl Workspace {
   pub(super) fn send_outline_section_to_speech(&mut self, paragraph_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
     self.select_outline_section_in_editor(paragraph_ix, window, cx);
     self.send_selection_to_speech_document(window, cx);
+  }
+
+  /// O-S5: move a section above its previous sibling / below its next one.
+  /// Sibling = the nearest same-level heading with no higher-level heading
+  /// between (stays inside the same parent).
+  pub(super) fn move_outline_section(&mut self, paragraph_ix: usize, up: bool, cx: &mut Context<Self>) {
+    let Some((start, end)) = self.outline_section_range(paragraph_ix, cx) else { return };
+    let Some(cache) = self.outline_cache.as_ref() else { return };
+    let Some(level) = cache.levels.get(&paragraph_ix).copied() else { return };
+    let target = if up {
+      // The previous same-level sibling's start.
+      let mut candidate = None;
+      for (ix, lvl) in cache.levels.iter() {
+        if *ix >= start {
+          continue;
+        }
+        if *lvl < level && candidate.is_some_and(|best| *ix > best) {
+          // A higher-level heading between us and the candidate: parent
+          // boundary crossed — the candidate is not a sibling.
+          candidate = None;
+        }
+        if *lvl == level && candidate.is_none_or(|best| *ix > best) {
+          candidate = Some(*ix);
+        }
+      }
+      candidate
+    } else {
+      // The end of the NEXT same-level sibling's section.
+      let next_sibling = cache
+        .levels
+        .iter()
+        .filter(|(ix, lvl)| **ix >= end && **lvl <= level)
+        .min_by_key(|(ix, _)| **ix)
+        .filter(|(_, lvl)| **lvl == level)
+        .map(|(ix, _)| *ix);
+      next_sibling.and_then(|sibling| self.outline_section_range(sibling, cx).map(|(_, sibling_end)| sibling_end))
+    };
+    let Some(target) = target else { return };
+    if let Some(editor) = self.active_editor.clone() {
+      editor.update(cx, |editor, cx| {
+        editor.move_paragraph_range(start, end, target, cx);
+      });
+    }
   }
 
   /// O-S6: collapse every sibling heading at this level, leaving this one

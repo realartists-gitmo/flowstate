@@ -272,6 +272,91 @@ impl RichTextEditor {
     self.clear_drop_preview();
   }
 
+  /// O-S5: whole-section move (heading + descendants) as the SAME grouped
+  /// delete+insert the drag-drop path uses — one undo group, typed intents,
+  /// collab-convergent. `target_paragraph` is where the section's first
+  /// paragraph should land, in PRE-move coordinates (`paragraph_count` means
+  /// "after the last paragraph"). Boundary-inclusive: the paragraph break
+  /// travels with the section, so no empty shells are left behind.
+  pub fn move_paragraph_range(
+    &mut self,
+    start_paragraph: usize,
+    end_paragraph_exclusive: usize,
+    target_paragraph: usize,
+    cx: &mut Context<Self>,
+  ) -> bool {
+    let paragraph_count = self.document.paragraphs.len();
+    if start_paragraph >= end_paragraph_exclusive
+      || end_paragraph_exclusive > paragraph_count
+      || target_paragraph > paragraph_count
+      || (target_paragraph >= start_paragraph && target_paragraph <= end_paragraph_exclusive)
+      || (start_paragraph == 0 && end_paragraph_exclusive == paragraph_count)
+    {
+      return false;
+    }
+    let paragraph_end = |ix: usize| DocumentOffset {
+      paragraph: ix,
+      byte: self.document.paragraphs.get(ix).map_or(0, paragraph_text_len),
+    };
+    // Capture with the SECTION's paragraph break included: a trailing break
+    // ([...section, ""]) when a following paragraph exists, else a leading
+    // one (["", ...section]).
+    let (source_range, mut fragment_paragraphs_lead_with_break) = if end_paragraph_exclusive < paragraph_count {
+      (
+        DocumentOffset {
+          paragraph: start_paragraph,
+          byte: 0,
+        }..DocumentOffset {
+          paragraph: end_paragraph_exclusive,
+          byte: 0,
+        },
+        false,
+      )
+    } else {
+      (paragraph_end(start_paragraph - 1)..paragraph_end(end_paragraph_exclusive - 1), true)
+    };
+    let mut fragment = selected_rich_fragment(&self.document, source_range.clone());
+    if fragment.paragraphs.is_empty() {
+      return false;
+    }
+    // The drop wants the break on the matching side: before a paragraph →
+    // trailing break; at a paragraph's end (incl. document end) → leading.
+    let drop_needs_leading_break = target_paragraph >= paragraph_count;
+    let drop = if target_paragraph >= paragraph_count {
+      paragraph_end(paragraph_count - 1)
+    } else if fragment_paragraphs_lead_with_break {
+      // Leading-break fragment lands at the END of the paragraph before the
+      // target (a {target, 0} drop would merge the section tail into the
+      // target's text).
+      if target_paragraph == 0 {
+        // Rotate to a trailing break so the section can land before the
+        // first paragraph.
+        rotate_fragment_break_to_tail(&mut fragment);
+        fragment_paragraphs_lead_with_break = false;
+        DocumentOffset { paragraph: 0, byte: 0 }
+      } else {
+        paragraph_end(target_paragraph - 1)
+      }
+    } else {
+      DocumentOffset {
+        paragraph: target_paragraph,
+        byte: 0,
+      }
+    };
+    if drop_needs_leading_break && !fragment_paragraphs_lead_with_break {
+      rotate_fragment_break_to_head(&mut fragment);
+    }
+    self.move_rich_text_fragment(
+      ActiveTextDrag {
+        source_range,
+        fragment,
+      },
+      drop,
+      cx,
+    );
+    true
+  }
+
   /// Drag-drop text move, Loro-first (spec §5): ONE undo group of two typed
   /// intents — delete the source range, then insert the dragged fragment at
   /// the drop position. The fragment content was captured at drag start (in
@@ -480,5 +565,41 @@ impl RichTextEditor {
       }
     })
     .detach();
+  }
+}
+
+
+/// O-S5: move the fragment's paragraph break from the tail to the head
+/// ([...section, ""] → ["", ...section]) so it can land at a paragraph END.
+fn rotate_fragment_break_to_head(fragment: &mut RichClipboardFragment) {
+  if fragment
+    .paragraphs
+    .last()
+    .is_some_and(|paragraph| paragraph.runs.is_empty())
+  {
+    fragment.paragraphs.pop();
+    fragment.paragraphs.insert(
+      0,
+      InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: Vec::new(),
+      },
+    );
+  }
+}
+
+/// O-S5: the inverse rotation (["", ...section] → [...section, ""]) for
+/// landing BEFORE a paragraph.
+fn rotate_fragment_break_to_tail(fragment: &mut RichClipboardFragment) {
+  if fragment
+    .paragraphs
+    .first()
+    .is_some_and(|paragraph| paragraph.runs.is_empty())
+  {
+    fragment.paragraphs.remove(0);
+    fragment.paragraphs.push(InputParagraph {
+      style: ParagraphStyle::Normal,
+      runs: Vec::new(),
+    });
   }
 }

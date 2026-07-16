@@ -912,4 +912,69 @@ mod tests {
       "a caret moved (not written) must still use the fast cursor path, not fork_at"
     );
   }
+
+  /// O-S5: whole-section move through the REAL authority — text + styles
+  /// travel together, the move is one grouped undo, and the canonical doc
+  /// (what peers converge on) agrees with the editor after move and undo.
+  #[gpui::test]
+  fn whole_section_move_is_grouped_undoable_and_canonical(cx: &mut gpui::TestAppContext) {
+    let document = document_from_input(
+      DocumentTheme::default(),
+      vec![
+        InputParagraph {
+          style: ParagraphStyle::Custom(1),
+          runs: vec![plain("Heading A")],
+        },
+        InputParagraph {
+          style: ParagraphStyle::Normal,
+          runs: vec![plain("body under A")],
+        },
+        InputParagraph {
+          style: ParagraphStyle::Custom(1),
+          runs: vec![plain("Heading B")],
+        },
+        InputParagraph {
+          style: ParagraphStyle::Normal,
+          runs: vec![plain("body under B")],
+        },
+      ],
+    );
+    let editor = editor_with_authority(document, cx);
+    let texts = |editor: &gpui::Entity<RichTextEditor>, cx: &mut gpui::TestAppContext| -> Vec<String> {
+      editor.read_with(cx, |editor, _| {
+        (0..editor.document().paragraphs.len())
+          .map(|ix| flowstate_document::paragraph_text(editor.document(), ix).to_string())
+          .collect()
+      })
+    };
+    assert_eq!(texts(&editor, cx), ["Heading A", "body under A", "Heading B", "body under B"]);
+
+    // Move section A (paragraphs 0..2) below section B (target = end, ix 4).
+    editor.update(cx, |editor, cx| {
+      assert!(editor.move_paragraph_range(0, 2, 4, cx), "the move applies");
+    });
+    assert_eq!(
+      texts(&editor, cx),
+      ["Heading B", "body under B", "Heading A", "body under A"],
+      "the whole section (heading + body) moved"
+    );
+    // Styles traveled with the text.
+    editor.read_with(cx, |editor, _| {
+      assert_eq!(editor.document().paragraphs[2].style, ParagraphStyle::Custom(1));
+    });
+
+    // ONE undo returns the original order (the move is one grouped intent).
+    editor.update(cx, |editor, cx| editor.undo(cx));
+    assert_eq!(
+      texts(&editor, cx),
+      ["Heading A", "body under A", "Heading B", "body under B"],
+      "one undo restores the pre-move order"
+    );
+
+    // Refusals: overlapping target and out-of-range are rejected.
+    editor.update(cx, |editor, cx| {
+      assert!(!editor.move_paragraph_range(0, 2, 1, cx), "target inside the section refuses");
+      assert!(!editor.move_paragraph_range(0, 9, 3, cx), "out-of-range refuses");
+    });
+  }
 }
