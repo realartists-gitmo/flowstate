@@ -128,6 +128,19 @@ fn install_editor_write_authority(
 #[hotpath::measure_all]
 impl Workspace {
   pub fn new(initial_path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    // O-S3: Enter in the outline tree LANDS on the row (peek stays on click).
+    let outline_tree = cx.new(|cx| TreeState::new(cx));
+    cx.subscribe_in(
+      &outline_tree,
+      window,
+      |workspace: &mut Self, _, event: &gpui_component::tree::TreeEvent, window, cx| {
+        let gpui_component::tree::TreeEvent::Confirmed { item_id } = event;
+        if let Some(paragraph_ix) = outline_paragraph_ix(item_id.as_ref()) {
+          workspace.land_active_editor_on_paragraph(paragraph_ix, window, cx);
+        }
+      },
+    )
+    .detach();
     crate::collab::init(cx);
     let zoom_slider = cx.new(|_| {
       SliderState::new()
@@ -207,7 +220,7 @@ impl Workspace {
       content_resizable_state: cx.new(|_| ResizableState::default()),
       ribbon_resizable_state: cx.new(|_| ResizableState::default()),
       committed_ribbon_height: px(112.0),
-      outline_tree: cx.new(|cx| TreeState::new(cx)),
+      outline_tree,
       outline_cache: None,
       collapsed_outline_items: HashSet::new(),
       outline_revision: 0,

@@ -966,6 +966,7 @@ impl Workspace {
           icon_color: Some(icon_color),
           toggle_action: Some(toggle_action),
           label_action,
+          label_double_action: None,
           stop_icon_mouse_down: !is_folder,
           stop_label_mouse_down: !is_folder,
           context_menu_action: None,

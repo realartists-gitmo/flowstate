@@ -117,10 +117,31 @@ fn insert_outline_node(nodes: &mut Vec<OutlineNode>, level: usize, node: Outline
   }
 }
 
+/// O-S4: every heading that HAS children (a foldable row), depth-first.
+fn outline_folder_paragraphs(nodes: &[OutlineNode]) -> Vec<usize> {
+  let mut folders = Vec::new();
+  fn walk(nodes: &[OutlineNode], folders: &mut Vec<usize>) {
+    for node in nodes {
+      if !node.children.is_empty() {
+        folders.push(node.paragraph_ix);
+        walk(&node.children, folders);
+      }
+    }
+  }
+  walk(nodes, &mut folders);
+  folders
+}
+
 #[hotpath::measure]
 fn outline_node_to_tree_item(node: &OutlineNode, collapsed_items: &HashSet<usize>) -> TreeItem {
   let paragraph_ix = node.paragraph_ix;
-  TreeItem::new(outline_item_id(paragraph_ix), node.text.clone())
+  // O-S4: folders carry their direct-child count in the label.
+  let label = if node.children.is_empty() {
+    node.text.clone()
+  } else {
+    format!("{} · {}", node.text, node.children.len())
+  };
+  TreeItem::new(outline_item_id(paragraph_ix), label)
     .children(
       node
         .children

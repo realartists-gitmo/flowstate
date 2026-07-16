@@ -58,6 +58,13 @@ struct TreeItemState {
     disabled: bool,
 }
 
+/// flowstate O-S3: keyboard confirmation reaches the host.
+pub enum TreeEvent {
+    Confirmed { item_id: SharedString },
+}
+
+impl gpui::EventEmitter<TreeEvent> for TreeState {}
+
 /// A tree item with a label, children, and an expanded state.
 #[derive(Clone)]
 pub struct TreeItem {
@@ -281,6 +288,11 @@ impl TreeState {
     fn on_action_confirm(&mut self, _: &Confirm, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(selected_ix) = self.selected_ix {
             if let Some(entry) = self.entries.get(selected_ix) {
+                // flowstate O-S3: the host hears Enter on any row (outline
+                // lands on it); folders still toggle.
+                cx.emit(TreeEvent::Confirmed {
+                    item_id: entry.item().id.clone(),
+                });
                 if entry.is_folder() {
                     self.toggle_expand(selected_ix);
                     cx.notify();

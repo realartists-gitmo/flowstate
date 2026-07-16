@@ -73,14 +73,24 @@ impl Workspace {
                 }
               }
             });
+            // O-S2: click = peek (scroll + flash, caret untouched);
+            // double-click = land (caret moves, editor focused).
             let label_action: SidebarTreeAction = {
               let workspace = workspace.clone();
               Rc::new(move |window: &mut Window, cx: &mut App| {
                 if let Some(paragraph_ix) = paragraph_ix {
-                  let _ = workspace.update(cx, |workspace, cx| workspace.scroll_active_editor_to_paragraph(paragraph_ix, window, cx));
+                  let _ = workspace.update(cx, |workspace, cx| workspace.peek_active_editor_paragraph(paragraph_ix, window, cx));
                 }
               })
             };
+            let label_double_action: Option<SidebarTreeAction> = Some({
+              let workspace = workspace.clone();
+              Rc::new(move |window: &mut Window, cx: &mut App| {
+                if let Some(paragraph_ix) = paragraph_ix {
+                  let _ = workspace.update(cx, |workspace, cx| workspace.land_active_editor_on_paragraph(paragraph_ix, window, cx));
+                }
+              })
+            });
             let outline_level = paragraph_ix.and_then(|ix| outline_levels.get(&ix).copied());
             // No fabricated level: rows the cache cannot place get no menu.
             let context_menu_action: Option<ContextMenuAction> = outline_level.map(|outline_level| -> ContextMenuAction {
@@ -88,7 +98,7 @@ impl Workspace {
                 let workspace = workspace.clone();
                 move |position, window, cx| {
                   let _ = workspace.update(cx, |workspace, cx| {
-                    workspace.show_outline_context_menu(outline_level, position, window, cx);
+                    workspace.show_outline_context_menu(outline_level, paragraph_ix, position, window, cx);
                   });
                 }
               })
@@ -118,6 +128,7 @@ impl Workspace {
                 icon_color: None,
                 toggle_action: Some(toggle_action),
                 label_action,
+                label_double_action,
                 stop_icon_mouse_down: true,
                 stop_label_mouse_down: true,
                 context_menu_action,
@@ -209,6 +220,7 @@ impl Workspace {
               toggle_editor.update(cx, |editor, cx| editor.toggle_outline_item(sheet_id, cx));
             })),
             label_action: Rc::new(move |_, cx| activate_editor.update(cx, |editor, cx| editor.activate_sheet(sheet_id, cx))),
+            label_double_action: None,
             stop_icon_mouse_down: true,
             stop_label_mouse_down: true,
             context_menu_action: None,
@@ -337,6 +349,7 @@ fn append_flow_outline_cell_rows(
           toggle_editor.update(cx, |editor, cx| editor.toggle_outline_item(cell_id, cx));
         })),
         label_action: Rc::new(move |_, cx| activate_editor.update(cx, |editor, cx| editor.activate_cell(cell_id, cx))),
+        label_double_action: None,
         stop_icon_mouse_down: true,
         stop_label_mouse_down: true,
         context_menu_action: None,
@@ -394,6 +407,8 @@ struct SidebarTreeRow {
   icon_color: Option<Hsla>,
   toggle_action: Option<SidebarTreeAction>,
   label_action: SidebarTreeAction,
+  /// O-S2: double-click semantics (land). `None` keeps single-click-only rows.
+  label_double_action: Option<SidebarTreeAction>,
   stop_icon_mouse_down: bool,
   stop_label_mouse_down: bool,
   context_menu_action: Option<ContextMenuAction>,
@@ -648,8 +663,16 @@ fn render_sidebar_tree_row(row: SidebarTreeRow, window: &mut Window, cx: &mut Ap
               })
             })
             .on_click({
-              move |_, window, cx| {
-                label_action(window, cx);
+              let label_double_action = row.label_double_action.clone();
+              move |event, window, cx| {
+                // O-S2: click peeks, double-click lands.
+                if event.click_count() >= 2
+                  && let Some(double) = &label_double_action
+                {
+                  double(window, cx);
+                } else {
+                  label_action(window, cx);
+                }
               }
             }),
         ),

@@ -492,6 +492,29 @@ impl RichTextEditor {
     }
   }
 
+  /// O-S2 hybrid tracking: the (top, bottom) paragraph indexes currently in
+  /// the viewport, from the virtual-list height index. `None` before layout.
+  pub fn viewport_paragraph_range(&self) -> Option<(usize, usize)> {
+    let bounds_height = self.scroll_handle.bounds().size.height;
+    if bounds_height <= px(1.0) {
+      return None;
+    }
+    let cache = self.item_sizes_cache.as_ref()?;
+    if self.height_prefix_index.len() != cache.item_count || cache.item_count == 0 {
+      return None;
+    }
+    let top_y = (-self.scroll_handle.offset().y).max(px(0.0));
+    let bottom_y = top_y + bounds_height;
+    let paragraph_at = |y: Pixels| -> Option<usize> {
+      let item_ix = self.height_prefix_index.lower_bound(y).min(cache.item_count - 1);
+      match cache.items.get(item_ix)? {
+        VirtualItem::ParagraphChunk { paragraph_ix, .. } | VirtualItem::ParagraphRemainder { paragraph_ix, .. } => Some(*paragraph_ix),
+        VirtualItem::HiddenBlock { block_ix } | VirtualItem::StructuralBlock { block_ix } => self.paragraph_ix_for_block(*block_ix),
+      }
+    };
+    Some((paragraph_at(top_y)?, paragraph_at(bottom_y)?))
+  }
+
   pub(super) fn drag_source_selection(&self) -> Option<EditorSelection> {
     self
       .active_text_drag

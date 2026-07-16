@@ -198,6 +198,34 @@ impl Workspace {
     }
   }
 
+  /// O-S2 peek: scroll + arrival flash, the caret stays where the user left
+  /// it. Single-click semantics for outline/tub navigation.
+  pub fn peek_active_editor_paragraph(&mut self, paragraph_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+    if let Some(editor) = &self.active_editor {
+      editor.update(cx, |editor, cx| {
+        editor.peek_paragraph(paragraph_ix, crate::rich_text_element::DEFAULT_JUMP_FLASH_RGB, window, cx);
+      });
+    }
+  }
+
+  /// O-S2 land: move the caret to the paragraph start, scroll, focus the
+  /// editor. Double-click/Enter semantics.
+  pub fn land_active_editor_on_paragraph(&mut self, paragraph_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+    if let Some(editor) = &self.active_editor {
+      editor.update(cx, |editor, cx| {
+        editor.set_selection(
+          crate::rich_text_element::EditorSelection::collapsed(crate::rich_text_element::DocumentOffset {
+            paragraph: paragraph_ix,
+            byte: 0,
+          }),
+          cx,
+        );
+        editor.scroll_to_paragraph(paragraph_ix, window, cx);
+        editor.focus_handle(cx).focus(window);
+      });
+    }
+  }
+
   fn save_current_outline_state(&mut self, cx: &mut Context<Self>) {
     let Some(active_id) = self.active_document_id else { return };
     let Some(panel) = self
@@ -287,18 +315,55 @@ impl Workspace {
     cx.notify();
   }
 
-  pub(super) fn show_outline_context_menu(&mut self, level: usize, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+  pub(super) fn show_outline_context_menu(
+    &mut self,
+    level: usize,
+    paragraph_ix: Option<usize>,
+    position: Point<Pixels>,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) {
     let workspace = cx.entity().downgrade();
     let menu = PopupMenu::build(window, cx, move |menu, _, _| {
-      menu.min_w(px(180.0)).item(
-        PopupMenuItem::new(format!("Toggle all {}", outline_level_plural(level))).on_click(move |_, _, cx| {
-          let _ = workspace.update(cx, |workspace, cx| {
+      let toggle_workspace = workspace.clone();
+      let expand_workspace = workspace.clone();
+      let collapse_workspace = workspace.clone();
+      let copy_workspace = workspace.clone();
+      menu
+        .min_w(px(180.0))
+        .item(
+          PopupMenuItem::new(format!("Toggle all {}", outline_level_plural(level))).on_click(move |_, _, cx| {
+            let _ = toggle_workspace.update(cx, |workspace, cx| {
+              workspace.outline_context_menu = None;
+              workspace.toggle_outline_level(level, cx);
+              cx.notify();
+            });
+          }),
+        )
+        // O-S4: whole-tree fold controls.
+        .item(PopupMenuItem::new("Expand all").on_click(move |_, _, cx| {
+          let _ = expand_workspace.update(cx, |workspace, cx| {
             workspace.outline_context_menu = None;
-            workspace.toggle_outline_level(level, cx);
-            cx.notify();
+            workspace.expand_all_outline_items(cx);
           });
-        }),
-      )
+        }))
+        .item(PopupMenuItem::new("Collapse all").on_click(move |_, _, cx| {
+          let _ = collapse_workspace.update(cx, |workspace, cx| {
+            workspace.outline_context_menu = None;
+            workspace.collapse_all_outline_items(cx);
+          });
+        }))
+        // O-S4: copy the section's text (heading + everything under it).
+        .item(
+          PopupMenuItem::new("Copy section text").on_click(move |_, _, cx| {
+            let _ = copy_workspace.update(cx, |workspace, cx| {
+              workspace.outline_context_menu = None;
+              if let Some(paragraph_ix) = paragraph_ix {
+                workspace.copy_outline_section_text(paragraph_ix, cx);
+              }
+            });
+          }),
+        )
     });
 
     let _subscription = cx.subscribe(&menu, |workspace, _, _: &DismissEvent, cx| {
@@ -312,6 +377,61 @@ impl Workspace {
       _subscription,
     });
     cx.notify();
+  }
+
+  /// O-S4: unfold everything.
+  pub(super) fn expand_all_outline_items(&mut self, cx: &mut Context<Self>) {
+    if self.collapsed_outline_items.is_empty() {
+      return;
+    }
+    self.collapsed_outline_items.clear();
+    self.outline_revision = self.outline_revision.wrapping_add(1);
+    self.refresh_outline_tree(cx);
+    self.save_current_outline_state(cx);
+    cx.notify();
+  }
+
+  /// O-S4: fold every heading that has children.
+  pub(super) fn collapse_all_outline_items(&mut self, cx: &mut Context<Self>) {
+    let Some(cache) = self.outline_cache.as_ref() else { return };
+    let folders: Vec<usize> = outline_folder_paragraphs(&cache.nodes);
+    if folders.is_empty() {
+      return;
+    }
+    self.collapsed_outline_items.extend(folders);
+    self.outline_revision = self.outline_revision.wrapping_add(1);
+    self.refresh_outline_tree(cx);
+    self.save_current_outline_state(cx);
+    cx.notify();
+  }
+
+  /// O-S4: copy a section (heading through the last paragraph before the next
+  /// heading at the same-or-higher level) to the clipboard as plain text.
+  pub(super) fn copy_outline_section_text(&mut self, paragraph_ix: usize, cx: &mut Context<Self>) {
+    let Some(editor) = self.active_editor.as_ref() else { return };
+    let Some(cache) = self.outline_cache.as_ref() else { return };
+    let Some(level) = cache.levels.get(&paragraph_ix).copied() else { return };
+    let end = cache
+      .levels
+      .iter()
+      .filter(|(ix, lvl)| **ix > paragraph_ix && **lvl <= level)
+      .map(|(ix, _)| *ix)
+      .min();
+    let editor = editor.read(cx);
+    let document = editor.document();
+    let end = end.unwrap_or(document.paragraphs.len());
+    let text: Vec<String> = (paragraph_ix..end)
+      .filter_map(|ix| {
+        document
+          .paragraphs
+          .get(ix)
+          .map(|_| flowstate_document::paragraph_text(document, ix).to_string())
+      })
+      .collect();
+    if text.is_empty() {
+      return;
+    }
+    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.join("\n")));
   }
 
   pub fn dirty_editors(&self, cx: &App) -> Vec<Entity<RichTextEditor>> {
@@ -667,11 +787,18 @@ impl Workspace {
     self.outline_active_paragraph
   }
 
+  /// O-S2 hybrid tracking: the outline follows the CARET while it is on
+  /// screen, and the viewport once the user scrolls the caret away.
   fn active_editor_viewport_paragraph(&self, cx: &App) -> Option<usize> {
-    self
-      .active_editor
-      .as_ref()
-      .and_then(|editor| editor.read(cx).viewport_anchor_paragraph())
+    let editor = self.active_editor.as_ref()?.read(cx);
+    let caret_paragraph = editor.selection().head.paragraph;
+    if let Some((top, bottom)) = editor.viewport_paragraph_range()
+      && caret_paragraph >= top
+      && caret_paragraph <= bottom
+    {
+      return Some(caret_paragraph);
+    }
+    editor.viewport_anchor_paragraph()
   }
 
   fn refresh_outline_viewport(&mut self, cx: &mut Context<Self>) {
