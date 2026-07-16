@@ -37,6 +37,7 @@ pub use package::{
   SchemaMigrationRecord, SearchUnitChunk,
   ThumbnailChunk, loro_db8_bytes, read_loro_db8, write_loro_db8,
 };
+pub use package_search::search_units_for_doc;
 pub use projection_defects::{ProjectionDefect, TableTopologyKind};
 
 use std::{io, path::Path, sync::Arc};

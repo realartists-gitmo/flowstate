@@ -3312,6 +3312,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "flowstate-document",
+ "flowstate-docx",
+ "flowstate-flow",
  "ignore",
  "notify 8.2.0",
  "rusqlite",

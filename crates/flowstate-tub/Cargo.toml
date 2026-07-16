@@ -10,6 +10,8 @@ workspace = true
 [dependencies]
 anyhow = { workspace = true }
 flowstate-document = { workspace = true }
+flowstate-flow = { workspace = true }
+flowstate-docx = { workspace = true }
 ignore = { workspace = true }
 notify = { workspace = true }
 rusqlite = { workspace = true }

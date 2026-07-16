@@ -273,8 +273,8 @@ impl TubIndex {
         },
       ))?;
 
-      if kind == FileKind::Db8 {
-        match db8_index_units(&file_id, &path, &display_path, &file_name) {
+      if matches!(kind, FileKind::Db8 | FileKind::Fl0) {
+        match content_index_units(kind, &file_id, &path, &display_path, &file_name) {
           Ok(units) => {
             for unit in units {
               writer.add_document(unit_document(&self.schema, &unit))?;
@@ -392,10 +392,10 @@ impl TubIndex {
     let mut hits = Vec::with_capacity(limit);
 
     for file in self.list_files()? {
-      if file.kind != FileKind::Db8 || !file.indexed {
+      if !matches!(file.kind, FileKind::Db8 | FileKind::Fl0) || !file.indexed {
         continue;
       }
-      for unit in db8_index_units(&file.file_id, &file.path, &file.display_path, &file.file_name)? {
+      for unit in content_index_units(file.kind, &file.file_id, &file.path, &file.display_path, &file.file_name)? {
         if allowed.contains(&unit.unit_kind) {
           let mut hit = hit_from_unit(unit);
           self.hydrate_hit_preview(&mut hit)?;
@@ -987,6 +987,77 @@ fn unhex_bytes(value: &str) -> Option<Vec<u8>> {
   Some(bytes)
 }
 
+/// T-S6: per-format content-unit extraction.
+fn content_index_units(kind: FileKind, file_id: &str, path: &Path, display_path: &str, file_name: &str) -> Result<Vec<IndexUnit>> {
+  match kind {
+    FileKind::Db8 => db8_index_units(file_id, path, display_path, file_name),
+    FileKind::Fl0 => fl0_index_units(file_id, path, display_path, file_name),
+    // T-S5 fills this arm: importer-derived docx units.
+    FileKind::Docx => docx_index_units(file_id, path, display_path, file_name),
+  }
+}
+
+/// T-S6: flow cells as search units — every non-empty cell, with its sheet
+/// (and column position) as the heading path.
+fn fl0_index_units(file_id: &str, path: &Path, display_path: &str, file_name: &str) -> Result<Vec<IndexUnit>> {
+  let document =
+    flowstate_flow::persistence::load_flow_document(path).with_context(|| format!("reading flow document {}", path.display()))?;
+  let board = document.projection();
+  let mut units = Vec::new();
+  for sheet in &board.sheets {
+    for cell in &sheet.cells {
+      let body = cell.summary.summary_text.trim().to_string();
+      if body.is_empty() {
+        continue;
+      }
+      let heading = first_non_empty_line(&body).unwrap_or_else(|| "Cell".to_string());
+      units.push(IndexUnit {
+        file_id: file_id.to_owned(),
+        unit_id: format!("{file_id}:cell:{:032x}", cell.id.as_u128()),
+        unit_kind: SearchUnitKind::FlowNode,
+        path: path.to_path_buf(),
+        display_path: display_path.to_owned(),
+        file_name: file_name.to_owned(),
+        heading_path: vec![sheet.name.clone()],
+        heading,
+        cite: None,
+        body: body.clone(),
+        insert_text: body,
+        paragraph_start: None,
+        paragraph_end_exclusive: None,
+        paragraph_start_cursor: None,
+        paragraph_end_cursor: None,
+      });
+    }
+  }
+  Ok(units)
+}
+
+/// T-S5: docx units through the IMPORTER — the same Loro-based unit
+/// derivation .db8 packages use, run over the imported doc, so tags/cards/
+/// cites carry identical semantics ("two tools, one language").
+const DOCX_UNIT_PARSE_VERSION: u32 = 1;
+
+fn docx_index_units(file_id: &str, path: &Path, display_path: &str, file_name: &str) -> Result<Vec<IndexUnit>> {
+  let (imported, _report) = flowstate_docx::import_docx_to_loro(path, file_name)
+    .with_context(|| format!("importing docx for indexing {}", path.display()))?;
+  let units =
+    flowstate_document::search_units_for_doc(&imported.doc).with_context(|| format!("deriving docx search units {}", path.display()))?;
+  Ok(
+    units
+      .iter()
+      .filter_map(|unit| package_search_unit(file_id, path, display_path, file_name, unit))
+      // Imported docs are transient (re-imported per index): positional
+      // cursors would dangle, so docx hits open by paragraph only.
+      .map(|mut unit| {
+        unit.paragraph_start_cursor = None;
+        unit.paragraph_end_cursor = None;
+        unit
+      })
+      .collect(),
+  )
+}
+
 fn db8_index_units(file_id: &str, path: &Path, display_path: &str, file_name: &str) -> Result<Vec<IndexUnit>> {
   if let Some(units) =
     DocumentPackage::read_cached_search_units(path).with_context(|| format!("reading cached Flowstate search units {}", path.display()))?
@@ -1212,6 +1283,12 @@ fn modified_ns(metadata: &fs::Metadata) -> u64 {
 
 fn fingerprint(size_bytes: u64, modified_ns: u64, kind: FileKind, path: &Path) -> Result<String> {
   let mut fingerprint = format!("{size_bytes}:{modified_ns}");
+  // T-S5: the docx fingerprint covers the PARSE version — a parser upgrade
+  // re-indexes every docx instead of serving stale units forever.
+  if kind == FileKind::Docx {
+    use std::fmt::Write as _;
+    let _ = write!(fingerprint, ":docx-v{DOCX_UNIT_PARSE_VERSION}");
+  }
   if kind == FileKind::Db8
     && let Some((frontier, unit_count)) = cached_search_metadata(path)?
   {
@@ -1346,5 +1423,49 @@ mod tests {
     let kind = SearchUnitKind::from_str("mystery_kind").expect("unknown kind should be preserved");
     assert_eq!(kind.as_str(), "mystery_kind");
     assert!(matches!(kind, SearchUnitKind::Unknown(value) if value == "mystery_kind"));
+  }
+}
+#[cfg(test)]
+mod docx_unit_tests {
+  use super::*;
+
+  /// T-S5 over the REAL corpus (policy: import validation runs on the whole
+  /// debate corpus, gated by `FLOWSTATE_CORPUS_DIR`). Samples a slice per run —
+  /// the full sweep belongs to the close-out battery.
+  #[test]
+  fn docx_units_extract_from_corpus_sample() {
+    let Some(corpus) = std::env::var_os("FLOWSTATE_CORPUS_DIR") else {
+      eprintln!("FLOWSTATE_CORPUS_DIR unset; skipping corpus docx-unit sample");
+      return;
+    };
+    let mut checked = 0usize;
+    let mut with_units = 0usize;
+    let mut entries: Vec<_> = std::fs::read_dir(corpus)
+      .expect("corpus dir readable")
+      .filter_map(Result::ok)
+      .map(|entry| entry.path())
+      .filter(|path| path.extension().is_some_and(|ext| ext == "docx"))
+      .collect();
+    entries.sort();
+    for path in entries.into_iter().take(25) {
+      let name = path.file_name().unwrap().to_string_lossy().into_owned();
+      match docx_index_units("test-file", &path, &name, &name) {
+        Ok(units) => {
+          checked += 1;
+          if !units.is_empty() {
+            with_units += 1;
+            for unit in &units {
+              assert!(!unit.body.trim().is_empty(), "{name}: unit bodies are non-empty");
+            }
+          }
+        },
+        Err(error) => panic!("{name}: docx unit extraction failed: {error:#}"),
+      }
+    }
+    assert!(checked > 0, "the sample found docx files");
+    assert!(
+      with_units * 2 >= checked,
+      "most sampled debate docs yield content units ({with_units}/{checked})"
+    );
   }
 }

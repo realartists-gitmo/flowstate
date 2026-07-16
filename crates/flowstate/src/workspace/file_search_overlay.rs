@@ -40,7 +40,7 @@ impl FileSearchOverlay {
     window: &mut Window,
     cx: &mut Context<Self>,
   ) -> Self {
-    let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search files by name"));
+    let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Find a FILE by name — the Tub searches inside them"));
     let _input_subscription = cx.subscribe(&search_input, |overlay, _, event: &InputEvent, cx| {
       if let InputEvent::Change = event {
         overlay.refresh_results(cx);

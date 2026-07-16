@@ -7,6 +7,14 @@ use crate::{
   BLOCKS_BY_ID, FLOW_TEXT_KEY, FLOWS_BY_ID, OBJECT_REPLACEMENT, ROOT, ROOT_BODY_FLOW_ID, flowstate_document_theme, package::SearchUnitChunk,
 };
 
+/// T-S5: derive search units for ANY Loro document (the tub runs this over
+/// imported .docx docs so their units carry the same semantics as .db8's).
+pub fn search_units_for_doc(doc: &LoroDoc) -> io::Result<Vec<SearchUnitChunk>> {
+  let frontier = doc.state_frontiers().encode();
+  let document_id = crate::loro_schema::document_id(doc).map_or(0, |id| id.as_u128());
+  search_units_from_loro(doc, document_id, &frontier)
+}
+
 pub(crate) fn search_units_from_loro(doc: &LoroDoc, document_id: u128, frontier: &[u8]) -> io::Result<Vec<SearchUnitChunk>> {
   let input_blocks = crate::loro_projection::input_blocks_from_loro(doc)?;
   search_units_from_input_blocks(doc, &input_blocks, document_id, frontier)

@@ -177,8 +177,8 @@ impl Workspace {
         cx.stop_propagation();
       }
     });
-    let toolkit_search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search tub blocks, tags, and analytics"));
-    let tub_file_search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search tub"));
+    let toolkit_search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search INSIDE tub evidence — blocks, tags, cards (kind: filters)"));
+    let tub_file_search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Find tub files by name"));
     let _tub_file_search_subscription = cx.subscribe(&tub_file_search_input, |workspace, _, event: &InputEvent, cx| {
       if let InputEvent::Change = event {
         workspace.refresh_tub_file_search(cx);
