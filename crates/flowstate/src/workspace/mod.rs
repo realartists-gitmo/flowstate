@@ -3,6 +3,7 @@ pub mod document_search;
 pub mod document_search_overlay;
 mod file_management;
 pub(crate) mod command_palette;
+pub(crate) mod equation_composer;
 pub(crate) mod comments_panel;
 mod file_search_overlay;
 mod icons;

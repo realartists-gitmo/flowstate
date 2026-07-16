@@ -17,7 +17,7 @@ use gpui::{
   App, Bounds, ClipboardEntry, ClipboardItem, Context, CursorStyle, DragMoveEvent, Entity, EntityInputHandler, ExternalPaths, FocusHandle,
   Focusable, Image, ImageFormat, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
   PathPromptOptions, Pixels, Point, Render, SharedString, Size, Subscription, Task, Timer, UTF16Selection, Window, actions, div, img, point,
-  prelude::*, px, relative, rgb, size,
+  prelude::*, px, rgb, size,
 };
 use gpui_component::ActiveTheme as _;
 use gpui_component::scroll::{Scrollbar, ScrollbarHandle, ScrollbarShow};
@@ -755,13 +755,6 @@ pub(super) struct TableCellCaret {
   pub(super) caret_visible: bool,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct EquationSourceSelection {
-  anchor: usize,
-  caret: usize,
-  caret_visible: bool,
-}
-
 #[derive(Default)]
 struct HeightPrefixIndex {
   heights: Vec<Pixels>,
@@ -1001,8 +994,6 @@ pub struct RichTextEditor {
   table_cell_block_ix: usize,
   table_cell_anchor: usize,
   table_cell_caret: usize,
-  equation_source_anchor: usize,
-  equation_source_caret: usize,
   autoscroll_active: bool,
   pub(super) caret_visible: bool,
   caret_blink_active: bool,

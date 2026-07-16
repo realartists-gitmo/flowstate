@@ -111,8 +111,6 @@ impl RichTextEditor {
       table_cell_block_ix: 0,
       table_cell_anchor: 0,
       table_cell_caret: 0,
-      equation_source_anchor: 0,
-      equation_source_caret: 0,
       autoscroll_active: false,
       caret_visible: true,
       caret_blink_active: false,
@@ -247,8 +245,6 @@ impl RichTextEditor {
     self.table_cell_block_ix = 0;
     self.table_cell_anchor = 0;
     self.table_cell_caret = 0;
-    self.equation_source_anchor = 0;
-    self.equation_source_caret = 0;
     self.autoscroll_active = false;
     self.caret_visible = false;
     self.caret_blink_active = false;

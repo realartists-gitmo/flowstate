@@ -1,13 +1,7 @@
 #[hotpath::measure_all]
 impl RichTextEditor {
   fn insert_text_into_selected_object_text(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
-    if self.insert_text_into_selected_table_cell(text, cx) {
-      return true;
-    }
-    if self.insert_text_into_selected_equation(text, cx) {
-      return true;
-    }
-    false
+    self.insert_text_into_selected_table_cell(text, cx)
   }
 
   /// B-S4: build a positional, hash-pinned cell-text intent for the selected
@@ -222,26 +216,6 @@ impl RichTextEditor {
       .is_some()
   }
 
-  fn insert_text_into_selected_equation(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
-    let Some(BlockSelection::Equation(block_ix)) = self.selected_block else {
-      return false;
-    };
-    if text.is_empty() {
-      return true;
-    }
-    let selection_range = self.equation_source_selection_range();
-    let insert_at = selection_range
-      .as_ref()
-      .map(|range| range.start)
-      .unwrap_or(self.equation_source_caret);
-    let range = selection_range.unwrap_or(insert_at..insert_at);
-    if self.edit_selected_equation_source_range(block_ix, range, text, cx) {
-      self.equation_source_caret = insert_at.saturating_add(text.len());
-      self.equation_source_anchor = self.equation_source_caret;
-    }
-    true
-  }
-
   fn backspace_selected_table_cell(&mut self, cx: &mut Context<Self>) -> bool {
     let Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix, .. }) = self.selected_block else {
       return false;
@@ -382,48 +356,6 @@ impl RichTextEditor {
     true
   }
 
-  fn backspace_selected_equation(&mut self, cx: &mut Context<Self>) -> bool {
-    let Some(BlockSelection::Equation(block_ix)) = self.selected_block else {
-      return false;
-    };
-    if self
-      .selected_equation_source()
-      .map(|source| source.is_empty())
-      .unwrap_or(false)
-      && self.equation_source_selection_range().is_none()
-    {
-      return self.delete_selected_block(cx);
-    }
-    let selection_range = self.equation_source_selection_range();
-    let caret = self.equation_source_caret;
-    let Some(source) = self.selected_equation_source() else {
-      return true;
-    };
-    let (range, next_caret) = if let Some(range) = selection_range
-      && range.start <= range.end
-      && range.end <= source.len()
-      && source.is_char_boundary(range.start)
-      && source.is_char_boundary(range.end)
-    {
-      let next_caret = range.start;
-      (range, next_caret)
-    } else {
-      let caret = caret.min(source.len());
-      let Some(byte) = (caret > 0 && source.is_char_boundary(caret))
-        .then(|| source[..caret].char_indices().next_back().map(|(byte, _)| byte))
-        .flatten()
-      else {
-        return true;
-      };
-      (byte..caret, byte)
-    };
-    if self.edit_selected_equation_source_range(block_ix, range, "", cx) {
-      self.equation_source_caret = next_caret;
-      self.equation_source_anchor = next_caret;
-    }
-    true
-  }
-
   /// Equation source edits are identity-addressed range replacements: one
   /// `ReplaceEquationSourceRangeIntent` through the write authority. No direct
   /// projection mutation, no history record — the intent's patches are the
@@ -458,6 +390,49 @@ impl RichTextEditor {
         cx,
       )
       .is_some()
+  }
+
+  /// B-S8: the composer's commit — replace the WHOLE source of `equation`
+  /// (one identity-addressed range intent; undo restores the prior source).
+  pub fn replace_equation_source(&mut self, equation: BlockId, source: &str, cx: &mut Context<Self>) -> bool {
+    let Some(block_ix) = self
+      .document
+      .blocks
+      .iter()
+      .enumerate()
+      .position(|(block_ix, block)| matches!(block, Block::Equation(_)) && self.semantic_block_id(block_ix) == Some(equation))
+    else {
+      return false;
+    };
+    let Some(Block::Equation(current)) = self.document.blocks.get(block_ix) else {
+      return false;
+    };
+    let len = current.source.len();
+    self.edit_selected_equation_source_range(block_ix, 0..len, source, cx)
+  }
+
+  /// B-S8: ask the host to open the equation composer. With an equation
+  /// selected this is a REOPEN (existing id + source + anchored frame);
+  /// otherwise it is a compose-new request at the caret.
+  pub fn request_equation_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    if let Some(BlockSelection::Equation(block_ix)) = self.selected_block
+      && let Some(Block::Equation(equation)) = self.document.blocks.get(block_ix)
+    {
+      let source: gpui::SharedString = equation.source.clone();
+      let equation_id = self.semantic_block_id(block_ix);
+      let anchor = self.equation_screen_bounds(block_ix, window, cx);
+      cx.emit(EditorEvent::EquationComposerRequested {
+        equation: equation_id,
+        source,
+        anchor,
+      });
+      return;
+    }
+    cx.emit(EditorEvent::EquationComposerRequested {
+      equation: None,
+      source: gpui::SharedString::default(),
+      anchor: None,
+    });
   }
 
   pub(super) fn edit_table_cell_paragraph(

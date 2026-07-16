@@ -133,21 +133,22 @@ impl RichTextEditor {
       ClearHighlight => self.clear_highlight(cx),
       InsertImage => self.prompt_insert_image(cx),
       InsertTable => self.insert_default_table(2, 2, cx),
-      InsertEquation => self.insert_equation("x^2 + y^2 = z^2", cx),
+      // B-S8: insert opens the composer — the hardcoded placeholder dies.
+      InsertEquation => self.request_equation_composer(window, cx),
       ZoomIn => self.zoom_in(cx),
       ZoomOut => self.zoom_out(cx),
       Backspace => self.backspace_command(cx),
       Delete => self.delete_forward_command(cx),
       InsertNewline => {
-        if !self.split_selected_table_cell_paragraph(cx) {
+        // B-S8: Enter on a selected equation REOPENS the composer.
+        if matches!(self.selected_block, Some(BlockSelection::Equation(_))) {
+          self.request_equation_composer(window, cx);
+        } else if !self.split_selected_table_cell_paragraph(cx) {
           self.insert_paragraph_break_command(cx);
         }
       },
       InsertSoftLineBreak => {
         if self.insert_text_into_selected_table_cell(SOFT_LINE_BREAK_STR, cx) {
-          return;
-        }
-        if self.insert_text_into_selected_equation(SOFT_LINE_BREAK_STR, cx) {
           return;
         }
         self.insert_text_command(SOFT_LINE_BREAK_STR, cx);
@@ -331,16 +332,6 @@ impl RichTextEditor {
   }
 
   pub fn select_all(&mut self, cx: &mut Context<Self>) {
-    if let Some(BlockSelection::Equation(_)) = self.selected_block {
-      if let Some(source) = self.selected_equation_source() {
-        self.equation_source_anchor = 0;
-        self.equation_source_caret = source.len();
-        self.goal_x = None;
-        self.reset_caret_blink(cx);
-        cx.notify();
-      }
-      return;
-    }
     if self.document.paragraphs.is_empty() {
       return;
     }
@@ -494,11 +485,6 @@ impl RichTextEditor {
   }
 
   pub fn copy(&mut self, cx: &mut Context<Self>) {
-    if let Some(text) = self.selected_equation_source_text() {
-      cx.write_to_clipboard(ClipboardItem::new_string(text));
-      self.paste_cache = None;
-      return;
-    }
     if let Some(fragment) = self.selected_table_cell_fragment() {
       let text = block_fragment_plain_text(&fragment);
       cx.write_to_clipboard(ClipboardItem::new_string_with_json_metadata(text, fragment));
@@ -556,12 +542,6 @@ impl RichTextEditor {
       } else if let Some(text) = item.text() {
         let flattened = text.split_whitespace().collect::<Vec<_>>().join(" ");
         self.insert_text_command(&flattened, cx);
-      }
-      return;
-    }
-    if matches!(self.selected_block, Some(BlockSelection::Equation(_))) {
-      if let Some(text) = item.text() {
-        self.insert_text_into_selected_equation(&text, cx);
       }
       return;
     }
@@ -642,9 +622,6 @@ impl RichTextEditor {
 
   pub fn insert_plain_text_from_toolkit(&mut self, text: &str, cx: &mut Context<Self>) {
     if text.trim().is_empty() {
-      return;
-    }
-    if self.insert_text_into_selected_equation(text, cx) {
       return;
     }
     if self.insert_plain_text_into_selected_table_cell(text, cx) {

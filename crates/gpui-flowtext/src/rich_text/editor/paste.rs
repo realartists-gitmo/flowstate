@@ -205,29 +205,6 @@ impl RichTextEditor {
     Some(equation.source.to_string())
   }
 
-  fn equation_source_selection_range(&self) -> Option<Range<usize>> {
-    if self.equation_source_anchor == self.equation_source_caret {
-      return None;
-    }
-    Some(self.equation_source_anchor.min(self.equation_source_caret)..self.equation_source_anchor.max(self.equation_source_caret))
-  }
-
-  fn selected_equation_source_text(&self) -> Option<String> {
-    let source = self.selected_equation_source()?;
-    let range = self.equation_source_selection_range()?;
-    Some(source.get(range).unwrap_or("").to_string())
-  }
-
-  fn equation_source_selection_for_render(&self, block_ix: usize) -> Option<EquationSourceSelection> {
-    if self.selected_block != Some(BlockSelection::Equation(block_ix)) {
-      return None;
-    }
-    Some(EquationSourceSelection {
-      anchor: self.equation_source_anchor,
-      caret: self.equation_source_caret,
-      caret_visible: self.caret_visible,
-    })
-  }
 
   pub(super) fn table_cell_selection_range(&self) -> Option<Range<usize>> {
     if self.table_cell_anchor == self.table_cell_caret {

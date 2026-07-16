@@ -14,12 +14,6 @@ impl RichTextEditor {
       .map(|text| text.len())
       .unwrap_or(0);
     self.table_cell_anchor = self.table_cell_caret;
-    let equation_source_len = self
-      .selected_equation_source()
-      .map(|source| source.len())
-      .unwrap_or(0);
-    self.equation_source_caret = equation_source_len;
-    self.equation_source_anchor = equation_source_len;
     self.selecting = false;
     self.pending_text_drag = None;
     self.active_text_drag = None;
@@ -50,22 +44,12 @@ impl RichTextEditor {
       cx.notify();
     } else {
       self.select_block(fallback, cx);
-      if matches!(fallback, BlockSelection::Equation(_)) {
-        let byte = self
-          .equation_source_byte_at(block_ix, position, window, cx)
-          .unwrap_or(self.equation_source_caret);
-        self.equation_source_anchor = byte;
-        self.equation_source_caret = byte;
-        self.reset_caret_blink(cx);
-        cx.notify();
-      }
     }
   }
 
-  fn equation_source_byte_at(&mut self, block_ix: usize, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) -> Option<usize> {
-    let Block::Equation(equation) = self.document.blocks.get(block_ix)? else {
-      return None;
-    };
+  /// B-S8: the equation block's WINDOW-space frame — the composer popover's
+  /// anchor. Inverse of the hit-test's window→document mapping.
+  fn equation_screen_bounds(&mut self, block_ix: usize, window: &mut Window, cx: &mut Context<Self>) -> Option<gpui::Bounds<Pixels>> {
     let width = self.current_layout_width();
     let block_top = self.block_top_for_index(block_ix)?;
     let layout = layout_structural_block_at(&self.document, block_ix, width, block_top, window, cx)?;
@@ -73,18 +57,14 @@ impl RichTextEditor {
       return None;
     };
     let viewport = self.scroll_handle.bounds();
-    let document_point = point(position.x - viewport.left(), position.y - viewport.top() - self.scroll_handle.offset().y);
-    let source_height = px(22.0);
-    let source_top = object.bounds.bottom() - self.document.theme.paragraph_after - source_height;
-    if document_point.y < source_top || document_point.y > object.bounds.bottom() {
-      return None;
-    }
-    let strip_left = object.bounds.left() + px(8.0);
-    let char_width = px(7.0);
-    let delta: f32 = (document_point.x - strip_left).max(px(0.0)).into();
-    let char_width: f32 = char_width.into();
-    let target_char = (delta / char_width).round() as usize;
-    Some(byte_for_char_index(&equation.source, target_char))
+    let origin = point(
+      object.bounds.left() + viewport.left(),
+      object.bounds.top() + viewport.top() + self.scroll_handle.offset().y,
+    );
+    Some(gpui::Bounds {
+      origin,
+      size: object.bounds.size,
+    })
   }
 
   fn table_cell_selection_at(
@@ -322,8 +302,6 @@ impl RichTextEditor {
     self.table_cell_block_ix = 0;
     self.table_cell_anchor = 0;
     self.table_cell_caret = 0;
-    self.equation_source_anchor = 0;
-    self.equation_source_caret = 0;
   }
 
   fn selected_block_fragment(&self) -> Option<RichClipboardFragment> {

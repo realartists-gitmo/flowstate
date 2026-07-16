@@ -1,47 +1,6 @@
 #[hotpath::measure_all]
 impl RichTextEditor {
   fn move_horizontal(&mut self, dir: HDir, extend: bool, window: &mut Window, cx: &mut Context<Self>) {
-    if matches!(self.selected_block, Some(BlockSelection::Equation(_))) {
-      let source = self.selected_equation_source().unwrap_or_default();
-      let caret = self.equation_source_caret.min(source.len());
-      // B-S1: THE CARET TRAP dies. Arrowing past the source's edge used to
-      // clamp in place — keyboard users could enter an equation but never
-      // leave it. At the boundary the arrow now exits the block like every
-      // other object (collapse to the adjacent body position).
-      let at_boundary = match dir {
-        HDir::Left => caret == 0,
-        HDir::Right => caret >= source.len(),
-      };
-      if at_boundary && !extend {
-        if self.collapse_object_selection(dir, cx) {
-          return;
-        }
-      } else {
-        let next = match dir {
-          HDir::Left if caret > 0 => source[..caret]
-            .char_indices()
-            .next_back()
-            .map(|(byte, _)| byte)
-            .unwrap_or(0),
-          HDir::Left => 0,
-          HDir::Right if caret < source.len() => source[caret..]
-            .char_indices()
-            .nth(1)
-            .map(|(byte, _)| caret + byte)
-            .unwrap_or(source.len()),
-          HDir::Right => source.len(),
-        };
-        if extend {
-          self.equation_source_caret = next;
-        } else {
-          self.equation_source_caret = next;
-          self.equation_source_anchor = next;
-        }
-        self.reset_caret_blink(cx);
-        cx.notify();
-        return;
-      }
-    }
     if !extend && matches!(self.selected_block, Some(BlockSelection::TableCell { .. })) {
       let text = self.selected_table_cell_text().unwrap_or_default();
       match dir {

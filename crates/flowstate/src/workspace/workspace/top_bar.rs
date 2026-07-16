@@ -252,8 +252,8 @@ fn insert_top_bar_button(cx: &mut Context<Workspace>, has_document: bool) -> imp
                   )
                 })
             })
-            .item(PopupMenuItem::new("Equation").on_click(move |_, _, cx| {
-              insert_default_equation_from_top_bar(&equation_workspace, cx);
+            .item(PopupMenuItem::new("Equation").on_click(move |_, window, cx| {
+              insert_equation_composer_from_top_bar(&equation_workspace, window, cx);
             }))
         }),
     )
@@ -310,10 +310,11 @@ fn insert_table_from_top_bar(workspace: &WeakEntity<Workspace>, rows: usize, col
 }
 
 #[hotpath::measure]
-fn insert_default_equation_from_top_bar(workspace: &WeakEntity<Workspace>, cx: &mut App) {
+fn insert_equation_composer_from_top_bar(workspace: &WeakEntity<Workspace>, window: &mut Window, cx: &mut App) {
+  // B-S8: insert opens the composer — the hardcoded placeholder died.
   let _ = workspace.update(cx, |workspace, cx| {
     if let Some(editor) = workspace.active_editor.clone() {
-      editor.update(cx, |editor, cx| editor.insert_equation("x^2 + y^2 = z^2", cx));
+      editor.update(cx, |editor, cx| editor.request_equation_composer(window, cx));
     }
   });
 }

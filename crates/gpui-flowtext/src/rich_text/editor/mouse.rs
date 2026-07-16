@@ -168,16 +168,6 @@ impl RichTextEditor {
       return;
     }
     if event.dragging()
-      && let Some(BlockSelection::Equation(block_ix)) = self.selected_block
-      && let Some(byte) = self.equation_source_byte_at(block_ix, event.position, window, cx)
-    {
-      self.equation_source_caret = byte;
-      self.last_drag_position = Some(event.position);
-      self.reset_caret_blink(cx);
-      cx.notify();
-      return;
-    }
-    if event.dragging()
       && let Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix, .. }) = self.selected_block
       && let Some((
         BlockSelection::TableCell {

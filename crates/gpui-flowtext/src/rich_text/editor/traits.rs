@@ -208,6 +208,10 @@ impl Render for RichTextEditor {
                       }
                       if let Some(selection) = editor.selection_for_object_block(block_ix) {
                         editor.select_block_from_click(block_ix, selection, event.position, window, cx);
+                        // B-S8: double-click on an equation reopens the composer.
+                        if event.click_count >= 2 && matches!(selection, BlockSelection::Equation(_)) {
+                          editor.request_equation_composer(window, cx);
+                        }
                       }
                     });
                   })
@@ -243,7 +247,6 @@ impl Render for RichTextEditor {
                       block_ix,
                       render_item_sizes.get(item_ix).copied().unwrap_or_else(|| size(px(900.0), px(1.0))),
                       editor.selected_block == Some(BlockSelection::Equation(block_ix)) || editor.block_is_inside_text_selection(block_ix),
-                      editor.equation_source_selection_for_render(block_ix),
                     ),
                     Some(Block::Table(_)) | Some(Block::Paragraph(_)) | None => VirtualBlockElement {
                       editor: editor_entity,

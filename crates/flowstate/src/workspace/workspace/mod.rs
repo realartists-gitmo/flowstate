@@ -164,6 +164,8 @@ pub struct Workspace {
   activity_generation: u64,
   autosave_flow_in_flight: FxHashSet<Uuid>,
   collaboration_dialog: Option<Entity<crate::collab::share_dialog::CollabShareDialog>>,
+  /// B-S8: the equation composer popover (one at a time, editor-scoped).
+  equation_composer: Option<Entity<crate::workspace::equation_composer::EquationComposer>>,
   /// H-S3: the history takeover — commandeers the viewport when Some and
   /// its panel is active.
   history_takeover: Option<Entity<crate::workspace::history_takeover::HistoryTakeover>>,

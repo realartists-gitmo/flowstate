@@ -178,9 +178,6 @@ impl RichTextEditor {
     if self.backspace_selected_table_cell(cx) {
       return;
     }
-    if self.backspace_selected_equation(cx) {
-      return;
-    }
     if self.delete_selected_block(cx) {
       return;
     }

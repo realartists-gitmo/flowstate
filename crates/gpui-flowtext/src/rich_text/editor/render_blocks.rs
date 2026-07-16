@@ -138,7 +138,6 @@ fn render_equation_block(
   block_ix: usize,
   row_size: Size<Pixels>,
   selected: bool,
-  source_selection: Option<EquationSourceSelection>,
 ) -> gpui::AnyElement {
   let _ = block_ix;
   let frame = reserved_object_frame(document, row_size, selected);
@@ -160,24 +159,6 @@ fn render_equation_block(
       let source_width = equation.source.len().max(4) as f32 * 26.0;
       (px(source_width.clamp(240.0, max_width)), px(60.0))
     },
-  };
-  let source_strip = || {
-    div()
-      .w_full()
-      .px_2()
-      .py_1()
-      .text_xs()
-      .line_height(relative(1.15))
-      .font_family("Consolas")
-      .text_color(rgb(0x000000))
-      .bg(rgb(0xf6f8fa))
-      .relative()
-      .h(px(22.0))
-      .flex()
-      .flex_row()
-      .items_center()
-      .children(equation_source_text_elements(&equation.source, source_selection))
-      .into_any_element()
   };
   match EquationRenderer::render_image(equation) {
     Ok(image) => {
@@ -203,8 +184,7 @@ fn render_equation_block(
                     .child("Equation unavailable")
                     .into_any_element()
                 }),
-            )
-            .when(selected, |this| this.child(source_strip())),
+            ),
         )
         .into_any_element()
     },
@@ -220,77 +200,10 @@ fn render_equation_block(
           .font_family("Cambria Math")
           .text_size(px(18.0))
           .text_color(rgb(0x000000))
-          .child(div().text_xs().text_color(rgb(0xa40000)).child(error))
-          .child(source_strip()),
+          .child(div().text_xs().text_color(rgb(0xa40000)).child(error)),
       )
       .into_any_element(),
   }
-}
-
-#[hotpath::measure]
-fn equation_source_text_elements(source: &str, selection: Option<EquationSourceSelection>) -> Vec<gpui::AnyElement> {
-  let range = selection.and_then(|selection| {
-    if selection.anchor == selection.caret {
-      None
-    } else {
-      Some(selection.anchor.min(selection.caret)..selection.anchor.max(selection.caret))
-    }
-  });
-  let caret = selection.map(|selection| selection.caret.min(source.len()));
-  let caret_visible = selection
-    .map(|selection| selection.caret_visible)
-    .unwrap_or(false);
-  let mut children = Vec::new();
-  const SOURCE_CHAR_WIDTH: f32 = 7.0;
-  for (byte, ch) in source.char_indices() {
-    let end = byte + ch.len_utf8();
-    let selected = range
-      .as_ref()
-      .is_some_and(|range| byte < range.end && end > range.start);
-    children.push(
-      div()
-        .w(px(SOURCE_CHAR_WIDTH))
-        .h_full()
-        .flex_none()
-        .flex()
-        .items_center()
-        .when(selected, |this| this.bg(rgb(0x0969da)).text_color(rgb(0xffffff)))
-        .child(ch.to_string())
-        .into_any_element(),
-    );
-  }
-  if let Some(caret) = caret
-    && caret_visible
-  {
-    let caret_ix = char_index_for_byte(source, caret);
-    children.insert(
-      caret_ix,
-      div()
-        .w(px(1.0))
-        .h(px(16.0))
-        .flex_none()
-        .bg(rgb(0x000000))
-        .into_any_element(),
-    );
-  }
-  children
-}
-
-#[hotpath::measure]
-fn byte_for_char_index(text: &str, char_ix: usize) -> usize {
-  text
-    .char_indices()
-    .nth(char_ix)
-    .map(|(byte, _)| byte)
-    .unwrap_or(text.len())
-}
-
-#[hotpath::measure]
-fn char_index_for_byte(text: &str, byte: usize) -> usize {
-  text
-    .char_indices()
-    .take_while(|(char_byte, _)| *char_byte < byte)
-    .count()
 }
 
 type EquationCacheKey = (SharedString, bool);

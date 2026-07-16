@@ -125,6 +125,15 @@ pub enum EditorEvent {
   Refused {
     message: gpui::SharedString,
   },
+  /// B-S8: the host should open the equation composer (an anchored popover
+  /// with a real input + live preview). `equation: None` = compose a NEW
+  /// equation at the caret; `Some(id)` = reopen an existing block, whose
+  /// window-space frame rides along as the popover anchor when known.
+  EquationComposerRequested {
+    equation: Option<crate::BlockId>,
+    source: gpui::SharedString,
+    anchor: Option<gpui::Bounds<Pixels>>,
+  },
   /// The editor could not reconcile optimistic local state with the canonical
   /// projection and recovered by discarding or rebuilding. Hosts must surface
   /// this (telemetry at minimum); it indicates replay/projection divergence.

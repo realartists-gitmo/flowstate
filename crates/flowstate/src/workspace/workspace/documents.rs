@@ -43,6 +43,20 @@ pub(crate) fn attach_local_write(core: flowstate_collab::crdt_runtime::CrdtRunti
 /// M2: the editor resolves what was right-clicked; the workspace builds the
 /// menu (its verbs reach workspace surfaces — comments, speech, dispatch).
 /// B-S1 (silent-refusal law): editor refusals land in the activity zone.
+/// B-S8: the editor asks; the workspace owns the anchored composer popover.
+fn install_equation_composer_opening(editor: &Entity<RichTextEditor>, window: &mut Window, cx: &mut Context<Workspace>) {
+  cx.subscribe_in(
+    editor,
+    window,
+    |workspace, editor, event: &crate::rich_text_element::EditorEvent, window, cx| {
+      if let crate::rich_text_element::EditorEvent::EquationComposerRequested { equation, source, anchor } = event {
+        workspace.open_equation_composer(editor.clone(), *equation, source, *anchor, window, cx);
+      }
+    },
+  )
+  .detach();
+}
+
 fn install_editor_refusal_reporting(editor: &Entity<RichTextEditor>, cx: &mut Context<Workspace>) {
   cx.subscribe(editor, |workspace, _, event: &crate::rich_text_element::EditorEvent, cx| {
     if let crate::rich_text_element::EditorEvent::Refused { message } = event {
@@ -278,6 +292,7 @@ impl Workspace {
       activity_generation: 0,
       autosave_flow_in_flight: FxHashSet::default(),       // §perf: FxHash for trusted Uuid keys
       collaboration_dialog: None,
+      equation_composer: None,
       history_takeover: None,
       collab_notice_subscriptions: FxHashMap::default(), // §perf: FxHash for trusted SessionId keys
       collab_incompatible_version_notices: HashSet::new(),
@@ -419,6 +434,7 @@ impl Workspace {
     let editor = cx.new(|cx| RichTextEditor::new_with_path(document.clone(), path.clone(), cx));
     install_editor_context_menu(&editor, cx);
     install_editor_refusal_reporting(&editor, cx);
+    install_equation_composer_opening(&editor, window, cx);
     install_editor_write_authority(&editor, &attachment, document, cx);
     let workspace = cx.entity().downgrade();
     let title = title
@@ -461,6 +477,31 @@ impl Workspace {
     // speech-target marker in its snapshot — reconcile immediately.
     self.schedule_speech_target_reconcile(cx);
     Ok(panel)
+  }
+
+  /// B-S8: open (or replace) the equation composer popover for `editor`.
+  pub(crate) fn open_equation_composer(
+    &mut self,
+    editor: Entity<RichTextEditor>,
+    equation: Option<crate::rich_text_element::BlockId>,
+    source: &str,
+    anchor: Option<gpui::Bounds<gpui::Pixels>>,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) {
+    let composer = cx.new(|cx| {
+      crate::workspace::equation_composer::EquationComposer::new(editor.downgrade(), equation, source, anchor, window, cx)
+    });
+    cx.subscribe(
+      &composer,
+      |workspace, _, _: &crate::workspace::equation_composer::EquationComposerEvent, cx| {
+        workspace.equation_composer = None;
+        cx.notify();
+      },
+    )
+    .detach();
+    self.equation_composer = Some(composer);
+    cx.notify();
   }
 
   /// H-S3: toggle the history takeover for the active document. History is

@@ -162,8 +162,9 @@ impl RichTextEditor {
   fn on_insert_table(&mut self, _: &InsertTable, _: &mut Window, cx: &mut Context<Self>) {
     self.insert_default_table(2, 2, cx);
   }
-  fn on_insert_equation(&mut self, _: &InsertEquation, _: &mut Window, cx: &mut Context<Self>) {
-    self.insert_equation("x^2 + y^2 = z^2", cx);
+  fn on_insert_equation(&mut self, _: &InsertEquation, window: &mut Window, cx: &mut Context<Self>) {
+    // B-S8: insert opens the composer — the hardcoded placeholder dies.
+    self.request_equation_composer(window, cx);
   }
   fn on_zoom_in(&mut self, _: &ZoomIn, _: &mut Window, cx: &mut Context<Self>) {
     self.zoom_in(cx);
@@ -188,9 +189,6 @@ impl RichTextEditor {
   }
   fn on_insert_soft_line_break(&mut self, _: &InsertSoftLineBreak, _: &mut Window, cx: &mut Context<Self>) {
     if self.insert_text_into_selected_table_cell(SOFT_LINE_BREAK_STR, cx) {
-      return;
-    }
-    if self.insert_text_into_selected_equation(SOFT_LINE_BREAK_STR, cx) {
       return;
     }
     self.insert_text_command(SOFT_LINE_BREAK_STR, cx);
@@ -239,10 +237,6 @@ impl RichTextEditor {
         cx.stop_propagation();
         return;
       }
-      if self.insert_text_into_selected_equation(&key_char, cx) {
-        cx.stop_propagation();
-        return;
-      }
       self.insert_text_command(&key_char, cx);
       cx.stop_propagation();
     }
@@ -251,10 +245,6 @@ impl RichTextEditor {
     {
       let _ = window;
       if self.insert_text_into_selected_table_cell(key_char, cx) {
-        cx.stop_propagation();
-        return;
-      }
-      if self.insert_text_into_selected_equation(key_char, cx) {
         cx.stop_propagation();
         return;
       }

@@ -14,6 +14,22 @@ pub(crate) fn equation_intrinsic_size(equation: &EquationBlock) -> Result<(f32, 
   EquationRenderer::intrinsic_size(equation)
 }
 
+/// B-S8: the composer's live preview — render arbitrary (uncommitted) source
+/// through the same cached pipeline the document uses. Returns the shared
+/// image handle + intrinsic logical size; `Err` carries the pipeline's
+/// diagnostic (mitex/typst parse errors), which the composer shows inline.
+pub fn equation_preview_image(source: &str, display: bool) -> Result<(std::sync::Arc<gpui::Image>, (f32, f32)), String> {
+  let equation = EquationBlock {
+    source: source.to_string().into(),
+    syntax: crate::EquationSyntax::Latex,
+    display: if display { EquationDisplay::Display } else { EquationDisplay::InlineLikeParagraph },
+    version: 0,
+  };
+  let image = EquationRenderer::render_image(&equation)?;
+  let size = EquationRenderer::intrinsic_size(&equation)?;
+  Ok((image, size))
+}
+
 #[hotpath::measure_all]
 impl EquationRenderer {
   fn clear_entries(keys: impl IntoIterator<Item = (SharedString, bool)>) {
