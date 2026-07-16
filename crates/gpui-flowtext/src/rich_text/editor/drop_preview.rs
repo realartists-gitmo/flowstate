@@ -2,6 +2,38 @@
 enum DropPreviewKind {
   ToolkitText,
   ExternalPaths,
+  /// B-S11: an object block being moved by pointer drag.
+  BlockMove,
+}
+
+/// B-S11: the pointer-drag payload for moving an object block. Dropping
+/// lands ONE `MoveBlock` intent at the insertion point the preview shows.
+/// Public so host-level headless tests can drive the drop-target math.
+#[derive(Clone)]
+pub struct BlockDrag {
+  pub block_ix: usize,
+  pub block_id: BlockId,
+  pub label: SharedString,
+}
+
+/// The ghost riding the cursor during a block drag.
+pub(super) struct BlockDragGhost {
+  pub label: SharedString,
+}
+
+impl gpui::Render for BlockDragGhost {
+  fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    div()
+      .px_2()
+      .py_1()
+      .rounded(px(4.0))
+      .bg(cx.theme().secondary)
+      .border_1()
+      .border_color(cx.theme().border)
+      .text_size(px(12.0))
+      .text_color(cx.theme().foreground)
+      .child(self.label.clone())
+  }
 }
 
 #[derive(Clone)]
@@ -109,6 +141,91 @@ impl RichTextEditor {
       height,
       content: DropPreviewContent::DocumentProjection(Box::new(document)),
     });
+  }
+
+  /// B-S11: track the block drag — caret/selection follows the pointer
+  /// (the same placement law the toolkit and file drops use), the edges
+  /// auto-scroll, and the indicator paints through the shared preview.
+  fn on_block_drag_move(&mut self, event: &DragMoveEvent<BlockDrag>, window: &mut Window, cx: &mut Context<Self>) {
+    if !event.bounds.contains(&event.event.position) {
+      self.clear_drop_preview();
+      cx.notify();
+      return;
+    }
+    self.autoscroll_for_drag(event.event.position);
+    self.ensure_drag_autoscroll_task(cx);
+    let (fingerprint, label) = {
+      let drag = event.drag(cx);
+      (drag.block_id.0 as u64, drag.label.clone())
+    };
+    self.place_block_insertion_from_point(event.event.position, window, cx);
+    let placement = self.drop_preview_block_placement();
+    if let Some(preview) = &mut self.drop_preview
+      && preview.kind == DropPreviewKind::BlockMove
+      && preview.fingerprint == fingerprint
+    {
+      preview.insert_block_ix = placement.insert_block_ix;
+      preview.suppressed_block_ix = placement.suppressed_block_ix;
+      cx.notify();
+      return;
+    }
+    let width = self.current_layout_width();
+    self.drop_preview = Some(DropPreview {
+      kind: DropPreviewKind::BlockMove,
+      fingerprint,
+      insert_block_ix: placement.insert_block_ix,
+      suppressed_block_ix: placement.suppressed_block_ix,
+      is_first: false,
+      is_last: false,
+      width,
+      height: drop_preview_external_paths_height(width, window, cx),
+      content: DropPreviewContent::ExternalPaths { label },
+    });
+    cx.notify();
+  }
+
+  /// B-S11: the drop — one identity-addressed `MoveBlock` through the write
+  /// authority; the block stays selected at its new home.
+  pub fn on_block_drop(&mut self, drag: &BlockDrag, _window: &mut Window, cx: &mut Context<Self>) {
+    self.clear_drop_preview();
+    let insert_ix = self.drop_preview_block_placement().insert_block_ix;
+    // Dropping onto its own footprint is a no-op, not an intent.
+    if insert_ix == drag.block_ix || insert_ix == drag.block_ix + 1 {
+      cx.notify();
+      return;
+    }
+    let before = if insert_ix < self.document.blocks.len() {
+      match self.semantic_block_id(insert_ix) {
+        Some(id) => Some(id),
+        None => {
+          cx.emit(EditorEvent::Refused {
+            message: "That spot can't take the block yet — its neighbor has no durable identity.".into(),
+          });
+          return;
+        },
+      }
+    } else {
+      None
+    };
+    let moved = self
+      .write_intent(
+        LocalIntent::MoveBlock(crate::local_intents::MoveBlockIntent {
+          block: drag.block_id,
+          before,
+        }),
+        cx,
+      )
+      .is_some();
+    if moved {
+      // Re-select the block at its post-move index.
+      let new_ix = (0..self.document.blocks.len()).find(|ix| self.semantic_block_id(*ix) == Some(drag.block_id));
+      if let Some(new_ix) = new_ix
+        && let Some(selection) = self.selection_for_object_block(new_ix)
+      {
+        self.select_block(selection, cx);
+      }
+    }
+    cx.notify();
   }
 
   fn set_external_paths_drop_preview(&mut self, paths: &[PathBuf], window: &mut Window, cx: &mut Context<Self>) {

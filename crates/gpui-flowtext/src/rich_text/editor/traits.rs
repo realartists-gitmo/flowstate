@@ -132,6 +132,10 @@ impl Render for RichTextEditor {
       .drag_over::<ExternalPaths>(|style, _, _, _| style)
       .on_drag_move(cx.listener(Self::on_external_paths_drag_move))
       .on_drop(cx.listener(Self::on_file_drop))
+      // B-S11: object-block move-by-drag rides the same preview machinery.
+      .drag_over::<BlockDrag>(|style, _, _, _| style)
+      .on_drag_move(cx.listener(Self::on_block_drag_move))
+      .on_drop(cx.listener(Self::on_block_drop))
       .child(
         v_virtual_list(cx.entity(), "rich-text-virtual-document", item_sizes, move |editor, range, window, cx| {
           let generation = editor.begin_visible_layout(range.clone());
@@ -187,8 +191,49 @@ impl Render for RichTextEditor {
                 };
                 let editor_for_down = editor_entity.clone();
                 let editor_for_context = editor_entity.clone();
+                // B-S11: a selected object grows drag affordances — the grip
+                // chrome names the gesture, the drag payload carries the
+                // block's durable identity.
+                let block_drag = editor.semantic_block_id(block_ix).map(|block_id| BlockDrag {
+                  block_ix,
+                  block_id,
+                  label: match editor.document.blocks.get(block_ix) {
+                    Some(Block::Image(_)) => "Moving image".into(),
+                    Some(Block::Equation(_)) => "Moving equation".into(),
+                    Some(Block::Table(_)) => "Moving table".into(),
+                    _ => "Moving block".into(),
+                  },
+                });
+                let block_is_selected = matches!(
+                  editor.selected_block,
+                  Some(
+                    BlockSelection::Image(selected) | BlockSelection::Equation(selected) | BlockSelection::Table(selected)
+                  ) if selected == block_ix
+                );
                 div()
+                  .id(("object-block-wrapper", block_ix))
                   .size_full()
+                  .relative()
+                  .when_some(block_drag.filter(|_| block_is_selected), |this, drag| {
+                    this
+                      .on_drag(drag, |drag, _, _, cx| {
+                        let label = drag.label.clone();
+                        cx.new(|_| BlockDragGhost { label })
+                      })
+                      .child(
+                        div()
+                          .absolute()
+                          .top(px(2.0))
+                          .left(px(2.0))
+                          .px(px(3.0))
+                          .rounded(px(3.0))
+                          .bg(cx.theme().secondary.opacity(0.9))
+                          .text_size(px(11.0))
+                          .text_color(cx.theme().muted_foreground)
+                          .cursor_grab()
+                          .child("⠿"),
+                      )
+                  })
                   // M2: right-click selects the object (like left-click) and
                   // opens its context arm.
                   .on_mouse_down(MouseButton::Right, move |event, window, cx| {

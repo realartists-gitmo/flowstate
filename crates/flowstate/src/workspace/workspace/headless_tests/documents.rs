@@ -229,3 +229,67 @@ fn recovered_work_shelf_scans_and_opens_pathless(cx: &mut TestAppContext) {
   let _ = std::fs::remove_file(&recovery_path);
   let _ = crate::app_settings::save_recent_documents(Vec::new());
 }
+
+// B-S11b: the drop-target half of drag-the-block — dropping an object at
+// the caret's placement point lands ONE MoveBlock through the intent path
+// and the block re-selects at its new home; the own-footprint drop no-ops.
+#[gpui::test]
+fn block_drag_drop_moves_through_the_intent_path(cx: &mut TestAppContext) {
+  let h = support::open_workspace(cx);
+  h.new_document(cx);
+  h.wait_until(cx, "document runtime attach", |ws| {
+    ws.active_document_id
+      .is_some_and(|id| ws.document_runtimes.contains_key(&id))
+  });
+  let editor = h.read(cx, |ws| ws.active_editor.clone()).expect("editor");
+
+  // [alpha ¶, beta ¶, equation] — then drop the equation before beta.
+  h.update(cx, |_, window, cx| {
+    editor.update(cx, |editor, cx| {
+      editor.insert_text_command("alpha", cx);
+      editor.dispatch_window_command(crate::rich_text_element::RichTextEditorCommand::InsertNewline, window, cx);
+      editor.insert_text_command("beta", cx);
+      editor.insert_equation("x^2", cx);
+    });
+  });
+  cx.run_until_parked();
+  let (equation_ix, equation_id) = h.update(cx, |_, _, cx| {
+    let editor = editor.read(cx);
+    let document = editor.document();
+    let ix = document
+      .blocks
+      .iter()
+      .position(|block| matches!(block, crate::rich_text_element::Block::Equation(_)))
+      .expect("equation block");
+    (ix, document.ids.block_ids[ix])
+  });
+
+  // Caret to document start → placement inserts after the first block.
+  h.update(cx, |_, window, cx| {
+    editor.update(cx, |editor, cx| {
+      editor.dispatch_window_command(crate::rich_text_element::RichTextEditorCommand::MoveDocumentStart, window, cx);
+      editor.on_block_drop(
+        &crate::rich_text_element::BlockDrag {
+          block_ix: equation_ix,
+          block_id: equation_id,
+          label: "Moving equation".into(),
+        },
+        window,
+        cx,
+      );
+    });
+  });
+  cx.run_until_parked();
+  h.update(cx, |_, _, cx| {
+    let editor = editor.read(cx);
+    let document = editor.document();
+    assert!(
+      matches!(document.blocks.get(1), Some(crate::rich_text_element::Block::Equation(_))),
+      "the equation moved up beside the first paragraph"
+    );
+    assert!(
+      matches!(editor.selected_block_kind(), Some("equation")),
+      "the moved block stays selected"
+    );
+  });
+}
