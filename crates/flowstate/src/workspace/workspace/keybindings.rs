@@ -321,7 +321,6 @@ impl Workspace {
     self.settings_overlay.is_some()
       || self.file_search_overlay.is_some()
       || self.collaboration_dialog.is_some()
-      || self.revision_dialog.is_some()
   }
 
   fn focused_workspace_input_is_focused(&self, window: &Window, cx: &App) -> bool {
@@ -341,10 +340,6 @@ impl Workspace {
         .is_some_and(|overlay| overlay.read(cx).focus_handle(cx).is_focused(window))
       || self
         .collaboration_dialog
-        .as_ref()
-        .is_some_and(|dialog| dialog.read(cx).focus_handle(cx).is_focused(window))
-      || self
-        .revision_dialog
         .as_ref()
         .is_some_and(|dialog| dialog.read(cx).focus_handle(cx).is_focused(window))
       || self

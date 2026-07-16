@@ -228,7 +228,6 @@ impl Workspace {
       activity_generation: 0,
       autosave_flow_in_flight: FxHashSet::default(),       // §perf: FxHash for trusted Uuid keys
       collaboration_dialog: None,
-      revision_dialog: None,
       history_takeover: None,
       collab_notice_subscriptions: FxHashMap::default(), // §perf: FxHash for trusted SessionId keys
       collab_incompatible_version_notices: HashSet::new(),
@@ -404,20 +403,6 @@ impl Workspace {
     Ok(panel)
   }
 
-  pub fn request_document_revisions(
-    &self,
-    panel_id: Uuid,
-    cx: &mut Context<Self>,
-  ) -> Option<async_channel::Receiver<anyhow::Result<Vec<flowstate_collab::crdt_runtime::RuntimeRevisionInfo>>>> {
-    let runtime = self.document_runtimes.get(&panel_id)?.clone();
-    let (tx, rx) = async_channel::bounded(1);
-    cx.spawn(async move |_, _| {
-      let _ = tx.send(runtime.revisions().await).await;
-    })
-    .detach();
-    Some(rx)
-  }
-
   /// H-S3: toggle the history takeover for the active document. History is
   /// comparative reading — it commandeers the viewport (rail-vs-takeover law).
   pub fn open_history_takeover(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -443,38 +428,6 @@ impl Workspace {
 
   pub fn close_history_takeover(&mut self, cx: &mut Context<Self>) {
     self.history_takeover = None;
-    cx.notify();
-  }
-
-  pub fn open_revision_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-    let Some(panel_id) = self.active_document_id else {
-      return;
-    };
-    if self.revision_dialog.is_some() {
-      window.close_dialog(cx);
-      self.revision_dialog = None;
-    }
-    let workspace = cx.entity().downgrade();
-    let revisions = self.request_document_revisions(panel_id, cx);
-    let dialog = cx.new(|cx| crate::workspace::revision_dialog::RevisionDialog::new(workspace, panel_id, revisions, cx));
-    let dialog_for_render = dialog.clone();
-    let workspace_for_close = cx.entity().downgrade();
-    window.open_dialog(cx, move |component_dialog, _, _| {
-      let workspace_for_close = workspace_for_close.clone();
-      component_dialog
-        .title("Document Revisions")
-        .w(px(520.0))
-        .max_w(px(520.0))
-        .on_close(move |_, _, cx| {
-          let _ = workspace_for_close.update(cx, |workspace, cx| {
-            workspace.revision_dialog = None;
-            cx.notify();
-          });
-        })
-        .child(dialog_for_render.clone())
-    });
-    dialog.update(cx, |dialog, cx| dialog.focus(window, cx));
-    self.revision_dialog = Some(dialog);
     cx.notify();
   }
 

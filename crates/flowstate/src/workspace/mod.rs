@@ -7,7 +7,6 @@ pub(crate) mod comments_panel;
 mod file_search_overlay;
 mod icons;
 pub mod history_takeover;
-mod revision_dialog;
 mod workspace;
 
 pub use workspace::{Workspace, install_workspace_close_prompt, open_workspace_window};
