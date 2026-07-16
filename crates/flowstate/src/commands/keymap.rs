@@ -124,6 +124,17 @@ pub(crate) fn action_for_command(command: CommandId) -> Option<Box<dyn Action>> 
     CommandId::OpenCommandPalette => Box::new(super::OpenCommandPaletteAction),
     CommandId::OpenComments => return None,
     CommandId::OpenHistory => return None,
+    CommandId::FlowAddArgument
+    | CommandId::FlowAddResponse
+    | CommandId::FlowAddSiblingBelow
+    | CommandId::FlowToggleMarker
+    | CommandId::FlowToggleEraser
+    | CommandId::FlowToggleAnnotations
+    | CommandId::FlowClearAnnotations
+    | CommandId::FlowNewSheet
+    | CommandId::FlowDeleteSheet
+    | CommandId::FlowMoveSheetLeft
+    | CommandId::FlowMoveSheetRight => return None,
     CommandId::ToggleTubTool => return None,
     CommandId::FocusTubSearch => return None,
     CommandId::SwapLeftNav => return None,

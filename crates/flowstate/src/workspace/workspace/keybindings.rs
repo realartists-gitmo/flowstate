@@ -66,6 +66,63 @@ impl Workspace {
           });
           true
         },
+        CommandId::FlowAddSiblingBelow => {
+          flow.update(cx, |editor, cx| {
+            editor.add_sibling(flowstate_flow::RelativePosition::After, cx);
+            editor.focus_active_cell(window, cx);
+          });
+          true
+        },
+        CommandId::FlowAddArgument => {
+          flow.update(cx, |editor, cx| {
+            editor.add_first_argument(cx);
+            editor.focus_active_cell(window, cx);
+          });
+          true
+        },
+        CommandId::FlowAddResponse => {
+          flow.update(cx, |editor, cx| {
+            editor.add_response(cx);
+            editor.focus_active_cell(window, cx);
+          });
+          true
+        },
+        CommandId::FlowToggleMarker => {
+          flow.update(cx, |editor, cx| {
+            editor.toggle_annotation_tool(crate::flow::editor::AnnotationTool::Marker, cx);
+          });
+          true
+        },
+        CommandId::FlowToggleEraser => {
+          flow.update(cx, |editor, cx| {
+            editor.toggle_annotation_tool(crate::flow::editor::AnnotationTool::Eraser, cx);
+          });
+          true
+        },
+        CommandId::FlowToggleAnnotations => {
+          flow.update(cx, |editor, cx| editor.toggle_annotations_visible(cx));
+          true
+        },
+        CommandId::FlowClearAnnotations => {
+          flow.update(cx, |editor, cx| editor.clear_annotations(cx));
+          true
+        },
+        CommandId::FlowNewSheet => {
+          flow.update(cx, |editor, cx| editor.create_sheet_of_type(0, cx));
+          true
+        },
+        CommandId::FlowDeleteSheet => {
+          flow.update(cx, |editor, cx| editor.delete_active_sheet(cx));
+          true
+        },
+        CommandId::FlowMoveSheetLeft => {
+          flow.update(cx, |editor, cx| editor.move_active_sheet(-1, cx));
+          true
+        },
+        CommandId::FlowMoveSheetRight => {
+          flow.update(cx, |editor, cx| editor.move_active_sheet(1, cx));
+          true
+        },
         CommandId::Backspace if flow.read(cx).active_cell_is_empty() => {
           flow.update(cx, |editor, cx| editor.delete_selected(window, cx));
           true
@@ -150,7 +207,13 @@ impl Workspace {
         true
       },
       CommandId::OpenHistory => {
-        self.open_history_takeover(window, cx);
+        // One key, both formats: flows toggle their in-board tape, documents
+        // get the takeover.
+        if let Some(flow) = self.active_flow.clone() {
+          flow.update(cx, |editor, cx| editor.toggle_history_scrubber(cx));
+        } else {
+          self.open_history_takeover(window, cx);
+        }
         true
       },
       CommandId::ToggleTubTool => {

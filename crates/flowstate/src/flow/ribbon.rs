@@ -3,9 +3,8 @@ use gpui::{
   App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, MouseButton, MouseDownEvent, Render, Subscription, Window, div,
   prelude::*, px,
 };
-use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::{ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _};
+use gpui_component::ActiveTheme as _;
 
 use crate::flow::{AnnotationTool, FlowEditor};
 
@@ -112,12 +111,22 @@ impl Render for FlowRibbon {
       });
       Some(state.read(cx).input.clone())
     });
+    let chip = |chip: crate::ribbon::shared::RibbonChip| chip.build(cx);
+    let scrubbing = self.editor.read(cx).history_scrubbing();
+    let annotation_tool = self.editor.read(cx).annotation_tool();
+    let annotations_visible = self.editor.read(cx).annotations_visible();
+    let struck = self.editor.read(cx).active_cell_is_struck();
+    let can_undo = self.editor.read(cx).can_undo();
+    let can_redo = self.editor.read(cx).can_redo();
+    use crate::commands::CommandId;
+    use crate::ribbon::shared::{RibbonChip, ribbon_group};
+
     div()
       .w_full()
       .h(self.height)
       .flex()
       .items_center()
-      .gap(px(8.0))
+      .gap(px(10.0))
       .px(px(12.0))
       .bg(cx.theme().secondary)
       .on_mouse_down(MouseButton::Left, {
@@ -144,155 +153,206 @@ impl Render for FlowRibbon {
         dots
       })
       .when_some(sheet_name_input, |this, input| {
-        this.child(div().w(px(180.0)).child(Input::new(&input).w_full()))
+        this.child(div().w(px(170.0)).child(Input::new(&input).w_full()))
       })
+      // ---- Undo / Redo ----
       .child(
-        Button::new("flow-undo")
-          .label("Undo")
-          .small()
-          .disabled(!self.editor.read(cx).can_undo())
-          .on_click(move |_, _, cx| undo_editor.update(cx, |editor, cx| editor.undo(cx))),
+        ribbon_group(false, cx)
+          .child(
+            chip(
+              RibbonChip::new("flow-undo", "Undo", "Undo")
+                .command_shortcut(CommandId::Undo)
+                .disabled(!can_undo),
+            )
+            .on_click(move |_, _, cx| undo_editor.update(cx, |editor, cx| editor.undo(cx))),
+          )
+          .child(
+            chip(
+              RibbonChip::new("flow-redo", "Redo", "Redo")
+                .command_shortcut(CommandId::Redo)
+                .disabled(!can_redo),
+            )
+            .on_click(move |_, _, cx| redo_editor.update(cx, |editor, cx| editor.redo(cx))),
+          ),
       )
+      // ---- Sheet ----
       .child(
-        Button::new("flow-redo")
-          .label("Redo")
-          .small()
-          .disabled(!self.editor.read(cx).can_redo())
-          .on_click(move |_, _, cx| redo_editor.update(cx, |editor, cx| editor.redo(cx))),
+        ribbon_group(true, cx)
+          .children(sheet_types.into_iter().enumerate().map(|(index, name)| {
+            let editor = self.editor.clone();
+            chip(RibbonChip::new(
+              ("flow-create-sheet-type", index),
+              format!("New {name}"),
+              format!("Create a {name} sheet"),
+            ))
+            .on_click(move |_, _, cx| editor.update(cx, |editor, cx| editor.create_sheet_of_type(index, cx)))
+          }))
+          .child(
+            chip(
+              RibbonChip::new("flow-move-sheet-left", "◀", "Move this sheet left")
+                .command_shortcut(CommandId::FlowMoveSheetLeft)
+                .disabled(!has_active_sheet),
+            )
+            .on_click(move |_, _, cx| previous_sheet_editor.update(cx, |editor, cx| editor.move_active_sheet(-1, cx))),
+          )
+          .child(
+            chip(
+              RibbonChip::new("flow-move-sheet-right", "▶", "Move this sheet right")
+                .command_shortcut(CommandId::FlowMoveSheetRight)
+                .disabled(!has_active_sheet),
+            )
+            .on_click(move |_, _, cx| next_sheet_editor.update(cx, |editor, cx| editor.move_active_sheet(1, cx))),
+          )
+          .child(
+            chip(
+              RibbonChip::new("flow-delete-sheet", "Delete sheet", "Delete this sheet — every cell on it goes too")
+                .command_shortcut(CommandId::FlowDeleteSheet)
+                .danger(true)
+                .disabled(!has_active_sheet),
+            )
+            .on_click(move |_, _, cx| delete_sheet_editor.update(cx, |editor, cx| editor.delete_active_sheet(cx))),
+          ),
       )
-      .children(sheet_types.into_iter().enumerate().map(|(index, name)| {
-        let editor = self.editor.clone();
-        Button::new(("flow-create-sheet-type", index))
-          .label(format!("New {name}"))
-          .small()
-          .on_click(move |_, _, cx| editor.update(cx, |editor, cx| editor.create_sheet_of_type(index, cx)))
-      }))
+      // ---- Argument ----
       .child(
-        Button::new("flow-move-sheet-left")
-          .label("Move sheet left")
-          .small()
-          .disabled(!has_active_sheet)
-          .on_click(move |_, _, cx| previous_sheet_editor.update(cx, |editor, cx| editor.move_active_sheet(-1, cx))),
+        ribbon_group(true, cx)
+          .child(
+            chip(
+              RibbonChip::new("flow-add-first-argument", "Argument", "Start a new argument in the first column")
+                .icon("icons/paragraph-break-two.svg")
+                .command_shortcut(CommandId::FlowNewFamily)
+                .disabled(!has_active_sheet),
+            )
+            .on_click(move |_, window, cx| {
+              first_argument_editor.update(cx, |editor, cx| {
+                editor.add_first_argument(cx);
+                editor.focus_active_cell(window, cx);
+              });
+            }),
+          )
+          .child(
+            chip(
+              RibbonChip::new("flow-add-response", "Response", "Answer the selected cell in the next column")
+                .icon("icons/send-horizontal.svg")
+                .command_shortcut(CommandId::FlowAddResponse)
+                .disabled(!has_active_cell),
+            )
+            .on_click(move |_, window, cx| {
+              response_editor.update(cx, |editor, cx| {
+                editor.add_response(cx);
+                editor.focus_active_cell(window, cx);
+              });
+            }),
+          )
+          .child(
+            chip(
+              RibbonChip::new("flow-add-sibling-above", "Above", "Add a sibling cell above")
+                .command_shortcut(CommandId::FlowAddSiblingAbove)
+                .disabled(!has_active_cell),
+            )
+            .on_click(move |_, window, cx| {
+              above_editor.update(cx, |editor, cx| {
+                editor.add_sibling(RelativePosition::Before, cx);
+                editor.focus_active_cell(window, cx);
+              });
+            }),
+          )
+          .child(
+            chip(
+              RibbonChip::new("flow-add-sibling", "Below", "Add a sibling cell below")
+                .command_shortcut(CommandId::FlowAddSiblingBelow)
+                .disabled(!has_active_cell),
+            )
+            .on_click(move |_, window, cx| {
+              below_editor.update(cx, |editor, cx| {
+                editor.add_sibling(RelativePosition::After, cx);
+                editor.focus_active_cell(window, cx);
+              });
+            }),
+          ),
       )
+      // ---- Cell ----
       .child(
-        Button::new("flow-move-sheet-right")
-          .label("Move sheet right")
-          .small()
-          .disabled(!has_active_sheet)
-          .on_click(move |_, _, cx| next_sheet_editor.update(cx, |editor, cx| editor.move_active_sheet(1, cx))),
+        ribbon_group(true, cx)
+          .child(
+            chip(
+              RibbonChip::new("flow-strike-selected", "Strike", "Strike the selected cell — answered, kept legible")
+                .icon("icons/strikethrough.svg")
+                .command_shortcut(CommandId::FlowStrike)
+                .selected(struck)
+                .disabled(!has_active_cell),
+            )
+            .on_click(move |_, _, cx| strike_editor.update(cx, |editor, cx| editor.strike_selected(cx))),
+          )
+          .child(
+            chip(
+              RibbonChip::new("flow-delete-selected", "Delete", "Delete the selected cell and its thread")
+                .command_shortcut(CommandId::FlowDeleteSelected)
+                .danger(true)
+                .disabled(!has_active_cell),
+            )
+            .on_click(move |_, window, cx| delete_editor.update(cx, |editor, cx| editor.delete_selected(window, cx))),
+          ),
       )
-      .child({
-        let editor = self.editor.clone();
-        let scrubbing = self.editor.read(cx).history_scrubbing();
-        Button::new("flow-history-scrubber")
-          .label(if scrubbing { "Exit history" } else { "History" })
-          .small()
-          .disabled(!has_active_sheet)
+      // ---- Ink ----
+      .child(
+        ribbon_group(true, cx)
+          .child(
+            chip(
+              RibbonChip::new("flow-arm-marker", "Marker", "Draw freehand strokes on the board")
+                .icon("icons/highlighter.svg")
+                .command_shortcut(CommandId::FlowToggleMarker)
+                .selected(annotation_tool == AnnotationTool::Marker),
+            )
+            .on_click(move |_, _, cx| marker_editor.update(cx, |editor, cx| editor.toggle_annotation_tool(AnnotationTool::Marker, cx))),
+          )
+          .child(
+            chip(
+              RibbonChip::new("flow-arm-eraser", "Eraser", "Erase strokes")
+                .icon("icons/eraser.svg")
+                .command_shortcut(CommandId::FlowToggleEraser)
+                .selected(annotation_tool == AnnotationTool::Eraser),
+            )
+            .on_click(move |_, _, cx| eraser_editor.update(cx, |editor, cx| editor.toggle_annotation_tool(AnnotationTool::Eraser, cx))),
+          )
+          .child(
+            chip(
+              RibbonChip::new(
+                "flow-toggle-annotations",
+                if annotations_visible { "Hide ink" } else { "Show ink" },
+                "Show or hide every stroke on the board",
+              )
+              .command_shortcut(CommandId::FlowToggleAnnotations),
+            )
+            .on_click(move |_, _, cx| visibility_editor.update(cx, |editor, cx| editor.toggle_annotations_visible(cx))),
+          )
+          .child(
+            chip(
+              RibbonChip::new("flow-clear-annotations", "Clear ink", "Delete every stroke on this sheet")
+                .command_shortcut(CommandId::FlowClearAnnotations)
+                .danger(true)
+                .disabled(!has_active_sheet),
+            )
+            .on_click(move |_, _, cx| clear_editor.update(cx, |editor, cx| editor.clear_annotations(cx))),
+          ),
+      )
+      // ---- History ----
+      .child(
+        ribbon_group(true, cx).child({
+          let editor = self.editor.clone();
+          chip(
+            RibbonChip::new(
+              "flow-history-scrubber",
+              if scrubbing { "Exit history" } else { "History" },
+              "Replay this board on the tape — restore or pin any moment",
+            )
+            .icon("icons/pin.svg")
+            .command_shortcut(CommandId::OpenHistory)
+            .selected(scrubbing)
+            .disabled(!has_active_sheet),
+          )
           .on_click(move |_, _, cx| editor.update(cx, |editor, cx| editor.toggle_history_scrubber(cx)))
-      })
-      .child(
-        Button::new("flow-delete-sheet")
-          .label("Delete sheet")
-          .small()
-          .danger()
-          .disabled(!has_active_sheet)
-          .on_click(move |_, _, cx| delete_sheet_editor.update(cx, |editor, cx| editor.delete_active_sheet(cx))),
-      )
-      .child(
-        Button::new("flow-add-first-argument")
-          .label("Add argument")
-          .small()
-          .disabled(!has_active_sheet)
-          .on_click(move |_, window, cx| {
-            first_argument_editor.update(cx, |editor, cx| {
-              editor.add_first_argument(cx);
-              editor.focus_active_cell(window, cx);
-            });
-          }),
-      )
-      .child(
-        Button::new("flow-add-response")
-          .label("Add response")
-          .small()
-          .disabled(!has_active_cell)
-          .on_click(move |_, window, cx| {
-            response_editor.update(cx, |editor, cx| {
-              editor.add_response(cx);
-              editor.focus_active_cell(window, cx);
-            });
-          }),
-      )
-      .child(
-        Button::new("flow-add-sibling-above")
-          .label("Sibling above")
-          .small()
-          .disabled(!has_active_cell)
-          .on_click(move |_, window, cx| {
-            above_editor.update(cx, |editor, cx| {
-              editor.add_sibling(RelativePosition::Before, cx);
-              editor.focus_active_cell(window, cx);
-            });
-          }),
-      )
-      .child(
-        Button::new("flow-add-sibling")
-          .label("Add sibling")
-          .small()
-          .disabled(!has_active_cell)
-          .on_click(move |_, window, cx| {
-            below_editor.update(cx, |editor, cx| {
-              editor.add_sibling(RelativePosition::After, cx);
-              editor.focus_active_cell(window, cx);
-            });
-          }),
-      )
-      .child(
-        Button::new("flow-delete-selected")
-          .label("Delete selected")
-          .small()
-          .danger()
-          .disabled(!has_active_cell)
-          .on_click(move |_, window, cx| delete_editor.update(cx, |editor, cx| editor.delete_selected(window, cx))),
-      )
-      .child(
-        Button::new("flow-strike-selected")
-          .label("Strike")
-          .small()
-          .selected(self.editor.read(cx).active_cell_is_struck())
-          .disabled(!has_active_cell)
-          .on_click(move |_, _, cx| strike_editor.update(cx, |editor, cx| editor.strike_selected(cx))),
-      )
-      .child(
-        Button::new("flow-arm-marker")
-          .label("Marker")
-          .small()
-          .selected(self.editor.read(cx).annotation_tool() == AnnotationTool::Marker)
-          .on_click(move |_, _, cx| marker_editor.update(cx, |editor, cx| editor.toggle_annotation_tool(AnnotationTool::Marker, cx))),
-      )
-      .child(
-        Button::new("flow-arm-eraser")
-          .label("Eraser")
-          .small()
-          .selected(self.editor.read(cx).annotation_tool() == AnnotationTool::Eraser)
-          .on_click(move |_, _, cx| eraser_editor.update(cx, |editor, cx| editor.toggle_annotation_tool(AnnotationTool::Eraser, cx))),
-      )
-      .child(
-        Button::new("flow-toggle-annotations")
-          .label(if self.editor.read(cx).annotations_visible() {
-            "Hide annotations"
-          } else {
-            "Show annotations"
-          })
-          .small()
-          .on_click(move |_, _, cx| visibility_editor.update(cx, |editor, cx| editor.toggle_annotations_visible(cx))),
-      )
-      .child(
-        Button::new("flow-clear-annotations")
-          .label("Clear annotations")
-          .small()
-          .danger()
-          .disabled(!has_active_sheet)
-          .on_click(move |_, _, cx| clear_editor.update(cx, |editor, cx| editor.clear_annotations(cx))),
+        }),
       )
   }
 }

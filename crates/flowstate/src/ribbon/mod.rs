@@ -5,6 +5,7 @@
 //! instead of editing paragraphs or runs directly.
 
 mod editor_ribbon;
+pub mod shared;
 mod style_catalog;
 
 pub use editor_ribbon::{

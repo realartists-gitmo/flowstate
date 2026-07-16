@@ -65,6 +65,17 @@ pub fn flowstate_command_to_rich_text(command: CommandId) -> Option<RichTextEdit
     | CommandId::ToggleTubTool
     | CommandId::FocusTubSearch
     | CommandId::SwapLeftNav
+    | CommandId::FlowAddArgument
+    | CommandId::FlowAddResponse
+    | CommandId::FlowAddSiblingBelow
+    | CommandId::FlowToggleMarker
+    | CommandId::FlowToggleEraser
+    | CommandId::FlowToggleAnnotations
+    | CommandId::FlowClearAnnotations
+    | CommandId::FlowNewSheet
+    | CommandId::FlowDeleteSheet
+    | CommandId::FlowMoveSheetLeft
+    | CommandId::FlowMoveSheetRight
     | CommandId::Save
     | CommandId::NewDocument
     | CommandId::OpenDocument
