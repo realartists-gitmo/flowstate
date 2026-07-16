@@ -114,6 +114,166 @@ impl RichTextEditor {
     None
   }
 
+  /// B-S7: grab a row on the table's LEFT band or a column on its TOP band
+  /// (8px grips, the flow-board idiom's cards-own-WHERE translated to axes).
+  pub(super) fn start_table_move_if_hit(&mut self, block_ix: usize, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    let Some(Block::Table(table)) = self.document.blocks.get(block_ix).cloned() else {
+      return false;
+    };
+    let width = self.current_layout_width();
+    let Some(block_top) = self.block_top_for_index(block_ix) else {
+      return false;
+    };
+    let Some(LaidOutBlock::Table(laid_out)) = layout_structural_block_at(&self.document, block_ix, width, block_top, window, cx) else {
+      return false;
+    };
+    let viewport = self.scroll_handle.bounds();
+    let document_point = point(position.x - viewport.left(), position.y - viewport.top() - self.scroll_handle.offset().y);
+    if !laid_out.bounds.contains(&document_point) {
+      return false;
+    }
+    let grip = px(8.0);
+    let axis = (|| {
+      if document_point.x <= laid_out.bounds.left() + grip {
+        // Row grip: which laid-out row contains the pointer?
+        let row_ix = laid_out
+          .rows
+          .iter()
+          .position(|row| document_point.y >= row.top && document_point.y <= row.bottom)?;
+        let row_id = table.rows.get(row_ix)?.id;
+        Some(TableMoveAxis::Row { row_ix, row_id })
+      } else if document_point.y <= laid_out.bounds.top() + grip {
+        // Column grip: which first-row cell spans the pointer x?
+        let first_row = laid_out.rows.first()?;
+        let column_ix = first_row
+          .cells
+          .iter()
+          .position(|cell| document_point.x >= cell.bounds.left() && document_point.x <= cell.bounds.right())?;
+        let column_id = table.rows.first()?.cells.get(column_ix)?.column_id;
+        Some(TableMoveAxis::Column { column_ix, column_id })
+      } else {
+        None
+      }
+    })();
+    let Some(axis) = axis else {
+      return false;
+    };
+    window.focus(&self.focus_handle);
+    self.selected_block = Some(BlockSelection::Table(block_ix));
+    let target = match axis {
+      TableMoveAxis::Row { row_ix, .. } => row_ix,
+      TableMoveAxis::Column { column_ix, .. } => column_ix,
+    };
+    self.table_move_drag = Some(TableMoveDrag { block_ix, axis, target });
+    self.selecting = false;
+    self.pending_text_drag = None;
+    self.active_text_drag = None;
+    self.goal_x = None;
+    cx.notify();
+    true
+  }
+
+  /// B-S7: track the reorder drag — the target SLOT follows the pointer and
+  /// the indicator paints at that boundary.
+  pub(super) fn update_table_move_drag(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    let Some(drag) = self.table_move_drag else {
+      return false;
+    };
+    let width = self.current_layout_width();
+    let Some(block_top) = self.block_top_for_index(drag.block_ix) else {
+      return true;
+    };
+    let Some(LaidOutBlock::Table(laid_out)) = layout_structural_block_at(&self.document, drag.block_ix, width, block_top, window, cx)
+    else {
+      return true;
+    };
+    let viewport = self.scroll_handle.bounds();
+    let document_point = point(position.x - viewport.left(), position.y - viewport.top() - self.scroll_handle.offset().y);
+    let target = match drag.axis {
+      TableMoveAxis::Row { .. } => laid_out
+        .rows
+        .iter()
+        .take_while(|row| document_point.y > (row.top + row.bottom) / 2.0)
+        .count(),
+      TableMoveAxis::Column { .. } => laid_out
+        .rows
+        .first()
+        .map_or(0, |row| {
+          row
+            .cells
+            .iter()
+            .take_while(|cell| document_point.x > (cell.bounds.left() + cell.bounds.right()) / 2.0)
+            .count()
+        }),
+    };
+    if self.table_move_drag.as_ref().is_some_and(|drag| drag.target != target) {
+      if let Some(drag) = &mut self.table_move_drag {
+        drag.target = target;
+      }
+      cx.notify();
+    }
+    self.last_drag_position = Some(position);
+    true
+  }
+
+  /// B-S7: the drop — one identity-addressed MoveRow/MoveColumn; slots that
+  /// land the axis where it already sits are no-ops.
+  pub(super) fn finish_table_move_drag(&mut self, cx: &mut Context<Self>) -> bool {
+    let Some(drag) = self.table_move_drag.take() else {
+      return false;
+    };
+    let Some(Block::Table(table)) = self.document.blocks.get(drag.block_ix) else {
+      return true;
+    };
+    let Some(table_id) = self.semantic_block_id(drag.block_ix) else {
+      return true;
+    };
+    let intent = match drag.axis {
+      TableMoveAxis::Row { row_ix, row_id } => {
+        if drag.target == row_ix || drag.target == row_ix + 1 {
+          cx.notify();
+          return true;
+        }
+        let after_row = (drag.target > 0)
+          .then(|| table.rows.get(drag.target - 1).map(|row| row.id))
+          .flatten();
+        crate::local_intents::TableIntent::MoveRow {
+          table: table_id,
+          row: row_id,
+          after_row,
+        }
+      },
+      TableMoveAxis::Column { column_ix, column_id } => {
+        if drag.target == column_ix || drag.target == column_ix + 1 {
+          cx.notify();
+          return true;
+        }
+        let after_column = (drag.target > 0)
+          .then(|| {
+            table
+              .rows
+              .first()
+              .and_then(|row| row.cells.get(drag.target - 1))
+              .map(|cell| cell.column_id)
+          })
+          .flatten();
+        crate::local_intents::TableIntent::MoveColumn {
+          table: table_id,
+          column: column_id,
+          after_column,
+        }
+      },
+    };
+    let _ = self.write_intent(crate::local_intents::LocalIntent::Table(intent), cx);
+    cx.notify();
+    true
+  }
+
+  /// Paint-facing reorder state (the indicator's slot).
+  pub(crate) fn table_move_for_paint(&self) -> Option<TableMoveDrag> {
+    self.table_move_drag
+  }
+
   fn start_table_column_resize_if_hit(&mut self, block_ix: usize, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) -> bool {
     let Some((column_ix, widths, before)) = self.table_column_resize_hit_at(block_ix, position, window, cx) else {
       return false;

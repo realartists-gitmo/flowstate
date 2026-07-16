@@ -161,6 +161,9 @@ impl RichTextEditor {
         cx.notify();
       }
     }
+    if self.update_table_move_drag(event.position, window, cx) {
+      return;
+    }
     if self.update_table_column_resize_drag(event.position, cx) {
       return;
     }

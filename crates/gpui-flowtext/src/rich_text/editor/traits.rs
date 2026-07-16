@@ -251,6 +251,10 @@ impl Render for RichTextEditor {
                       if editor.start_table_column_resize_if_hit(block_ix, event.position, window, cx) {
                         return;
                       }
+                      // B-S7: the row/column grips claim the edge bands.
+                      if editor.start_table_move_if_hit(block_ix, event.position, window, cx) {
+                        return;
+                      }
                       if let Some(selection) = editor.selection_for_object_block(block_ix) {
                         editor.select_block_from_click(block_ix, selection, event.position, window, cx);
                         // B-S8: double-click on an equation reopens the composer.
@@ -265,6 +269,9 @@ impl Render for RichTextEditor {
                     this.on_mouse_up(MouseButton::Left, move |event, window, cx| {
                       cx.stop_propagation();
                       editor_entity.update(cx, |editor, cx| {
+                        if editor.finish_table_move_drag(cx) {
+                          return;
+                        }
                         if editor.finish_table_column_resize_drag(cx) {
                           return;
                         }

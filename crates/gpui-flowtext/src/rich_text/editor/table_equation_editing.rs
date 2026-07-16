@@ -81,6 +81,128 @@ impl RichTextEditor {
     true
   }
 
+  /// B-S7: the rectangular range as a clipboard fragment — one sub-table
+  /// block carrying the ranged rows/cells (the write path mints fresh
+  /// identity on paste-as-block) plus a tab/newline plain-text mirror.
+  pub(super) fn cell_range_fragment(&self) -> Option<(RichClipboardFragment, String)> {
+    let range = self.cell_range.filter(CellRangeSelection::is_multi)?;
+    let Block::Table(table) = self.document.blocks.get(range.block_ix)? else {
+      return None;
+    };
+    let mut rows = Vec::new();
+    let mut text_rows = Vec::new();
+    for row_ix in range.rows() {
+      let row = table.rows.get(row_ix)?;
+      let mut cells = Vec::new();
+      let mut texts = Vec::new();
+      for cell_ix in range.cells() {
+        let cell = row.cells.get(cell_ix)?;
+        cells.push(input_table_cell_from_table_cell(cell));
+        texts.push(
+          cell
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+              TableCellBlock::Paragraph(paragraph) => Some(paragraph.text.as_str()),
+              TableCellBlock::Table(_) => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+        );
+      }
+      rows.push(crate::InputTableRow { id: row.id, cells });
+      text_rows.push(texts.join("	"));
+    }
+    let columns = range
+      .cells()
+      .filter_map(|cell_ix| table.columns.get(cell_ix))
+      .map(|column| crate::InputTableColumn {
+        id: column.id,
+        width: input_table_column_width_from_table_column_width(&column.width),
+      })
+      .collect();
+    let fragment = RichClipboardFragment {
+      format: RICH_TEXT_CLIPBOARD_FORMAT.to_string(),
+      paragraphs: Vec::new(),
+      blocks: vec![crate::InputBlock::Table(crate::InputTableBlock {
+        rows,
+        columns,
+        style: crate::InputTableStyle { header_row: false },
+      })],
+      assets: Vec::new(),
+    };
+    Some((fragment, text_rows.join("
+")))
+  }
+
+  /// B-S7: pasting a table fragment while a cell is selected overlays the
+  /// fragment's grid starting at that cell — per-target `ReplaceCell` in one
+  /// undo group; cells past the table's edge are skipped OUT LOUD.
+  pub(super) fn paste_table_fragment_as_cell_range(&mut self, fragment: &RichClipboardFragment, cx: &mut Context<Self>) -> bool {
+    let Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix, .. }) = self.selected_block else {
+      return false;
+    };
+    if !fragment.paragraphs.is_empty() || fragment.blocks.len() != 1 {
+      return false;
+    }
+    let crate::InputBlock::Table(source) = &fragment.blocks[0] else {
+      return false;
+    };
+    let Some(Block::Table(target)) = self.document.blocks.get(block_ix) else {
+      return false;
+    };
+    let Some(table_id) = self.semantic_block_id(block_ix) else {
+      return false;
+    };
+    let mut ops = Vec::new();
+    let mut skipped = 0usize;
+    for (row_offset, source_row) in source.rows.iter().enumerate() {
+      let Some(target_row) = target.rows.get(row_ix + row_offset) else {
+        skipped += source_row.cells.len();
+        continue;
+      };
+      for (cell_offset, source_cell) in source_row.cells.iter().enumerate() {
+        let Some(target_cell) = target_row.cells.get(cell_ix + cell_offset) else {
+          skipped += 1;
+          continue;
+        };
+        ops.push(crate::local_intents::TableIntent::ReplaceCell {
+          table: table_id,
+          row: target_cell.row_id,
+          column: target_cell.column_id,
+          cell: crate::InputTableCell {
+            id: target_cell.id,
+            row_id: target_cell.row_id,
+            column_id: target_cell.column_id,
+            blocks: source_cell.blocks.clone(),
+            row_span: source_cell.row_span,
+            col_span: source_cell.col_span,
+          },
+        });
+      }
+    }
+    if ops.is_empty() {
+      return false;
+    }
+    let grouped = ops.len() > 1;
+    if grouped {
+      self.begin_undo_group();
+    }
+    for op in ops {
+      let _ = self.write_intent(crate::local_intents::LocalIntent::Table(op), cx);
+    }
+    if grouped {
+      self.end_undo_group();
+    }
+    if skipped > 0 {
+      cx.emit(EditorEvent::Refused {
+        message: format!("The pasted range didn't fit — {skipped} cell(s) past the table's edge were skipped.").into(),
+      });
+    }
+    cx.notify();
+    true
+  }
+
   /// B-S7: merge the rectangular cell range — ONE `SetCellSpan` on the
   /// range's top-left cell (topology hides the covered cells; the CRDT op
   /// existed since §P2b, buried without UI). Refuses out loud on ragged

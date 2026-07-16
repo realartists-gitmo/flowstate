@@ -110,6 +110,7 @@ impl RichTextEditor {
       table_column_resize_drag: None,
       selected_block: None,
       cell_range: None,
+      table_move_drag: None,
       table_cell_block_ix: 0,
       table_cell_anchor: 0,
       table_cell_caret: 0,

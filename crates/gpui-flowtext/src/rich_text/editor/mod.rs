@@ -730,6 +730,23 @@ struct TableColumnResizeDrag {
   before: TableBlock,
 }
 
+/// B-S7: an in-flight row/column reorder drag, grabbed on the table's edge
+/// bands (left band = rows, top band = columns). `target` is the insertion
+/// SLOT (0..=len) the drop indicator paints; the drop emits one
+/// identity-addressed `MoveRow`/`MoveColumn`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TableMoveDrag {
+  pub block_ix: usize,
+  pub axis: TableMoveAxis,
+  pub target: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TableMoveAxis {
+  Row { row_ix: usize, row_id: RowId },
+  Column { column_ix: usize, column_id: ColumnId },
+}
+
 /// B-S7: a rectangular CELL range on one table — anchor..head inclusive,
 /// the spreadsheet idiom. Never canonical state; range verbs iterate it into
 /// per-cell intents.
@@ -1029,6 +1046,8 @@ pub struct RichTextEditor {
   pub(super) selected_block: Option<BlockSelection>,
   /// B-S7: the rectangular cell range (anchor = where extension started).
   pub(super) cell_range: Option<CellRangeSelection>,
+  /// B-S7: the in-flight row/column reorder drag.
+  pub(super) table_move_drag: Option<TableMoveDrag>,
   table_cell_block_ix: usize,
   table_cell_anchor: usize,
   table_cell_caret: usize,

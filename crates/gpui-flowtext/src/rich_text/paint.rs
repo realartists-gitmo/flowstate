@@ -266,6 +266,7 @@ pub(super) fn paint_structural_block(
   block: &LaidOutBlock,
   selected_block: Option<BlockSelection>,
   cell_range: Option<crate::rich_text::editor::CellRangeSelection>,
+  table_move: Option<crate::rich_text::editor::TableMoveDrag>,
   table_cell_caret: Option<TableCellCaret>,
   text_selected: bool,
   origin: Point<Pixels>,
@@ -278,7 +279,18 @@ pub(super) fn paint_structural_block(
     LaidOutBlock::Image(object) => paint_object_block(object, "Image", selected_block, origin, content_mask, window, cx),
     LaidOutBlock::Equation(object) => paint_object_block(object, "Equation", selected_block, origin, content_mask, window, cx),
     LaidOutBlock::Table(table) => {
-      paint_table_block(table, selected_block, cell_range, table_cell_caret, text_selected, origin, content_mask, window, cx);
+      paint_table_block(
+        table,
+        selected_block,
+        cell_range,
+        table_move,
+        table_cell_caret,
+        text_selected,
+        origin,
+        content_mask,
+        window,
+        cx,
+      );
     },
   }
 }
@@ -324,6 +336,7 @@ fn paint_table_block(
   table: &LaidOutTable,
   selected_block: Option<BlockSelection>,
   cell_range: Option<crate::rich_text::editor::CellRangeSelection>,
+  table_move: Option<crate::rich_text::editor::TableMoveDrag>,
   table_cell_caret: Option<TableCellCaret>,
   text_selected: bool,
   origin: Point<Pixels>,
@@ -415,7 +428,7 @@ fn paint_table_block(
               window.paint_quad(fill(snap_vertical_rule_to_device_pixels(bounds, window), black()));
             }
           },
-          LaidOutBlock::Table(table) => paint_table_block(table, None, None, None, text_selected, origin, content_mask, window, cx),
+          LaidOutBlock::Table(table) => paint_table_block(table, None, None, None, None, text_selected, origin, content_mask, window, cx),
           LaidOutBlock::Image(object) => paint_object_block(object, "Image", None, origin, content_mask, window, cx),
           LaidOutBlock::Equation(object) => paint_object_block(object, "Equation", None, origin, content_mask, window, cx),
         }
@@ -423,6 +436,44 @@ fn paint_table_block(
     }
   }
   paint_table_grid_rules(table, table_selected, origin, window, cx);
+  // B-S7: the reorder drop indicator — a primary line at the target slot.
+  if let Some(drag) = table_move.filter(|drag| drag.block_ix == table.block_ix) {
+    let table_bounds = table.bounds.shift(origin);
+    let indicator = match drag.axis {
+      crate::rich_text::editor::TableMoveAxis::Row { .. } => {
+        let y = table
+          .rows
+          .get(drag.target)
+          .map_or_else(|| table.rows.last().map_or(table.bounds.bottom(), |row| row.bottom), |row| row.top)
+          + origin.y;
+        Bounds::from_corners(
+          point(table_bounds.left(), y - px(1.0)),
+          point(table_bounds.right(), y + px(1.0)),
+        )
+      },
+      crate::rich_text::editor::TableMoveAxis::Column { .. } => {
+        let first_row = table.rows.first();
+        let x = first_row
+          .and_then(|row| row.cells.get(drag.target))
+          .map_or_else(
+            || {
+              first_row
+                .and_then(|row| row.cells.last())
+                .map_or(table.bounds.right(), |cell| cell.bounds.right())
+            },
+            |cell| cell.bounds.left(),
+          )
+          + origin.x;
+        Bounds::from_corners(
+          point(x - px(1.0), table_bounds.top()),
+          point(x + px(1.0), table_bounds.bottom()),
+        )
+      },
+    };
+    if indicator.intersects(&content_mask) {
+      window.paint_quad(fill(indicator, Background::from(cx.theme().primary)));
+    }
+  }
 }
 
 #[hotpath::measure]

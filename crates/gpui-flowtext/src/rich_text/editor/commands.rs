@@ -485,6 +485,13 @@ impl RichTextEditor {
   }
 
   pub fn copy(&mut self, cx: &mut Context<Self>) {
+    // B-S7: a rectangular cell range copies as ONE table fragment + a
+    // tab-separated plain mirror.
+    if let Some((fragment, text)) = self.cell_range_fragment() {
+      cx.write_to_clipboard(ClipboardItem::new_string_with_json_metadata(text, fragment));
+      self.paste_cache = None;
+      return;
+    }
     if let Some(fragment) = self.selected_table_cell_fragment() {
       let text = block_fragment_plain_text(&fragment);
       cx.write_to_clipboard(ClipboardItem::new_string_with_json_metadata(text, fragment));
@@ -560,6 +567,9 @@ impl RichTextEditor {
         && cached_metadata == metadata
       {
         let fragment = fragment.clone();
+        if self.paste_table_fragment_as_cell_range(&fragment, cx) {
+          return;
+        }
         if self.insert_rich_fragment_into_selected_table_cell(&fragment, cx) {
           return;
         }
@@ -581,6 +591,11 @@ impl RichTextEditor {
           metadata: metadata.to_string(),
           fragment: fragment.clone(),
         });
+        // B-S7: a table fragment landing on a selected cell overlays the
+        // grid from that cell (range paste), before the into-cell fallback.
+        if self.paste_table_fragment_as_cell_range(&fragment, cx) {
+          return;
+        }
         if self.insert_rich_fragment_into_selected_table_cell(&fragment, cx) {
           return;
         }
