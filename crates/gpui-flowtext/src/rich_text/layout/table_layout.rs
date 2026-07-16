@@ -143,6 +143,42 @@ fn resolved_table_column_widths(table: &TableBlock, table_width: Pixels, column_
   }
   let remaining = (table_width - fixed_total).max(px(1.0));
   let denominator = fraction_total.saturating_add(auto_count as u32).max(1);
+  // B-S5c: Auto columns are CONTENT-AWARE. Fractions keep exactly their
+  // historical share (each Auto still counts as one fractional unit of the
+  // table); the Auto POOL is then redistributed among the Auto columns
+  // weighted by each column's longest cell text (clamped so one giant cell
+  // can't starve its siblings).
+  let auto_weight = |column_ix: usize| -> f32 {
+    let longest = table
+      .rows
+      .iter()
+      .filter_map(|row| row.cells.get(column_ix))
+      .map(|cell| {
+        cell
+          .blocks
+          .iter()
+          .map(|block| match block {
+            TableCellBlock::Paragraph(paragraph) => paragraph.text.chars().count(),
+            TableCellBlock::Table(_) => 40,
+            TableCellBlock::Image(_) | TableCellBlock::Equation(_) => 16,
+          })
+          .max()
+          .unwrap_or(0)
+      })
+      .max()
+      .unwrap_or(0);
+    (longest as f32).clamp(6.0, 80.0)
+  };
+  let auto_weight_total: f32 = (0..column_count)
+    .filter(|ix| {
+      matches!(
+        table.columns.get(*ix).map(|column| &column.width),
+        Some(TableColumnWidth::Auto)
+      )
+    })
+    .map(auto_weight)
+    .sum();
+  let auto_pool = remaining * (auto_count as f32 / denominator as f32);
   (0..column_count)
     .map(|ix| {
       match table
@@ -153,7 +189,13 @@ fn resolved_table_column_widths(table: &TableBlock, table_width: Pixels, column_
       {
         TableColumnWidth::FixedPx(width) => px(*width as f32).max(px(8.0)),
         TableColumnWidth::Fraction(fraction) => remaining * ((*fraction).max(1) as f32 / denominator as f32),
-        TableColumnWidth::Auto => remaining * (1.0 / denominator as f32),
+        TableColumnWidth::Auto => {
+          if auto_weight_total > 0.0 {
+            (auto_pool * (auto_weight(ix) / auto_weight_total)).max(px(24.0))
+          } else {
+            remaining * (1.0 / denominator as f32)
+          }
+        },
       }
     })
     .collect()
