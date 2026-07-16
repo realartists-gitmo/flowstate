@@ -1,4 +1,11 @@
 mod omml;
+
+/// B-S9 measurement seam: the corpus equation probe drives the import
+/// converter directly over captured `m:oMath`/`m:oMathPara` XML.
+#[must_use]
+pub fn equations_from_omml_bytes(bytes: &[u8]) -> Vec<flowstate_document::InputEquationBlock> {
+  omml::equations_from_container_bytes(bytes)
+}
 mod structured;
 
 use std::{io, path::Path};

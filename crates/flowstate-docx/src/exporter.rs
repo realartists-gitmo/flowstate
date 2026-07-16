@@ -1,6 +1,13 @@
 mod blocks;
 mod formatting;
 mod omml_export;
+
+/// B-S9 measurement seam: the export converter. `None` means the exporter
+/// would emit the bracketed `[Equation: …]` text fallback — THE metric.
+#[must_use]
+pub fn omml_from_latex_probe(source: &str, display: bool) -> Option<String> {
+  omml_export::latex_to_omml(source, display)
+}
 mod package;
 mod sections;
 mod styles;
