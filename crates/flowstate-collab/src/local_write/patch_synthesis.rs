@@ -457,14 +457,13 @@ pub(crate) fn synthesize_patches(core: &CrdtRuntime, intent: &LocalIntent, plan:
       // shift: resolved positions are PRE-commit, but the readback runs
       // POST-commit, where every paragraph after an edited one has moved by
       // the net length delta of the edits before it.
-      let replacement_chars = replacement.chars().count();
-      let mut groups: Vec<&[(ResolvedTextPosition, ResolvedTextPosition, Option<flowstate_document::RunStyles>)]> = Vec::new();
+      let mut groups: Vec<&[super::commit::ResolvedReplaceMatch]> = Vec::new();
       let mut ix = 0;
       while ix < matches.len() {
-        let paragraph_ix = matches[ix].0.paragraph_ix;
+        let paragraph_ix = matches[ix].start.paragraph_ix;
         let group_len = matches[ix..]
           .iter()
-          .take_while(|(start, ..)| start.paragraph_ix == paragraph_ix)
+          .take_while(|entry| entry.start.paragraph_ix == paragraph_ix)
           .count();
         groups.push(&matches[ix..ix + group_len]);
         ix += group_len;
@@ -478,18 +477,23 @@ pub(crate) fn synthesize_patches(core: &CrdtRuntime, intent: &LocalIntent, plan:
       let mut invalid_hi = 0usize;
       let mut shift = 0isize;
       for group in groups.into_iter().rev() {
-        let paragraph_ix = group[0].0.paragraph_ix;
+        let paragraph_ix = group[0].start.paragraph_ix;
         let Some(&row) = rows.get(paragraph_ix) else {
           return rebuild("replace-matches-block-missing");
         };
-        let Some((paragraph_start, old_chars)) = resolved_paragraph_span(projection, &group[0].0) else {
+        let Some((paragraph_start, old_chars)) = resolved_paragraph_span(projection, &group[0].start) else {
           return rebuild("replace-matches-position-misaligned");
         };
         let removed: usize = group
           .iter()
-          .map(|(start, end, _)| end.body_unicode - start.body_unicode)
+          .map(|entry| entry.end.body_unicode - entry.start.body_unicode)
           .sum();
-        let added = replacement_chars * group.len();
+        // R12-B: per-match effective replacement lengths (capture expansions
+        // differ match to match).
+        let added: usize = group
+          .iter()
+          .map(|entry| entry.replacement(replacement).chars().count())
+          .sum();
         let Some(new_chars) = (old_chars + added).checked_sub(removed) else {
           return rebuild("replace-matches-length-misaligned");
         };
@@ -516,8 +520,8 @@ pub(crate) fn synthesize_patches(core: &CrdtRuntime, intent: &LocalIntent, plan:
           delta_utf8,
         });
         // Descending within the group: last entry has the lowest start.
-        invalid_lo = invalid_lo.min(group[group.len() - 1].0.body_unicode);
-        invalid_hi = invalid_hi.max(group[0].1.body_unicode);
+        invalid_lo = invalid_lo.min(group[group.len() - 1].start.body_unicode);
+        invalid_hi = invalid_hi.max(group[0].end.body_unicode);
       }
       Some((patches, body_invalidation(invalid_lo, invalid_hi.saturating_sub(invalid_lo))))
     },

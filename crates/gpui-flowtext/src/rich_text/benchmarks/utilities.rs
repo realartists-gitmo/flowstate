@@ -107,17 +107,6 @@ fn hash_block(block: &Block, hasher: &mut impl Hasher) {
 }
 
 #[hotpath::measure]
-fn hash_optional_paragraph(paragraph: Option<&Paragraph>, hasher: &mut impl Hasher) {
-  match paragraph {
-    Some(paragraph) => {
-      true.hash(hasher);
-      hash_paragraph(paragraph, hasher);
-    },
-    None => false.hash(hasher),
-  }
-}
-
-#[hotpath::measure]
 fn hash_paragraph(paragraph: &Paragraph, hasher: &mut impl Hasher) {
   paragraph.style.hash(hasher);
   paragraph.runs.hash(hasher);

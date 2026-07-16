@@ -42,7 +42,6 @@ fn image(ix: usize) -> InputBlock {
   InputBlock::Image(InputImageBlock {
     asset_id: AssetId(1),
     alt_text: format!("figure {ix}"),
-    caption: None,
     sizing: InputImageSizing::Intrinsic,
     alignment: InputBlockAlignment::Left,
     external_url: None,

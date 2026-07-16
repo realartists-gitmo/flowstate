@@ -3,7 +3,7 @@ use gpui::{
   prelude::*, px,
 };
 use gpui_component::{
-  ActiveTheme as _, Icon, IconName, Side, Sizable as _,
+  ActiveTheme as _, Disableable as _, Icon, IconName, Side, Sizable as _,
   button::{Button, ButtonVariants as _},
   checkbox::Checkbox,
   h_flex,
@@ -115,6 +115,7 @@ pub enum DocumentSearchBarEvent {
   QueryChanged,
   CaseSensitivityChanged,
   WholeWordsChanged,
+  RegexModeChanged,
   StyleFilterChanged,
   PreviousRequested,
   NextRequested,
@@ -130,6 +131,12 @@ pub struct DocumentSearchBar {
   match_count: usize,
   case_sensitive: bool,
   whole_words: bool,
+  /// R12-B: interpret the query as a regular expression. Whole-words is
+  /// inert in this mode (regex users spell `\b`); replace expands `$1`.
+  use_regex: bool,
+  /// The pattern diagnostic when the regex fails to compile — rendered in
+  /// the bar in place of the match count (silent refusal is a defect).
+  regex_error: Option<String>,
   enabled_styles: [bool; SEARCH_STYLE_FILTERS.len()],
   highlight_types: [bool; HIGHLIGHT_FILTERS.len()],
   underline: bool,
@@ -158,6 +165,8 @@ impl DocumentSearchBar {
       match_count: 0,
       case_sensitive: false,
       whole_words: false,
+      use_regex: false,
+      regex_error: None,
       enabled_styles: [true; SEARCH_STYLE_FILTERS.len()],
       highlight_types: [true; HIGHLIGHT_FILTERS.len()],
       underline: true,
@@ -198,6 +207,20 @@ impl DocumentSearchBar {
 
   pub fn whole_words(&self) -> bool {
     self.whole_words
+  }
+
+  pub fn use_regex(&self) -> bool {
+    self.use_regex
+  }
+
+  /// Panel-fed pattern diagnostic (None = the pattern compiles). No event —
+  /// the panel calls this from its own refresh.
+  pub fn set_regex_error(&mut self, error: Option<String>, cx: &mut Context<Self>) {
+    if self.regex_error == error {
+      return;
+    }
+    self.regex_error = error;
+    cx.notify();
   }
 
   pub fn paragraph_style_enabled(&self, style: ParagraphStyle) -> bool {
@@ -305,6 +328,18 @@ impl DocumentSearchBar {
     cx.notify();
   }
 
+  fn set_use_regex(&mut self, use_regex: bool, cx: &mut Context<Self>) {
+    if self.use_regex == use_regex {
+      return;
+    }
+    self.use_regex = use_regex;
+    self.regex_error = None;
+    self.active_match = None;
+    self.match_count = 0;
+    cx.emit(DocumentSearchBarEvent::RegexModeChanged);
+    cx.notify();
+  }
+
   fn toggle_style_filter(&mut self, style: ParagraphStyle, cx: &mut Context<Self>) {
     let Some(ix) = SEARCH_STYLE_FILTERS
       .iter()
@@ -407,13 +442,22 @@ impl Render for DocumentSearchBar {
               .w(px(190.0))
               .cleanable(true),
           )
-          .child(
-            div()
+          .child(match self.regex_error.clone() {
+            // R12-B: the pattern diagnostic takes the count slot — a broken
+            // regex must never read as "0 matches".
+            Some(error) => div()
+              .ml_1()
+              .text_xs()
+              .text_color(cx.theme().danger)
+              .max_w(px(240.0))
+              .truncate()
+              .child(error),
+            None => div()
               .ml_1()
               .text_xs()
               .text_color(cx.theme().muted_foreground)
               .child(count_label),
-          )
+          })
           .child(
             h_flex()
               .ml_1()
@@ -486,7 +530,12 @@ impl Render for DocumentSearchBar {
                   )
                   .xsmall()
                   .ghost()
-                  .tooltip("Match whole word")
+                  .disabled(self.use_regex)
+                  .tooltip(if self.use_regex {
+                    "Match whole word (off in regex mode — use \\b)"
+                  } else {
+                    "Match whole word"
+                  })
                   .on_click({
                     let search_bar = search_bar.clone();
                     move |_, _, cx| {
@@ -498,10 +547,46 @@ impl Render for DocumentSearchBar {
                 Checkbox::new("document-search-whole-words")
                   .checked(self.whole_words)
                   .xsmall()
+                  .disabled(self.use_regex)
                   .on_click({
                     let search_bar = search_bar.clone();
                     move |checked, _, cx| {
                       let _ = search_bar.update(cx, |bar, cx| bar.set_whole_words(*checked, cx));
+                    }
+                  }),
+              ),
+          )
+          .child(
+            h_flex()
+              .ml_3()
+              .gap_1()
+              .items_center()
+              .child(
+                Button::new("document-search-regex-icon")
+                  .child(
+                    Icon::default()
+                      .path("icons/regex.svg")
+                      .xsmall()
+                      .text_color(cx.theme().muted_foreground),
+                  )
+                  .xsmall()
+                  .ghost()
+                  .tooltip("Regular expression (Replace expands $1, ${name})")
+                  .on_click({
+                    let search_bar = search_bar.clone();
+                    move |_, _, cx| {
+                      let _ = search_bar.update(cx, |bar, cx| bar.set_use_regex(!bar.use_regex, cx));
+                    }
+                  }),
+              )
+              .child(
+                Checkbox::new("document-search-regex")
+                  .checked(self.use_regex)
+                  .xsmall()
+                  .on_click({
+                    let search_bar = search_bar.clone();
+                    move |checked, _, cx| {
+                      let _ = search_bar.update(cx, |bar, cx| bar.set_use_regex(*checked, cx));
                     }
                   }),
               ),

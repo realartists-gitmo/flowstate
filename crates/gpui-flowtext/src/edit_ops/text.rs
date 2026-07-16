@@ -248,6 +248,90 @@ pub fn find_text_ranges_with_options(document: &DocumentProjection, query: &str,
   }
 }
 
+/// R12-B: compile a search pattern under the find bar's regex contract —
+/// multi-line anchors (`^`/`$` match at paragraph boundaries, the intuitive
+/// reading in a document editor) and the bar's case toggle. `Err` carries the
+/// regex crate's diagnostic verbatim; the bar surfaces it (silent refusal is
+/// a defect).
+fn build_search_regex(pattern: &str, case_sensitive: bool) -> Result<regex::Regex, String> {
+  regex::RegexBuilder::new(pattern)
+    .case_insensitive(!case_sensitive)
+    .multi_line(true)
+    .build()
+    .map_err(|error| {
+      // The regex crate's Display is a multi-line caret diagram; the find
+      // bar is one line tall. Keep the final reason line — the pattern
+      // itself is already visible in the input.
+      let text = error.to_string();
+      match text.lines().last() {
+        Some(line) => line.trim_start_matches("error: ").to_string(),
+        None => text,
+      }
+    })
+}
+
+/// Regex find over the document text. Empty (zero-width) matches are dropped
+/// — they carry no replaceable span and an `a*`-style pattern would otherwise
+/// flood every position. Matches may cross paragraph boundaries only when the
+/// pattern explicitly asks (`\n`, `(?s)`); the replace path already owns that
+/// case via the selection leg.
+#[hotpath::measure]
+pub fn find_text_ranges_regex(
+  document: &DocumentProjection,
+  pattern: &str,
+  case_sensitive: bool,
+) -> Result<Vec<Range<DocumentOffset>>, String> {
+  if pattern.is_empty() {
+    return Ok(Vec::new());
+  }
+  let regex = build_search_regex(pattern, case_sensitive)?;
+  let text = full_document_text(document);
+  Ok(
+    regex
+      .find_iter(&text)
+      .filter(|found| found.start() < found.end())
+      .map(|found| global_to_document_offset(document, found.start())..global_to_document_offset(document, found.end()))
+      .collect(),
+  )
+}
+
+/// R12-B capture groups in replace: expand `template` (`$1`, `${name}`, `$$`)
+/// against each regex match and hand back the expansion for every range in
+/// `ranges` (the bar's current matches, possibly style-filtered — a subset of
+/// the raw match set). A range with no matching regex hit (the document
+/// changed under the bar) gets `None`; the caller falls back to the literal
+/// template for it. `Err` = the pattern no longer compiles.
+pub fn regex_replacement_expansions(
+  document: &DocumentProjection,
+  pattern: &str,
+  case_sensitive: bool,
+  template: &str,
+  ranges: &[Range<DocumentOffset>],
+) -> Result<Vec<Option<String>>, String> {
+  let regex = build_search_regex(pattern, case_sensitive)?;
+  let text = full_document_text(document);
+  let mut by_span: std::collections::HashMap<(usize, usize), String> = std::collections::HashMap::new();
+  for captures in regex.captures_iter(&text) {
+    let whole = captures.get(0).expect("regex capture 0 is the whole match");
+    if whole.start() >= whole.end() {
+      continue;
+    }
+    let mut expanded = String::new();
+    captures.expand(template, &mut expanded);
+    by_span.insert((whole.start(), whole.end()), expanded);
+  }
+  Ok(
+    ranges
+      .iter()
+      .map(|range| {
+        by_span
+          .get(&(global_byte(document, range.start), global_byte(document, range.end)))
+          .cloned()
+      })
+      .collect(),
+  )
+}
+
 #[hotpath::measure]
 fn is_whole_word_match(text: &str, range: Range<usize>) -> bool {
   !previous_char_is_word_like(text, range.start) && !next_char_is_word_like(text, range.end)

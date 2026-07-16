@@ -12,6 +12,21 @@ impl RichTextEditor {
     find_text_ranges_with_options(&self.document, query, case_sensitive, whole_words)
   }
 
+  /// R12-B: regex find. `Err` carries the pattern diagnostic for the find bar
+  /// to surface. Whole-words does not apply — regex users spell `\b`.
+  pub fn find_text_regex(&self, pattern: &str, case_sensitive: bool) -> Result<Vec<Range<DocumentOffset>>, String> {
+    find_text_ranges_regex(&self.document, pattern, case_sensitive)
+  }
+
+  /// R12-B capture groups: expansion of `template` per CURRENT search
+  /// highlight (aligned by index; `None` = fall back to the literal
+  /// template). Errors degrade to no expansions — the find already surfaced
+  /// the pattern diagnostic.
+  pub fn regex_search_replacement_expansions(&self, pattern: &str, case_sensitive: bool, template: &str) -> Vec<Option<String>> {
+    regex_replacement_expansions(&self.document, pattern, case_sensitive, template, &self.search_highlights)
+      .unwrap_or_else(|_| vec![None; self.search_highlights.len()])
+  }
+
   pub fn style_state(&self) -> RichTextEditorStyleState {
     if let Some(paragraph) = self.selected_table_cell_paragraph() {
       let mut semantic = SelectionStateBuilder::default();

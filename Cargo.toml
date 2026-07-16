@@ -51,6 +51,7 @@ postcard = { version = "1", features = ["use-std"] }
 proptest = "1"
 quick-xml = "0.41.0"
 rand = "0.9"
+regex = "1"
 reqwest = { version = "0.13.4", default-features = false, features = ["form", "json", "rustls"] }
 rdocx = "0.1.2"
 rdocx-opc = "0.1.2"

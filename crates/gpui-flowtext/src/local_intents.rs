@@ -179,6 +179,11 @@ pub struct ReplaceMatch {
   pub start: TextAnchor,
   pub end: TextAnchor,
   pub styles: Option<RunStyles>,
+  /// R12-B: this match's effective replacement when it differs from the
+  /// intent's shared `replacement` — regex capture expansion (`$1`) makes
+  /// every match's replacement distinct. `None` = use the shared string.
+  /// Same structural-character law as the shared replacement.
+  pub replacement_override: Option<String>,
 }
 
 /// Replace every anchored same-paragraph match with `replacement` (find &

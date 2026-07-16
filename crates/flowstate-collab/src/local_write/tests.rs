@@ -544,21 +544,25 @@ fn replace_matches_commits_canonically_and_undoes_as_one_unit() {
       start: TextAnchor::new(paragraph, 0),
       end: TextAnchor::new(paragraph, 3),
       styles: None,
+      replacement_override: None,
     },
     super::intents::ReplaceMatch {
       start: TextAnchor::new(paragraph, 10),
       end: TextAnchor::new(paragraph, 13),
       styles: None,
+      replacement_override: None,
     },
     super::intents::ReplaceMatch {
       start: TextAnchor::new(paragraph, 19),
       end: TextAnchor::new(paragraph, 22),
       styles: None,
+      replacement_override: None,
     },
     super::intents::ReplaceMatch {
       start: TextAnchor::new(second, 0),
       end: TextAnchor::new(second, 3),
       styles: None,
+      replacement_override: None,
     },
   ];
   let outcome = handle
@@ -602,16 +606,19 @@ fn replace_matches_edge_cases() {
         start: TextAnchor::new(paragraph, 2),
         end: TextAnchor::new(paragraph, 6),
         styles: None,
+        replacement_override: None,
       },
       super::intents::ReplaceMatch {
         start: TextAnchor::new(paragraph, 4),
         end: TextAnchor::new(paragraph, 8),
         styles: None,
+        replacement_override: None,
       },
       super::intents::ReplaceMatch {
         start: TextAnchor::new(paragraph, 8),
         end: TextAnchor::new(paragraph, 8),
         styles: None,
+        replacement_override: None,
       },
     ],
     replacement: String::new(),
@@ -625,6 +632,7 @@ fn replace_matches_edge_cases() {
       start: TextAnchor::new(paragraph, 0),
       end: TextAnchor::new(paragraph, 2),
       styles: None,
+      replacement_override: None,
     }],
     replacement: "a\nb".into(),
   });
@@ -637,6 +645,7 @@ fn replace_matches_edge_cases() {
       start: TextAnchor::new(paragraph, 3),
       end: TextAnchor::new(paragraph, 3),
       styles: None,
+      replacement_override: None,
     }],
     replacement: "y".into(),
   });
@@ -2625,6 +2634,7 @@ fn recorded_inverse_fast_undo_round_trips_mass_replace() {
       start: TextAnchor::new(projection.ids.paragraph_ids[range.start.paragraph], range.start.byte),
       end: TextAnchor::new(projection.ids.paragraph_ids[range.end.paragraph], range.end.byte),
       styles: None,
+      replacement_override: None,
     })
     .collect();
 
@@ -2682,6 +2692,78 @@ fn recorded_inverse_fast_undo_round_trips_mass_replace() {
   let peer_text = flowstate_document::loro_schema::body_text(peer.doc()).to_string();
   assert_eq!(local_text, peer_text, "replicas converge on the replace-all fast-path history");
   assert!(!peer_text.contains("COLUMN"), "converged on the undone (original) content");
+}
+
+/// R12-B: per-match replacement overrides (regex capture expansions) — every
+/// match may land a DIFFERENT string with a DIFFERENT length. The recorded
+/// inverse's post-position math is per-match; undo restores every original
+/// and redo reproduces every distinct expansion.
+#[test]
+fn recorded_inverse_round_trips_per_match_replacement_overrides() {
+  let (handle, gate) = new_handle("recorded-inverse-replace-overrides");
+  seed_mass_fragment(&handle, 40, None);
+
+  let body_before = body_string(&gate);
+  let projection = handle.projection().expect("projection");
+  let ranges = flowstate_document::find_text_ranges(&projection, "row");
+  assert!(ranges.len() >= 8, "need a mass replace (got {} matches)", ranges.len());
+  // Cycle expansion widths (1/2/7 chars) plus a shared-fallback entry so the
+  // cumulative-shift math sees non-uniform deltas in both directions.
+  let matches: Vec<super::intents::ReplaceMatch> = ranges
+    .iter()
+    .enumerate()
+    .map(|(ix, range)| super::intents::ReplaceMatch {
+      start: TextAnchor::new(projection.ids.paragraph_ids[range.start.paragraph], range.start.byte),
+      end: TextAnchor::new(projection.ids.paragraph_ids[range.end.paragraph], range.end.byte),
+      styles: None,
+      replacement_override: match ix % 4 {
+        0 => Some("X".to_string()),
+        1 => Some("YY".to_string()),
+        2 => Some("EXPAND7".to_string()),
+        _ => None,
+      },
+    })
+    .collect();
+  let expected_expand7 = matches
+    .iter()
+    .filter(|entry| entry.replacement_override.as_deref() == Some("EXPAND7"))
+    .count();
+  let expected_shared = matches
+    .iter()
+    .filter(|entry| entry.replacement_override.is_none())
+    .count();
+
+  handle
+    .replace_matches(super::intents::ReplaceMatchesIntent {
+      matches,
+      replacement: "SHARED".into(),
+    })
+    .expect("override replace commits");
+  let body_replaced = body_string(&gate);
+  assert!(!body_replaced.contains("row"), "replace removed every 'row'");
+  assert_eq!(
+    body_replaced.matches("EXPAND7").count(),
+    expected_expand7,
+    "every third-slot match landed its own expansion"
+  );
+  assert_eq!(
+    body_replaced.matches("SHARED").count(),
+    expected_shared,
+    "override-less matches fell back to the shared replacement"
+  );
+  assert_eq!(
+    slot_direction(&gate),
+    Some(loro::UndoOrRedo::Undo),
+    "override replace must arm the recorded inverse"
+  );
+
+  let outcome = handle.apply_undo().expect("undo runs");
+  assert!(outcome.applied);
+  assert_eq!(body_string(&gate), body_before, "undo must restore every original match");
+
+  let outcome = handle.apply_redo().expect("redo runs");
+  assert!(outcome.applied);
+  assert_eq!(body_string(&gate), body_replaced, "redo must reproduce every distinct expansion");
 }
 
 /// §act-twelve A12.2.2: Enter (`SplitParagraph`) is captured — undo merges the

@@ -13,7 +13,7 @@
 //! are the B-S5 follow-up. Cells containing NESTED TABLES refuse — positional
 //! addressing cannot see object anchors — and stay on the whole-cell path.
 
-use flowstate_document::{BlockId, ParagraphStyle, RunStyles, WriteRejected, table_cell_flow_string, table_cell_text_hash};
+use flowstate_document::{BlockId, ParagraphStyle, RunStyles, WriteRejected, table_cell_text_hash};
 use gpui_flowtext::{TableCellTextIntent, TableCellTextOp};
 use loro::{LoroDoc, LoroText};
 

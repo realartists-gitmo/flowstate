@@ -1256,51 +1256,6 @@ fn check_body_projection_integrity(body: &LoroText, object_blocks: &BTreeMap<usi
   }
 }
 
-fn paragraphs_from_text(text: &LoroText) -> Vec<InputParagraph> {
-  let mut blocks = Vec::new();
-  let projector = ParagraphOnlyProjector;
-  projector.push_flow_blocks(text, &mut blocks);
-  blocks
-}
-
-struct ParagraphOnlyProjector;
-
-impl ParagraphOnlyProjector {
-  fn push_flow_blocks(&self, text: &LoroText, output: &mut Vec<InputParagraph>) {
-    let mut current = InputParagraph {
-      style: gpui_flowtext::ParagraphStyle::Normal,
-      runs: Vec::new(),
-    };
-    let mut pending_style = gpui_flowtext::ParagraphStyle::Normal;
-    let mut seen_sentinel = false;
-    for item in crate::streaming_delta::streaming_to_delta(text) {
-      let loro::TextDelta::Insert { insert, attributes } = item else {
-        continue;
-      };
-      let run_styles = run_styles_from_attrs(attributes.as_ref());
-      for ch in insert.chars() {
-        if ch == '\n' {
-          let style = paragraph_style_from_attrs(attributes.as_ref()).unwrap_or(pending_style);
-          if !seen_sentinel {
-            seen_sentinel = true;
-            pending_style = style;
-            current.style = style;
-          } else {
-            output.push(current);
-            current = InputParagraph { style, runs: Vec::new() };
-            pending_style = style;
-          }
-        } else if ch != OBJECT_REPLACEMENT {
-          push_char(&mut current, ch, run_styles);
-        }
-      }
-    }
-    if seen_sentinel || !current.runs.is_empty() {
-      output.push(current);
-    }
-  }
-}
-
 fn push_char(paragraph: &mut InputParagraph, ch: char, styles: RunStyles) {
   if let Some(last) = paragraph.runs.last_mut()
     && last.styles == styles

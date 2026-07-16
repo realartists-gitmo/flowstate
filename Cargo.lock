@@ -4059,6 +4059,7 @@ dependencies = [
  "imagesize",
  "loro",
  "mitex",
+ "regex",
  "resvg",
  "rustc-hash 2.1.2",
  "serde",

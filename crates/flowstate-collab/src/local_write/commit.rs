@@ -105,10 +105,10 @@ pub(crate) enum ResolvedPlan {
     blocks: Vec<FragmentBlock>,
   },
   ReplaceMatches {
-    /// Resolved (start, end, replacement styles) triples, sorted DESCENDING
-    /// by start and pruned of collapsed/cross-paragraph/overlapping ranges,
-    /// so back-to-front application never shifts a later range.
-    matches: Vec<(ResolvedTextPosition, ResolvedTextPosition, Option<flowstate_document::RunStyles>)>,
+    /// Resolved matches, sorted DESCENDING by start and pruned of
+    /// collapsed/cross-paragraph/overlapping ranges, so back-to-front
+    /// application never shifts a later range.
+    matches: Vec<ResolvedReplaceMatch>,
     replacement: String,
   },
   ReplaceEquationSourceRange {
@@ -132,6 +132,24 @@ pub(crate) enum ResolvedPlan {
   },
   /// B-S4: a positional, hash-pinned text op inside one table cell.
   TableCellText(super::table_cell_text::ResolvedCellText),
+}
+
+/// One resolved find/replace match. `replacement_override` (R12-B regex
+/// capture expansion) is this match's effective replacement when it differs
+/// from the plan's shared string.
+#[derive(Debug)]
+pub(crate) struct ResolvedReplaceMatch {
+  pub start: ResolvedTextPosition,
+  pub end: ResolvedTextPosition,
+  pub styles: Option<flowstate_document::RunStyles>,
+  pub replacement_override: Option<String>,
+}
+
+impl ResolvedReplaceMatch {
+  /// This match's effective replacement string.
+  pub fn replacement<'plan>(&'plan self, shared: &'plan str) -> &'plan str {
+    self.replacement_override.as_deref().unwrap_or(shared)
+  }
 }
 
 #[derive(Debug)]
@@ -661,6 +679,18 @@ fn resolve_intent(core: &CrdtRuntime, intent: &LocalIntent) -> Result<ResolvedPl
           "ReplaceMatches replacement must not contain paragraph breaks or object placeholders",
         ));
       }
+      // R12-B: per-match overrides (regex capture expansions) obey the same
+      // structural-character law as the shared replacement.
+      if replace.matches.iter().any(|entry| {
+        entry
+          .replacement_override
+          .as_deref()
+          .is_some_and(|text| text.contains('\n') || text.contains(OBJECT_REPLACEMENT))
+      }) {
+        return Err(WriteRejected::StructureViolation(
+          "ReplaceMatches per-match replacement must not contain paragraph breaks or object placeholders",
+        ));
+      }
       // Batched resolution (§11): a storm carries thousands of matches over
       // thousands of paragraphs, and per-anchor cursor resolution is a linear
       // chunk scan per call (the batch-resolver lesson: 27k matches on the
@@ -746,18 +776,23 @@ fn resolve_intent(core: &CrdtRuntime, intent: &LocalIntent) -> Result<ResolvedPl
         if start.body_unicode == end.body_unicode || start.paragraph_ix != end.paragraph_ix {
           continue;
         }
-        matches.push((start, end, entry.styles));
+        matches.push(ResolvedReplaceMatch {
+          start,
+          end,
+          styles: entry.styles,
+          replacement_override: entry.replacement_override.clone(),
+        });
       }
       // Prune overlaps preferring the EARLIER match (search matches are
       // disjoint; an overlap means concurrency moved them, and the first
       // match is the user-visible winner), then flip to descending for
       // back-to-front application.
-      matches.sort_by_key(|entry| entry.0.body_unicode);
-      let mut kept: Vec<(ResolvedTextPosition, ResolvedTextPosition, Option<flowstate_document::RunStyles>)> = Vec::with_capacity(matches.len());
+      matches.sort_by_key(|entry| entry.start.body_unicode);
+      let mut kept: Vec<ResolvedReplaceMatch> = Vec::with_capacity(matches.len());
       for entry in matches {
         if kept
           .last()
-          .is_none_or(|prev| entry.0.body_unicode >= prev.1.body_unicode)
+          .is_none_or(|prev| entry.start.body_unicode >= prev.end.body_unicode)
         {
           kept.push(entry);
         }
@@ -1169,27 +1204,29 @@ fn execute_plan(core: &mut CrdtRuntime, plan: &ResolvedPlan) -> Result<MutationS
     },
     ResolvedPlan::ReplaceMatches { matches, replacement } => {
       let body = body_text(&doc);
-      let replacement_chars = replacement.chars().count();
       // Descending order (resolution contract): applying back-to-front means
-      // no earlier range's position shifts.
-      for (start, end, styles) in matches {
-        let len = end.body_unicode - start.body_unicode;
+      // no earlier range's position shifts. Each match may carry its own
+      // effective replacement (R12-B regex capture expansion).
+      for entry in matches {
+        let effective = entry.replacement(replacement);
+        let effective_chars = effective.chars().count();
+        let len = entry.end.body_unicode - entry.start.body_unicode;
         hotpath::measure_block!("replace_matches_body_edit", {
           body
-            .delete(start.body_unicode, len)
+            .delete(entry.start.body_unicode, len)
             .context("deleting matched range from Loro body flow")?;
-          if replacement_chars > 0 {
+          if effective_chars > 0 {
             body
-              .insert(start.body_unicode, replacement)
+              .insert(entry.start.body_unicode, effective)
               .context("inserting replacement into Loro body flow")?;
           }
         });
-        if replacement_chars > 0
-          && let Some(styles) = styles
+        if effective_chars > 0
+          && let Some(styles) = entry.styles
         {
-          mark_run_styles(&body, start.body_unicode..start.body_unicode + replacement_chars, *styles)
+          mark_run_styles(&body, entry.start.body_unicode..entry.start.body_unicode + effective_chars, styles)
             .context("marking replacement run styles")?;
-          summary.marks_emitted += style_mark_count(*styles);
+          summary.marks_emitted += style_mark_count(styles);
         }
       }
       summary.containers_touched = 1;
@@ -1197,7 +1234,7 @@ fn execute_plan(core: &mut CrdtRuntime, plan: &ResolvedPlan) -> Result<MutationS
       // replacement (find/replace UX contract).
       summary.caret_body_unicode = matches
         .first()
-        .map(|(start, _, _)| start.body_unicode + replacement_chars);
+        .map(|entry| entry.start.body_unicode + entry.replacement(replacement).chars().count());
     },
   }
   Ok(summary)

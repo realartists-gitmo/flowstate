@@ -42,9 +42,24 @@ impl RichTextEditor {
   }
 
   pub fn replace_all_search_highlights(&mut self, replacement: &str, cx: &mut Context<Self>) -> usize {
+    self.replace_all_search_highlights_with(replacement, Vec::new(), cx)
+  }
+
+  /// R12-B: replace-all with per-match effective replacements — regex capture
+  /// expansions, aligned by index with the CURRENT search highlights. A
+  /// `None` (or missing) entry falls back to the shared literal
+  /// `replacement`.
+  pub fn replace_all_search_highlights_with(
+    &mut self,
+    replacement: &str,
+    mut overrides: Vec<Option<String>>,
+    cx: &mut Context<Self>,
+  ) -> usize {
+    overrides.resize(self.search_highlights.len(), None);
     let mut ranges = std::mem::take(&mut self.search_highlights)
       .into_iter()
-      .filter(|range| self.search_highlight_range_is_valid(range))
+      .zip(overrides)
+      .filter(|(range, _)| self.search_highlight_range_is_valid(range))
       .collect::<Vec<_>>();
     if ranges.is_empty() {
       self.active_search_highlight = None;
@@ -52,7 +67,7 @@ impl RichTextEditor {
       return 0;
     }
 
-    ranges.sort_by(|left, right| {
+    ranges.sort_by(|(left, _), (right, _)| {
       left
         .start
         .cmp(&right.start)
@@ -69,7 +84,7 @@ impl RichTextEditor {
     // reached canonical state — peers, saves, and undo all lost it.
     let mut matches = Vec::with_capacity(ranges.len());
     let mut cross_paragraph_ranges = Vec::new();
-    for range in ranges {
+    for (range, replacement_override) in ranges {
       if range.start.paragraph == range.end.paragraph {
         let (Some(start), Some(end)) = (self.text_anchor_at(range.start), self.text_anchor_at(range.end)) else {
           continue;
@@ -79,9 +94,14 @@ impl RichTextEditor {
           .paragraphs
           .get(range.start.paragraph)
           .map(|paragraph| styles_at_byte(paragraph, range.start.byte));
-        matches.push(ReplaceMatch { start, end, styles });
+        matches.push(ReplaceMatch {
+          start,
+          end,
+          styles,
+          replacement_override,
+        });
       } else {
-        cross_paragraph_ranges.push(range);
+        cross_paragraph_ranges.push((range, replacement_override));
       }
     }
 
@@ -90,12 +110,13 @@ impl RichTextEditor {
     if grouped {
       self.begin_undo_group();
     }
-    for range in cross_paragraph_ranges.into_iter().rev() {
+    for (range, replacement_override) in cross_paragraph_ranges.into_iter().rev() {
+      let effective = replacement_override.as_deref().unwrap_or(replacement);
       self.selection = EditorSelection::range(range.start, range.end);
-      if replacement.is_empty() {
+      if effective.is_empty() {
         self.write_delete_selection(cx);
       } else {
-        self.insert_text(replacement, cx);
+        self.insert_text(effective, cx);
       }
     }
     if !matches.is_empty() {

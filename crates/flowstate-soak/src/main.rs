@@ -364,6 +364,7 @@ fn run(path: &Path, keystrokes: usize, splits: usize, imports: usize, audit: &Au
           start: TextAnchor::new(*paragraph_id, byte),
           end: TextAnchor::new(*paragraph_id, byte + 3),
           styles: None,
+          replacement_override: None,
         });
         from = byte + 3;
       }

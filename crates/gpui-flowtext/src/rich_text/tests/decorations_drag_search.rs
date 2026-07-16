@@ -201,6 +201,87 @@ fn find_text_ranges_returns_document_offsets_across_paragraphs() {
   );
 }
 
+// R12-B: regex find — document offsets, case toggle, paragraph-local `^`
+// anchors, zero-width drop, and the surfaced compile diagnostic.
+#[test]
+fn find_text_ranges_regex_matches_and_reports_errors() {
+  let document = document_from_input(
+    DocumentTheme::default(),
+    vec![
+      InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![plain("Card 12 says")],
+      },
+      InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![plain("card 345 answers")],
+      },
+    ],
+  );
+
+  let matches = find_text_ranges_regex(&document, r"card (\d+)", false).expect("pattern compiles");
+  assert_eq!(matches.len(), 2, "case-insensitive regex hits both paragraphs");
+  assert_eq!(matches[0].start, DocumentOffset { paragraph: 0, byte: 0 });
+  assert_eq!(
+    matches[0].end,
+    DocumentOffset {
+      paragraph: 0,
+      byte: "Card 12".len()
+    }
+  );
+  assert_eq!(matches[1].start, DocumentOffset { paragraph: 1, byte: 0 });
+
+  let sensitive = find_text_ranges_regex(&document, r"card (\d+)", true).expect("pattern compiles");
+  assert_eq!(sensitive.len(), 1, "case-sensitive regex skips 'Card'");
+  assert_eq!(sensitive[0].start.paragraph, 1);
+
+  // `^` is a PARAGRAPH anchor (multi-line mode), and zero-width matches drop.
+  let anchored = find_text_ranges_regex(&document, r"^\w+", true).expect("pattern compiles");
+  assert_eq!(anchored.len(), 2, "^ anchors at every paragraph start");
+  assert!(
+    find_text_ranges_regex(&document, r"z*", true)
+      .expect("pattern compiles")
+      .is_empty(),
+    "zero-width matches are dropped"
+  );
+
+  let error = find_text_ranges_regex(&document, r"card (", true).expect_err("unclosed group refuses");
+  assert!(!error.is_empty(), "the diagnostic is surfaced, not swallowed");
+  assert!(!error.contains('\n'), "the diagnostic is flattened for the one-line bar");
+}
+
+// R12-B capture groups: expansions align with the given ranges (the bar's
+// filtered match list), `$1`/`$$` expand per match, and unknown spans fall
+// back to None.
+#[test]
+fn regex_replacement_expansions_expand_per_match() {
+  let document = document_from_input(
+    DocumentTheme::default(),
+    vec![
+      InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![plain("Card 12 and card 345")],
+      },
+    ],
+  );
+  let ranges = find_text_ranges_regex(&document, r"[Cc]ard (\d+)", true).expect("pattern compiles");
+  assert_eq!(ranges.len(), 2);
+
+  let expansions =
+    regex_replacement_expansions(&document, r"[Cc]ard (\d+)", true, "ev $1 ($$1)", &ranges).expect("pattern compiles");
+  assert_eq!(
+    expansions,
+    vec![Some("ev 12 ($1)".to_string()), Some("ev 345 ($1)".to_string())],
+    "each match expands its own capture; $$ stays literal"
+  );
+
+  // A range the regex no longer produces (the doc changed under the bar)
+  // degrades to None — the caller falls back to the literal template.
+  let stale = vec![DocumentOffset { paragraph: 0, byte: 0 }..DocumentOffset { paragraph: 0, byte: 4 }];
+  let missing = regex_replacement_expansions(&document, r"[Cc]ard (\d+)", true, "$1", &stale).expect("pattern compiles");
+  assert_eq!(missing, vec![None]);
+}
+
 
 // C-S4 headless coverage for the review-mark overlay model: the per-paragraph
 // filter, the hover flag, and hover reset on set replacement. The caret bug

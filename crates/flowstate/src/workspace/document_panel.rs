@@ -51,6 +51,7 @@ impl DocumentPanel {
       DocumentSearchBarEvent::QueryChanged
       | DocumentSearchBarEvent::CaseSensitivityChanged
       | DocumentSearchBarEvent::WholeWordsChanged
+      | DocumentSearchBarEvent::RegexModeChanged
       | DocumentSearchBarEvent::StyleFilterChanged => {
         panel.refresh_search_matches(cx);
       },
@@ -149,18 +150,43 @@ impl DocumentPanel {
   }
 
   fn refresh_search_matches(&mut self, cx: &mut Context<Self>) {
-    let (query, case_sensitive, whole_words) = {
+    let (query, case_sensitive, whole_words, use_regex) = {
       let search_bar = self.search_bar.read(cx);
-      (search_bar.query(cx), search_bar.case_sensitive(), search_bar.whole_words())
+      (
+        search_bar.query(cx),
+        search_bar.case_sensitive(),
+        search_bar.whole_words(),
+        search_bar.use_regex(),
+      )
     };
     if query.is_empty() {
+      self
+        .search_bar
+        .update(cx, |bar, cx| bar.set_regex_error(None, cx));
       self.search_matches.clear();
       self.active_search_match = None;
     } else {
-      self.search_matches = self
-        .editor
-        .read(cx)
-        .find_text_with_options(&query, case_sensitive, whole_words);
+      // R12-B: regex mode. A pattern that fails to compile surfaces its
+      // diagnostic in the bar and clears the matches — never a silent
+      // "0 of 0". Whole-words is inert here (regex users spell `\b`).
+      let (matches, regex_error) = if use_regex {
+        match self.editor.read(cx).find_text_regex(&query, case_sensitive) {
+          Ok(matches) => (matches, None),
+          Err(error) => (Vec::new(), Some(error)),
+        }
+      } else {
+        (
+          self
+            .editor
+            .read(cx)
+            .find_text_with_options(&query, case_sensitive, whole_words),
+          None,
+        )
+      };
+      self
+        .search_bar
+        .update(cx, |bar, cx| bar.set_regex_error(regex_error, cx));
+      self.search_matches = matches;
       self.search_matches.retain(|range| {
         let search_bar = self.search_bar.read(cx);
         let paragraphs = &self.editor.read(cx).document().paragraphs;
@@ -184,15 +210,38 @@ impl DocumentPanel {
     cx.notify();
   }
 
+  /// R12-B: per-match capture expansions for the CURRENT matches when the
+  /// bar is in regex mode and the template references captures (`$`).
+  /// `None` = literal replace (regex off, or nothing to expand).
+  fn regex_replace_overrides(&self, template: &str, cx: &Context<Self>) -> Option<Vec<Option<String>>> {
+    let search_bar = self.search_bar.read(cx);
+    if !search_bar.use_regex() || !template.contains('$') {
+      return None;
+    }
+    let query = search_bar.query(cx);
+    let case_sensitive = search_bar.case_sensitive();
+    Some(
+      self
+        .editor
+        .read(cx)
+        .regex_search_replacement_expansions(&query, case_sensitive, template),
+    )
+  }
+
   fn apply_replace_current(&mut self, cx: &mut Context<Self>) {
     self.refresh_search_matches(cx);
     if self.search_matches.is_empty() || self.active_search_match.is_none() {
       return;
     }
     let replacement = self.search_bar.read(cx).replacement(cx);
+    let effective = self
+      .regex_replace_overrides(&replacement, cx)
+      .zip(self.active_search_match)
+      .and_then(|(overrides, active)| overrides.get(active).cloned().flatten())
+      .unwrap_or_else(|| replacement.clone());
     let replaced = self
       .editor
-      .update(cx, |editor, cx| editor.replace_active_search_highlight(&replacement, cx));
+      .update(cx, |editor, cx| editor.replace_active_search_highlight(&effective, cx));
     if replaced {
       self.refresh_search_matches(cx);
     }
@@ -207,9 +256,10 @@ impl DocumentPanel {
       return;
     }
     let replacement = self.search_bar.read(cx).replacement(cx);
-    let replaced = self
-      .editor
-      .update(cx, |editor, cx| editor.replace_all_search_highlights(&replacement, cx));
+    let overrides = self.regex_replace_overrides(&replacement, cx).unwrap_or_default();
+    let replaced = self.editor.update(cx, |editor, cx| {
+      editor.replace_all_search_highlights_with(&replacement, overrides, cx)
+    });
     if replaced > 0 {
       self.refresh_search_matches(cx);
     }

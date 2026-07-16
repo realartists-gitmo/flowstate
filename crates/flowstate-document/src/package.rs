@@ -4258,15 +4258,6 @@ mod tests {
     }
   }
 
-  fn test_child_text(parent: &LoroMap, key: &str) -> io::Result<loro::LoroText> {
-    match parent.get(key) {
-      Some(ValueOrContainer::Container(container)) => container
-        .into_text()
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, format!("`{key}` is not text"))),
-      _ => Err(io::Error::new(io::ErrorKind::InvalidData, format!("missing text `{key}`"))),
-    }
-  }
-
   fn test_ordered_ids(parent: &LoroMap, key: &str) -> io::Result<Vec<String>> {
     Ok(
       test_child_movable_list(parent, key)?

@@ -18,6 +18,7 @@ hotpath = { workspace = true }
 im = "15.1.0"
 imagesize = { workspace = true }
 mitex = { workspace = true }
+regex = { workspace = true }
 resvg = { workspace = true }
 rustc-hash = { workspace = true }
 serde = { workspace = true }

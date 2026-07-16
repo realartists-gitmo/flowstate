@@ -514,6 +514,7 @@ mod cell_authority_tests {
           start: TextAnchor::new(paragraph, 0),
           end: TextAnchor::new(paragraph, 4),
           styles: None,
+          replacement_override: None,
         }],
         replacement: "SEED".into(),
       }))

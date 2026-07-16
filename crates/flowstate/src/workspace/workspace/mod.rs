@@ -45,7 +45,7 @@ use crate::commands::{CommandId, context_for};
 use crate::docx_conversion::{convert_docx_to_document, import_docx_to_loro};
 use crate::flow::{FlowEditor, FlowPanel};
 use crate::rich_text_element::{
-  ArmedInlineTool, CustomParagraphBorder, DocumentProjection, DocumentTheme, InputParagraph, InputRun, ParagraphStyle, RichTextDocumentElement,
+  CustomParagraphBorder, DocumentProjection, DocumentTheme, InputParagraph, InputRun, ParagraphStyle, RichTextDocumentElement,
   RichTextEditor, Save, SectionKind, ThemeUnderline, ZoomIn, ZoomOut, document_from_input, document_text_slice, flowstate_document_theme,
   paragraph_byte_range, paragraph_index_for_id,
 };
