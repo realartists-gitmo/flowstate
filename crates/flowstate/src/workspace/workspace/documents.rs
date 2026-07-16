@@ -50,6 +50,16 @@ pub fn recovery_writes_in_flight() -> usize {
   RECOVERY_WRITES_IN_FLIGHT.load(std::sync::atomic::Ordering::SeqCst)
 }
 
+/// W-S3: the live tab handoff — the panel entity plus its runtime handle.
+pub(crate) struct DocumentPanelHandoff {
+  pub panel: Entity<DocumentPanel>,
+  pub io: Option<flowstate_collab::doc_io::DocIoHandle>,
+}
+
+fn cx_entity_weak(cx: &Context<Workspace>) -> WeakEntity<Workspace> {
+  cx.entity().downgrade()
+}
+
 enum DocumentRuntimeSource {
   FromProjection,
   Runtime(Box<flowstate_collab::crdt_runtime::CrdtRuntime>),
@@ -85,7 +95,7 @@ pub(crate) fn attach_local_write(core: flowstate_collab::crdt_runtime::CrdtRunti
 /// menu (its verbs reach workspace surfaces — comments, speech, dispatch).
 /// B-S1 (silent-refusal law): editor refusals land in the activity zone.
 /// B-S8: the editor asks; the workspace owns the anchored composer popover.
-fn install_equation_composer_opening(editor: &Entity<RichTextEditor>, window: &mut Window, cx: &mut Context<Workspace>) {
+fn install_equation_composer_opening(editor: &Entity<RichTextEditor>, window: &mut Window, cx: &mut Context<Workspace>) -> Subscription {
   cx.subscribe_in(
     editor,
     window,
@@ -95,7 +105,6 @@ fn install_equation_composer_opening(editor: &Entity<RichTextEditor>, window: &m
       }
     },
   )
-  .detach();
 }
 
 /// R1-B: read the platform's `text/html` clipboard slot through `arboard`
@@ -111,13 +120,12 @@ fn install_recognized_html_paste(editor: &Entity<RichTextEditor>, cx: &mut Conte
   });
 }
 
-fn install_editor_refusal_reporting(editor: &Entity<RichTextEditor>, cx: &mut Context<Workspace>) {
+fn install_editor_refusal_reporting(editor: &Entity<RichTextEditor>, cx: &mut Context<Workspace>) -> Subscription {
   cx.subscribe(editor, |workspace, _, event: &crate::rich_text_element::EditorEvent, cx| {
     if let crate::rich_text_element::EditorEvent::Refused { message } = event {
       workspace.report_failure(message.to_string(), None, cx);
     }
   })
-  .detach();
 }
 
 fn install_editor_context_menu(editor: &Entity<RichTextEditor>, cx: &mut Context<Workspace>) {
@@ -571,9 +579,13 @@ impl Workspace {
 
     let editor = cx.new(|cx| RichTextEditor::new_with_path(document.clone(), path.clone(), cx));
     install_editor_context_menu(&editor, cx);
-    install_editor_refusal_reporting(&editor, cx);
+    // W-S3: workspace-side editor subscriptions are STORED per panel so a
+    // live window handoff can drop them here and re-mint them in the
+    // adopting workspace (a detached one would keep reporting into the old
+    // window's activity zone).
+    let refusal_subscription = install_editor_refusal_reporting(&editor, cx);
     install_recognized_html_paste(&editor, cx);
-    install_equation_composer_opening(&editor, window, cx);
+    let composer_subscription = install_equation_composer_opening(&editor, window, cx);
     install_editor_write_authority(&editor, &attachment, document, cx);
     let workspace = cx.entity().downgrade();
     let title = title
@@ -592,9 +604,26 @@ impl Workspace {
     let panel = cx.new(|cx| DocumentPanel::new_with_title(title, path, editor.clone(), workspace, window, cx));
     let id = panel.read(cx).id();
     self.document_runtimes.insert(id, attachment.io.clone());
+    self.install_editor_workspace_observation(id, &editor, cx);
+    self.editor_subscriptions.push((id, refusal_subscription));
+    self.editor_subscriptions.push((id, composer_subscription));
+    self.active_document_id = Some(id);
+    self.active_editor = Some(editor);
+    self.active_flow = None;
+    self.document_panels.push(panel.clone());
+    // CT-S3: a just-opened (or just-joined) doc may already carry the team
+    // speech-target marker in its snapshot — reconcile immediately.
+    self.schedule_speech_target_reconcile(cx);
+    Ok(panel)
+  }
+
+  /// The per-panel workspace-side editor observation (view-model updates,
+  /// autosave, unread + speech reconciles). Factored so W-S3's live handoff
+  /// re-mints it in the adopting workspace.
+  fn install_editor_workspace_observation(&mut self, id: Uuid, editor: &Entity<RichTextEditor>, cx: &mut Context<Self>) {
     self.editor_subscriptions.push((
       id,
-      cx.observe(&editor, move |workspace, editor, cx| {
+      cx.observe(editor, move |workspace, editor, cx| {
         // Loro-first: no runtime flush — intents commit synchronously in the
         // editor's write authority. The observation drives view-model updates
         // and autosave only.
@@ -608,14 +637,66 @@ impl Workspace {
         workspace.schedule_speech_target_reconcile(cx);
       }),
     ));
+  }
+
+  /// W-S3: the live handoff bundle — the panel entity, its runtime handle,
+  /// everything the adopting window needs. Entities are app-scoped, so the
+  /// document keeps its runtime, undo stacks, caret, and collab session.
+  pub(crate) fn hand_off_document_panel(&mut self, panel_id: Uuid, cx: &mut Context<Self>) -> Option<DocumentPanelHandoff> {
+    let ix = self
+      .document_panels
+      .iter()
+      .position(|panel| panel.read(cx).id() == panel_id)?;
+    let panel = self.document_panels.remove(ix);
+    let io = self.document_runtimes.remove(&panel_id);
+    self.editor_subscriptions.retain(|(id, _)| *id != panel_id);
+    self.pinned_document_ids.retain(|id| *id != panel_id);
+    let editor = panel.read(cx).editor();
+    // Re-mint list (spike-verified): the old window's focus subscriptions
+    // die here; the adopting window refocuses and re-mints on interaction.
+    editor.update(cx, |editor, _| editor.clear_focus_subscriptions());
+    if self.active_document_id == Some(panel_id) {
+      self.active_document_id = None;
+      self.active_editor = None;
+      let next = self
+        .document_panels
+        .first()
+        .map(|panel| panel.read(cx).id())
+        .or_else(|| self.flow_panels.first().map(|panel| panel.read(cx).id()));
+      if let Some(next) = next {
+        self.activate_document_id(next, cx);
+      }
+    }
+    self.persist_temporary_workspace_session(cx);
+    cx.notify();
+    Some(DocumentPanelHandoff { panel, io })
+  }
+
+  /// W-S3: adopt a live panel handed off from another window.
+  pub(crate) fn adopt_document_panel(&mut self, handoff: DocumentPanelHandoff, window: &mut Window, cx: &mut Context<Self>) {
+    let DocumentPanelHandoff { panel, io } = handoff;
+    let id = panel.read(cx).id();
+    let editor = panel.read(cx).editor();
+    if let Some(io) = io {
+      self.document_runtimes.insert(id, io);
+    }
+    let adopting_workspace = cx_entity_weak(cx);
+    panel.update(cx, |panel, _| panel.set_workspace(adopting_workspace));
+    self.install_editor_workspace_observation(id, &editor, cx);
+    self
+      .editor_subscriptions
+      .push((id, install_editor_refusal_reporting(&editor, cx)));
+    self
+      .editor_subscriptions
+      .push((id, install_equation_composer_opening(&editor, window, cx)));
+    self.document_panels.push(panel);
     self.active_document_id = Some(id);
-    self.active_editor = Some(editor);
+    self.active_editor = Some(editor.clone());
     self.active_flow = None;
-    self.document_panels.push(panel.clone());
-    // CT-S3: a just-opened (or just-joined) doc may already carry the team
-    // speech-target marker in its snapshot — reconcile immediately.
+    editor.read(cx).focus_handle(cx).focus(window);
+    self.persist_temporary_workspace_session(cx);
     self.schedule_speech_target_reconcile(cx);
-    Ok(panel)
+    cx.notify();
   }
 
   /// B-S8: open (or replace) the equation composer popover for `editor`.
@@ -1592,7 +1673,7 @@ impl Workspace {
     document.theme = load_document_theme();
     let editor = cx.new(|cx| RichTextEditor::new_with_path(document, path.clone(), cx));
     install_editor_context_menu(&editor, cx);
-    install_editor_refusal_reporting(&editor, cx);
+    install_editor_refusal_reporting(&editor, cx).detach();
     let smart_word_selection = load_smart_word_selection();
     editor.update(cx, |editor, cx| {
       editor.set_smart_word_selection(smart_word_selection, cx);

@@ -320,7 +320,10 @@ impl Workspace {
           .when(tab.speech, |this| this.bg(cx.theme().success.opacity(0.14)))
           .prefix(tab_prefix)
           .suffix(close_button)
-          .context_menu(move |menu, _, _| {
+          .context_menu(move |menu, window, cx| {
+            let _ = window;
+            let tear_windows = crate::workspace::live_workspace_windows(cx);
+            let tear_windows_self = workspace.clone();
             let pin_workspace = workspace.clone();
             let left_workspace = workspace.clone();
             let right_workspace = workspace.clone();
@@ -352,20 +355,40 @@ impl Workspace {
               .item(PopupMenuItem::new("Move tab right").on_click(move |_, _, cx| {
                 let _ = right_workspace.update(cx, |workspace, cx| workspace.move_document_tab(panel_id, 1, cx));
               }))
-              // TB-S3 tear-off rides the New Window machinery. W-S1: an
-              // untitled tab has no file to reopen elsewhere — disabled, and
-              // the guarded verb explains itself if reached another way.
+              // W-S3: rich-text tabs move LIVE (entity handoff — pathless
+              // moves too). Flows still reopen by path, so unsaved flows
+              // keep the save-first guard.
               .item(
-                PopupMenuItem::new(if tab.pathless {
+                PopupMenuItem::new(if tab.pathless && tab.flow {
                   "Move to new window (save first)"
                 } else {
                   "Move to new window"
                 })
-                .disabled(tab.pathless)
+                .disabled(tab.pathless && tab.flow)
                 .on_click(move |_, window, cx| {
                   let _ = tear_workspace.update(cx, |workspace, cx| workspace.tear_off_document_tab(panel_id, window, cx));
                 }),
               )
+              // W-S3 re-dock: send the live tab to an existing window.
+              .when(!tab.flow, |menu| {
+                let mut menu = menu;
+                let own = tear_windows_self.clone();
+                for (window_ix, (_, target)) in tear_windows.iter().enumerate() {
+                  if Some(target) == own.upgrade().as_ref() {
+                    continue;
+                  }
+                  let target = target.downgrade();
+                  let mover = tear_windows_self.clone();
+                  menu = menu.item(
+                    PopupMenuItem::new(format!("Move to window {}", window_ix + 1)).on_click(move |_, _, cx| {
+                      let _ = mover.update(cx, |workspace, cx| {
+                        workspace.move_document_tab_to_window(panel_id, target.clone(), cx);
+                      });
+                    }),
+                  );
+                }
+                menu
+              })
           })
       }))
       .last_empty_space(div().flex_1().h_full())

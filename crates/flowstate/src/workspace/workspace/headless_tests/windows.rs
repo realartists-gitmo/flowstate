@@ -84,7 +84,10 @@ fn second_window_is_ephemeral_not_session_owner(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn untitled_tear_off_refuses_loudly(cx: &mut TestAppContext) {
+fn untitled_tear_off_moves_live(cx: &mut TestAppContext) {
+  // W-S3 upgraded the W-S1 refusal: an untitled rich-text tab now moves
+  // LIVE (entity handoff needs no file), so tear-off succeeds where it
+  // used to refuse. Only unsaved FLOWS keep the save-first guard.
   let h = support::open_workspace(cx);
   h.new_document(cx);
   let panel_id = h.read(cx, |ws| ws.active_document_id).expect("active panel");
@@ -93,12 +96,20 @@ fn untitled_tear_off_refuses_loudly(cx: &mut TestAppContext) {
   h.update(cx, |ws, window, cx| ws.tear_off_document_tab(panel_id, window, cx));
   cx.run_until_parked();
 
-  assert_eq!(h.read(cx, |ws| ws.document_panels.len()), 1, "the untitled panel must stay");
-  assert_eq!(cx.windows().len(), windows_before, "no window may open for an untitled tab");
-  assert!(
-    h.read(cx, |ws| ws.activity_event.is_some()),
-    "the refusal must land in the activity zone, not vanish"
-  );
+  assert_eq!(h.read(cx, |ws| ws.document_panels.len()), 0, "the untitled panel moved out");
+  assert_eq!(cx.windows().len(), windows_before + 1, "a new window opened for the live tab");
+  let moved = cx.update(|cx| {
+    crate::workspace::live_workspace_windows(cx)
+      .into_iter()
+      .any(|(_, workspace)| {
+        workspace
+          .read(cx)
+          .document_panels
+          .iter()
+          .any(|panel| panel.read(cx).id() == panel_id)
+      })
+  });
+  assert!(moved, "the SAME panel entity lives in the new window");
 }
 
 #[gpui::test]
@@ -113,4 +124,44 @@ fn quit_all_windows_closes_every_window(cx: &mut TestAppContext) {
   cx.update(crate::workspace::request_quit_all_windows);
   cx.run_until_parked();
   assert!(cx.windows().is_empty(), "quit must walk every window, not just the focused one");
+}
+
+// W-S3: a rich-text tab moves between windows LIVE — the SAME panel entity
+// (same id, same editor, text intact) lands in the target window, the
+// runtime handle rides along, and the source window forgets everything.
+#[gpui::test]
+fn live_tab_handoff_moves_the_entity_between_windows(cx: &mut TestAppContext) {
+  let h = support::open_workspace(cx);
+  h.new_document(cx);
+  h.wait_until(cx, "document runtime attach", |ws| {
+    ws.active_document_id
+      .is_some_and(|id| ws.document_runtimes.contains_key(&id))
+  });
+  let panel_id = h.read(cx, |ws| ws.active_document_id).expect("panel id");
+  h.update(cx, |ws, _, cx| {
+    let editor = ws.active_editor.clone().expect("editor");
+    editor.update(cx, |editor, cx| editor.insert_text_command("handoff cargo survives", cx));
+  });
+
+  let second = cx.update(|cx| open_workspace_window(None, cx));
+  cx.run_until_parked();
+  let second_entity = second.upgrade().expect("second workspace alive");
+
+  h.update(cx, |ws, _, cx| ws.move_document_tab_to_window(panel_id, second.clone(), cx));
+  cx.run_until_parked();
+
+  assert_eq!(h.read(cx, |ws| ws.document_panels.len()), 0, "the source window let go");
+  assert!(
+    h.read(cx, |ws| !ws.document_runtimes.contains_key(&panel_id)),
+    "the runtime handle moved out of the source window"
+  );
+  cx.update(|cx| {
+    let ws = second_entity.read(cx);
+    assert_eq!(ws.document_panels.len(), 1, "the target window adopted the panel");
+    let panel = ws.document_panels[0].read(cx);
+    assert_eq!(panel.id(), panel_id, "the SAME entity moved — no reload");
+    assert!(ws.document_runtimes.contains_key(&panel_id), "the runtime handle rode along");
+    let text = crate::rich_text_element::full_document_text(panel.editor().read(cx).document());
+    assert!(text.contains("handoff cargo survives"), "live text intact, got {text:?}");
+  });
 }

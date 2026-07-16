@@ -126,6 +126,12 @@ impl DocumentPanel {
     self.title.clone()
   }
 
+  /// W-S3: live handoff rebinds the panel to its adopting window's
+  /// workspace (actions route through this pointer).
+  pub fn set_workspace(&mut self, workspace: WeakEntity<Workspace>) {
+    self.workspace = workspace;
+  }
+
   pub fn set_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
     self.title = title_for_path(Some(&path));
     self.path = Some(path);

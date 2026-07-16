@@ -506,6 +506,12 @@ impl RichTextEditor {
     .detach();
   }
 
+  /// W-S3: live window handoff — drop the old window's focus subscriptions
+  /// so the next interaction re-mints them against the adopting window.
+  pub fn clear_focus_subscriptions(&mut self) {
+    self.focus_subscriptions = Vec::new();
+  }
+
   fn ensure_focus_subscriptions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
     if self.disposed {
       self.focus_subscriptions = Vec::new();

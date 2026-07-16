@@ -1405,21 +1405,30 @@ impl Workspace {
   /// close the tab here. W-S1: untitled tabs refuse OUT LOUD (the menu item is
   /// also disabled for them) — the old silent early-return was a lie.
   pub(super) fn tear_off_document_tab(&mut self, panel_id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
-    let path = self
+    // W-S3: rich-text tabs move LIVE — the panel ENTITY (runtime, undo,
+    // caret, collab session) transplants to the new window; nothing reloads
+    // and pathless tabs move too. Flows still reopen by path (their live
+    // handoff is the recorded follow-up).
+    if self
       .document_panels
       .iter()
+      .any(|panel| panel.read(cx).id() == panel_id)
+    {
+      let Some(handoff) = self.hand_off_document_panel(panel_id, cx) else {
+        return;
+      };
+      let target = crate::workspace::open_workspace_window(None, cx);
+      Self::deliver_handoff(target, handoff, cx);
+      return;
+    }
+    let path = self
+      .flow_panels
+      .iter()
       .find(|panel| panel.read(cx).id() == panel_id)
-      .and_then(|panel| panel.read(cx).editor().read(cx).document_path().cloned())
-      .or_else(|| {
-        self
-          .flow_panels
-          .iter()
-          .find(|panel| panel.read(cx).id() == panel_id)
-          .and_then(|panel| panel.read(cx).editor().read(cx).document_path().cloned())
-      });
+      .and_then(|panel| panel.read(cx).editor().read(cx).document_path().cloned());
     let Some(path) = path else {
       self.report_failure(
-        "Save the document first — an unsaved tab has no file to move to a new window.",
+        "Save the flow first — an unsaved flow tab has no file to move to a new window.",
         None,
         cx,
       );
@@ -1427,6 +1436,43 @@ impl Workspace {
     };
     let _ = crate::workspace::open_workspace_window(Some(path), cx);
     self.close_document_panel(panel_id, window, cx);
+  }
+
+  /// W-S3: re-dock — move a live rich-text tab into an EXISTING window.
+  pub(crate) fn move_document_tab_to_window(&mut self, panel_id: Uuid, target: WeakEntity<Workspace>, cx: &mut Context<Self>) {
+    if !self
+      .document_panels
+      .iter()
+      .any(|panel| panel.read(cx).id() == panel_id)
+    {
+      self.report_failure("Only rich-text tabs move between windows live (flows reopen by path).", None, cx);
+      return;
+    }
+    let Some(handoff) = self.hand_off_document_panel(panel_id, cx) else {
+      return;
+    };
+    Self::deliver_handoff(target, handoff, cx);
+  }
+
+  /// Adopt `handoff` inside `target`'s own window context (found through the
+  /// live-window registry; entities are app-scoped but focus needs the
+  /// adopting window).
+  fn deliver_handoff(target: WeakEntity<Workspace>, handoff: DocumentPanelHandoff, cx: &mut gpui::App) {
+    let Some(target_entity) = target.upgrade() else {
+      tracing::warn!("live tab handoff dropped: the target window is gone");
+      return;
+    };
+    let handle = crate::workspace::live_workspace_windows(cx)
+      .into_iter()
+      .find(|(_, workspace)| *workspace == target_entity)
+      .map(|(handle, _)| handle);
+    let Some(handle) = handle else {
+      tracing::warn!("live tab handoff dropped: the target window is not registered");
+      return;
+    };
+    let _ = handle.update(cx, |_, window, cx| {
+      target_entity.update(cx, |workspace, cx| workspace.adopt_document_panel(handoff, window, cx));
+    });
   }
 
   fn document_tabs(&self, cx: &App) -> Vec<DocumentTab> {
