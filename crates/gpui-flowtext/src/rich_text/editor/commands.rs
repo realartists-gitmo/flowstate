@@ -466,6 +466,21 @@ impl RichTextEditor {
     });
   }
 
+  /// M2: copy the selection with every style stripped — plain text only.
+  pub fn copy_selection_as_plain_text(&mut self, cx: &mut Context<Self>) {
+    if self.selection.is_caret() {
+      return;
+    }
+    let range = self.selection.normalized();
+    let start = crate::global_byte(&self.document, range.start);
+    let end = crate::global_byte(&self.document, range.end);
+    let text = crate::document_text_slice(&self.document, start..end);
+    if !text.is_empty() {
+      cx.write_to_clipboard(ClipboardItem::new_string(text));
+      self.paste_cache = None;
+    }
+  }
+
   pub fn copy(&mut self, cx: &mut Context<Self>) {
     if let Some(text) = self.selected_equation_source_text() {
       cx.write_to_clipboard(ClipboardItem::new_string(text));

@@ -91,6 +91,58 @@ impl RichTextEditor {
       && position.y <= caret.bottom() + px(12.0)
   }
 
+  /// M2: right-click in the text body. Standard semantics — a click outside
+  /// the current selection moves the caret there first — then the host hook
+  /// opens its menu for the resolved target.
+  pub(super) fn on_right_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    let Some(hook) = self.context_menu_hook.clone() else {
+      return;
+    };
+    window.focus(&self.focus_handle);
+    let offset = self.hit_test_document_position(event.position, window, cx);
+    if self.selection.is_caret() || !offset_in_range(offset, self.selection.normalized()) {
+      let before_selection = self.selection.clone();
+      self.selection = EditorSelection::collapsed(offset);
+      self.fidelity_caret_set_from("on_right_mouse_down", &before_selection);
+      if self.selection != before_selection {
+        self.note_explicit_selection_movement();
+        self.emit_selection_changed(cx);
+      }
+      cx.notify();
+    }
+    let over_annotation = self
+      .annotation_selections()
+      .iter()
+      .any(|annotation| !annotation.selection.is_caret() && offset_in_range(offset, annotation.selection.normalized()));
+    let has_selection = !self.selection.is_caret();
+    hook(
+      event.position,
+      EditorContextTarget::Text {
+        offset,
+        has_selection,
+        over_annotation,
+      },
+      window,
+      cx,
+    );
+  }
+
+  /// M2: right-click on an object block. The block was just selected by the
+  /// wrapper (right-click selects, like left-click); resolve the precise
+  /// target from the block kind and hand it to the host.
+  pub(super) fn open_block_context_menu(&mut self, block_ix: usize, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+    let Some(hook) = self.context_menu_hook.clone() else {
+      return;
+    };
+    let target = match self.document.blocks.get(block_ix) {
+      Some(Block::Image(_)) => EditorContextTarget::Image { block_ix },
+      Some(Block::Table(_)) => EditorContextTarget::Table { block_ix },
+      Some(Block::Equation(_)) => EditorContextTarget::Equation { block_ix },
+      _ => return,
+    };
+    hook(position, target, window, cx);
+  }
+
   fn on_mouse_move(&mut self, event: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
     self.last_drag_position = Some(event.position);
     if !event.dragging() {

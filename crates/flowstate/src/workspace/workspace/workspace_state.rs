@@ -618,6 +618,174 @@ impl Workspace {
     cx.notify();
   }
 
+  /// M2: the editor context menu — the verb layer everywhere, with the top
+  /// of the menu changing by hit target. Every item routes through the same
+  /// dispatch the keybindings/palette use (parity law); items land in the
+  /// shared anchored-menu slot the outline menu uses.
+  pub fn show_editor_context_menu(
+    &mut self,
+    position: Point<Pixels>,
+    target: crate::rich_text_element::EditorContextTarget,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) {
+    use crate::rich_text_element::EditorContextTarget;
+    let workspace = cx.entity().downgrade();
+    let editor = self.active_editor.clone();
+    let menu = PopupMenu::build(window, cx, move |menu, _, _| {
+      let close = |workspace: &mut Workspace, cx: &mut Context<Workspace>| {
+        workspace.outline_context_menu = None;
+        cx.notify();
+      };
+      let with_editor = move |action: fn(&mut RichTextEditor, &mut Context<RichTextEditor>)| {
+        let editor = editor.clone();
+        move |workspace: &mut Workspace, _window: &mut Window, cx: &mut Context<Workspace>| {
+          workspace.outline_context_menu = None;
+          if let Some(editor) = editor.clone() {
+            editor.update(cx, action);
+          }
+          cx.notify();
+        }
+      };
+      match target {
+        EditorContextTarget::Text {
+          has_selection,
+          over_annotation,
+          ..
+        } => {
+          let menu = menu
+            .min_w(px(220.0))
+            .when(over_annotation, |menu| {
+              menu.item(command_menu_item(workspace.clone(), "Open Thread", None, false, |workspace, window, cx| {
+                workspace.outline_context_menu = None;
+                // The right-click placed the caret inside the marked span;
+                // the panel's reverse link highlights the thread.
+                workspace.open_comments_panel(window, cx);
+                cx.notify();
+              }))
+            })
+            .item(command_menu_item(
+              workspace.clone(),
+              if has_selection { "Comment on Selection" } else { "Add General Note" },
+              Some(crate::commands::CommandId::OpenComments),
+              false,
+              |workspace, window, cx| {
+                workspace.outline_context_menu = None;
+                workspace.open_comments_panel(window, cx);
+                cx.notify();
+              },
+            ))
+            .item(command_menu_item(
+              workspace.clone(),
+              "Send to Speech",
+              None,
+              !has_selection,
+              |workspace, window, cx| {
+                workspace.outline_context_menu = None;
+                workspace.send_selection_to_speech_document(window, cx);
+                cx.notify();
+              },
+            ))
+            .separator();
+          menu
+            .item(command_menu_item(
+              workspace.clone(),
+              "Cut",
+              Some(crate::commands::CommandId::Cut),
+              !has_selection,
+              with_editor(|editor, cx| editor.cut(cx)),
+            ))
+            .item(command_menu_item(
+              workspace.clone(),
+              "Copy",
+              Some(crate::commands::CommandId::Copy),
+              !has_selection,
+              with_editor(|editor, cx| editor.copy(cx)),
+            ))
+            .item(command_menu_item(
+              workspace.clone(),
+              "Paste",
+              Some(crate::commands::CommandId::Paste),
+              false,
+              with_editor(|editor, cx| editor.paste(cx)),
+            ))
+            .item(command_menu_item(
+              workspace.clone(),
+              "Copy as Plain Text",
+              None,
+              !has_selection,
+              with_editor(|editor, cx| editor.copy_selection_as_plain_text(cx)),
+            ))
+        },
+        EditorContextTarget::Image { .. } => menu
+          .min_w(px(200.0))
+          .item(command_menu_item(workspace.clone(), "Fit Width", None, false, with_editor(|editor, cx| {
+            editor.set_selected_image_fit_width(cx);
+          })))
+          .item(command_menu_item(workspace.clone(), "Intrinsic Size", None, false, with_editor(|editor, cx| {
+            editor.set_selected_image_intrinsic_size(cx);
+          })))
+          .item(command_menu_item(workspace.clone(), "Widen", None, false, with_editor(|editor, cx| {
+            editor.widen_selected_image(cx);
+          })))
+          .item(command_menu_item(workspace.clone(), "Narrow", None, false, with_editor(|editor, cx| {
+            editor.narrow_selected_image(cx);
+          })))
+          .separator()
+          // Cut, not a bare delete: removal with a clipboard safety net.
+          .item(command_menu_item(workspace.clone(), "Remove Image", None, false, with_editor(|editor, cx| {
+            editor.cut(cx);
+          }))),
+        EditorContextTarget::Table { .. } => menu
+          .min_w(px(220.0))
+          .item(command_menu_item(workspace.clone(), "Insert Row After", None, false, with_editor(|editor, cx| {
+            editor.insert_row_after_selected_table(cx);
+          })))
+          .item(command_menu_item(workspace.clone(), "Insert Column After", None, false, with_editor(|editor, cx| {
+            editor.insert_column_after_selected_table(cx);
+          })))
+          .item(command_menu_item(workspace.clone(), "Delete Last Row", None, false, with_editor(|editor, cx| {
+            editor.delete_last_row_from_selected_table(cx);
+          })))
+          .item(command_menu_item(workspace.clone(), "Delete Last Column", None, false, with_editor(|editor, cx| {
+            editor.delete_last_column_from_selected_table(cx);
+          })))
+          .separator()
+          .item(command_menu_item(workspace.clone(), "Widen Column", None, false, with_editor(|editor, cx| {
+            editor.widen_selected_table_column(cx);
+          })))
+          .item(command_menu_item(workspace.clone(), "Narrow Column", None, false, with_editor(|editor, cx| {
+            editor.narrow_selected_table_column(cx);
+          }))),
+        EditorContextTarget::Equation { .. } => menu.min_w(px(200.0)).item(command_menu_item(
+          workspace.clone(),
+          "Copy Equation Source",
+          None,
+          false,
+          with_editor(|editor, cx| editor.copy(cx)),
+        )),
+      }
+      .separator()
+      .item({
+        let workspace = workspace.clone();
+        PopupMenuItem::new("Dismiss").on_click(move |_, _, cx| {
+          let _ = workspace.update(cx, |workspace, cx| close(workspace, cx));
+        })
+      })
+    });
+
+    let _subscription = cx.subscribe(&menu, |workspace, _, _: &DismissEvent, cx| {
+      workspace.outline_context_menu = None;
+      cx.notify();
+    });
+    self.outline_context_menu = Some(OutlineContextMenu {
+      position,
+      menu_view: menu,
+      _subscription,
+    });
+    cx.notify();
+  }
+
   pub fn dirty_editors(&self, cx: &App) -> Vec<Entity<RichTextEditor>> {
     self
       .document_panels

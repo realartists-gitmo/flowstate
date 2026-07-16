@@ -40,6 +40,19 @@ pub(crate) fn attach_local_write(core: flowstate_collab::crdt_runtime::CrdtRunti
 /// both wire the editor identically. `set_write_authority` replaces the editor's
 /// projection with the authority's canonical one, so a read-only phase-V editor
 /// becomes editable and authoritative here.
+/// M2: the editor resolves what was right-clicked; the workspace builds the
+/// menu (its verbs reach workspace surfaces — comments, speech, dispatch).
+fn install_editor_context_menu(editor: &Entity<RichTextEditor>, cx: &mut Context<Workspace>) {
+  let workspace = cx.entity().downgrade();
+  editor.update(cx, |editor, _| {
+    editor.set_context_menu_hook(Some(Rc::new(move |position, target, window, cx| {
+      let _ = workspace.update(cx, |workspace, cx| {
+        workspace.show_editor_context_menu(position, target, window, cx);
+      });
+    })));
+  });
+}
+
 fn install_editor_write_authority(
   editor: &Entity<RichTextEditor>,
   attachment: &DocumentRuntimeAttachment,
@@ -384,6 +397,7 @@ impl Workspace {
     }
 
     let editor = cx.new(|cx| RichTextEditor::new_with_path(document.clone(), path.clone(), cx));
+    install_editor_context_menu(&editor, cx);
     install_editor_write_authority(&editor, &attachment, document, cx);
     let workspace = cx.entity().downgrade();
     let title = title
@@ -1236,6 +1250,7 @@ impl Workspace {
   ) -> Uuid {
     document.theme = load_document_theme();
     let editor = cx.new(|cx| RichTextEditor::new_with_path(document, path.clone(), cx));
+    install_editor_context_menu(&editor, cx);
     let smart_word_selection = load_smart_word_selection();
     editor.update(cx, |editor, cx| {
       editor.set_smart_word_selection(smart_word_selection, cx);

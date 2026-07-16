@@ -470,6 +470,33 @@ pub enum NativeSaveKind {
 }
 
 pub type NativeSaveHook = Rc<dyn Fn(PathBuf, Vec<AssetRecord>, NativeSaveKind) -> Pin<Box<dyn Future<Output = io::Result<()>>>>>;
+
+/// M2: what the pointer was over when the context menu was requested — the
+/// host builds a menu whose top changes with the target.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EditorContextTarget {
+  Text {
+    offset: DocumentOffset,
+    has_selection: bool,
+    /// Inside a durable annotation span (a comment mark) — the host offers
+    /// "Open Thread".
+    over_annotation: bool,
+  },
+  Image {
+    block_ix: usize,
+  },
+  Table {
+    block_ix: usize,
+  },
+  Equation {
+    block_ix: usize,
+  },
+}
+
+/// M2: the host's context-menu opener. The editor resolves WHAT was clicked
+/// (and applies standard right-click selection semantics); the host owns the
+/// menu itself, because its verbs reach workspace surfaces.
+pub type ContextMenuHook = Rc<dyn Fn(Point<Pixels>, EditorContextTarget, &mut Window, &mut App)>;
 pub type NativeExportHook = Rc<dyn Fn(PathBuf, DocumentExportFormat, Vec<AssetRecord>) -> Pin<Box<dyn Future<Output = io::Result<()>>>>>;
 pub type NativeRecoveryHook = Rc<dyn Fn(PathBuf) -> Pin<Box<dyn Future<Output = io::Result<()>>>>>;
 
@@ -946,6 +973,7 @@ pub struct RichTextEditor {
   identity_map: DocumentIdentityMap,
   reconciliation_recoveries: u64,
   native_save_hook: Option<NativeSaveHook>,
+  context_menu_hook: Option<ContextMenuHook>,
   native_export_hook: Option<NativeExportHook>,
   native_recovery_hook: Option<NativeRecoveryHook>,
   collaboration_role: Option<CollaborationRole>,

@@ -116,6 +116,7 @@ impl Render for RichTextEditor {
       // so they fall through to the action system above.
       .on_key_down(cx.listener(Self::on_key_down_event))
       .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+      .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_mouse_down))
       .on_mouse_move(cx.listener(Self::on_mouse_move))
       .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
       .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -185,8 +186,20 @@ impl Render for RichTextEditor {
                   Some(Block::Paragraph(_)) | None => None,
                 };
                 let editor_for_down = editor_entity.clone();
+                let editor_for_context = editor_entity.clone();
                 div()
                   .size_full()
+                  // M2: right-click selects the object (like left-click) and
+                  // opens its context arm.
+                  .on_mouse_down(MouseButton::Right, move |event, window, cx| {
+                    cx.stop_propagation();
+                    editor_for_context.update(cx, |editor, cx| {
+                      if let Some(selection) = editor.selection_for_object_block(block_ix) {
+                        editor.select_block_from_click(block_ix, selection, event.position, window, cx);
+                      }
+                      editor.open_block_context_menu(block_ix, event.position, window, cx);
+                    });
+                  })
                   .on_mouse_down(MouseButton::Left, move |event, window, cx| {
                     cx.stop_propagation();
                     editor_for_down.update(cx, |editor, cx| {

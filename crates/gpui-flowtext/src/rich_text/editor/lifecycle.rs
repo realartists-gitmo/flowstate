@@ -83,6 +83,7 @@ impl RichTextEditor {
       identity_map,
       reconciliation_recoveries: 0,
       native_save_hook: None,
+      context_menu_hook: None,
       native_export_hook: None,
       native_recovery_hook: None,
       collaboration_role: None,
@@ -218,6 +219,7 @@ impl RichTextEditor {
 
   fn release_transient_memory(&mut self) {
     self.native_save_hook = None;
+    self.context_menu_hook = None;
     self.native_export_hook = None;
     self.native_recovery_hook = None;
     self.collaboration_role = None;
@@ -316,6 +318,10 @@ impl RichTextEditor {
 
   pub(super) fn note_explicit_selection_movement(&mut self) {
     self.selection_movement_epoch = self.selection_movement_epoch.wrapping_add(1);
+  }
+
+  pub fn set_context_menu_hook(&mut self, hook: Option<ContextMenuHook>) {
+    self.context_menu_hook = hook;
   }
 
   pub fn set_native_save_hook(&mut self, hook: Option<NativeSaveHook>) {
