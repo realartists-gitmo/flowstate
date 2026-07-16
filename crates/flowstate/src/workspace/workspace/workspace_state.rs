@@ -854,7 +854,71 @@ impl Workspace {
     panels
   }
 
+  /// W-S4: pull the mirrors (`active_document_id`/`active_editor`/
+  /// `active_flow`) from the tree's focused pane. The tree is the source;
+  /// everything else reads the mirrors it always read.
+  pub(crate) fn sync_active_from_tree(&mut self, cx: &mut Context<Self>) {
+    match self.pane_tree.focused_active() {
+      Some(id) => {
+        if self.active_document_id != Some(id) {
+          self.activate_document_id(id, cx);
+        }
+      },
+      None => {
+        if self.active_document_id.is_some() {
+          self.save_current_outline_state(cx);
+          self.active_document_id = None;
+          self.active_editor = None;
+          self.active_flow = None;
+          self.outline_cache = None;
+          self.refresh_outline_tree(cx);
+        }
+      },
+    }
+    cx.notify();
+  }
+
+  /// W-S4: split the focused pane; its active tab MOVES into the new pane
+  /// ("split right with this tab"), which takes focus.
+  pub(crate) fn split_focused_pane(&mut self, axis: SplitAxis, cx: &mut Context<Self>) {
+    let focused = self.pane_tree.focused;
+    if self.pane_tree.split(focused, axis).is_some() {
+      self.sync_active_from_tree(cx);
+      self.persist_temporary_workspace_session(cx);
+    }
+  }
+
+  /// W-S4: close the focused pane — surviving tabs move to the neighbor;
+  /// documents never close implicitly. The last pane refuses out loud.
+  pub(crate) fn close_focused_pane(&mut self, cx: &mut Context<Self>) {
+    let focused = self.pane_tree.focused;
+    if self.pane_tree.close_pane(focused) {
+      self.sync_active_from_tree(cx);
+      self.persist_temporary_workspace_session(cx);
+    } else {
+      self.report_failure("This is the only pane — close tabs instead.", None, cx);
+    }
+  }
+
+  /// W-S4: cycle focus through panes in layout order.
+  pub(crate) fn focus_next_pane(&mut self, cx: &mut Context<Self>) {
+    if self.pane_tree.pane_count() > 1 {
+      self.pane_tree.focus_next();
+      self.sync_active_from_tree(cx);
+    }
+  }
+
+  /// W-S4: focus a specific pane (tab-strip clicks in unfocused panes).
+  pub(crate) fn focus_pane(&mut self, pane: PaneId, cx: &mut Context<Self>) {
+    if self.pane_tree.focused != pane && self.pane_tree.leaf(pane).is_some() {
+      self.pane_tree.focused = pane;
+      self.sync_active_from_tree(cx);
+    }
+  }
+
   fn activate_document_id(&mut self, panel_id: Uuid, cx: &mut Context<Self>) {
+    // W-S4: activating a tab focuses its owning pane (one doc, one pane).
+    self.pane_tree.activate_tab(panel_id);
     self.save_current_outline_state(cx);
     let editor = self
       .document_panels
@@ -889,24 +953,6 @@ impl Workspace {
     }
   }
 
-  fn active_document_index(&self, cx: &App) -> Option<usize> {
-    let active_id = self.active_document_id?;
-    // §perf: find the active tab's index by scanning panel ids in tab order (document
-    // panels then flow panels, then stably pinned-first) without materializing labeled
-    // tabs (truncate + format! per tab). Mirrors document_tabs/ordered_document_tabs exactly.
-    let mut ids: Vec<Uuid> = self
-      .document_panels
-      .iter()
-      .map(|panel| panel.read(cx).id())
-      .chain(self.flow_panels.iter().map(|panel| panel.read(cx).id()))
-      .collect();
-    ids.sort_by_key(|id| {
-      let pin_index = self.pinned_document_ids.iter().position(|pinned| pinned == id);
-      (pin_index.is_none(), pin_index.unwrap_or(usize::MAX))
-    });
-    ids.iter().position(|id| *id == active_id)
-  }
-
   fn activate_document_at_index(&mut self, index: usize, cx: &mut Context<Self>) {
     let panel_id = self.document_tabs(cx).get(index).map(|tab| tab.id);
     if let Some(panel_id) = panel_id {
@@ -933,8 +979,16 @@ impl Workspace {
     } else {
       (active_index + offset as usize) % len
     };
-    self.activate_document_id(tabs[target].id, cx);
-    self.tab_bar_scroll_handle.scroll_to_item(target);
+    let target_id = tabs[target].id;
+    self.activate_document_id(target_id, cx);
+    // W-S4: scroll the OWNING pane's strip to the activated tab.
+    if let Some(pane) = self.pane_tree.pane_of(target_id)
+      && let Some(leaf) = self.pane_tree.leaf(pane)
+      && let Some(handle) = self.pane_tab_scrolls.get(&pane.0)
+      && let Some(ix) = leaf.tab_order.iter().position(|tab| *tab == target_id)
+    {
+      handle.scroll_to_item(ix);
+    }
   }
 
   fn toggle_active_tab_pin(&mut self, cx: &mut Context<Self>) {

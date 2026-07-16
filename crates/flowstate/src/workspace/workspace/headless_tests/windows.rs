@@ -165,3 +165,62 @@ fn live_tab_handoff_moves_the_entity_between_windows(cx: &mut TestAppContext) {
     assert!(text.contains("handoff cargo survives"), "live text intact, got {text:?}");
   });
 }
+
+// W-S4 P1: the pane tree under real workspace wiring — splitting moves the
+// active tab into a new focused pane, the mirrors follow the tree, focus
+// cycles, closing a pane re-homes its tabs, and closing a split pane's last
+// tab collapses the split.
+#[gpui::test]
+fn split_view_p1_tree_drives_the_active_mirrors(cx: &mut TestAppContext) {
+  let h = support::open_workspace(cx);
+  h.new_document(cx);
+  h.new_document(cx);
+  let second = h.read(cx, |ws| ws.active_document_id).expect("second doc active");
+  assert_eq!(h.read(cx, |ws| ws.pane_tree.pane_count()), 1, "one pane to start");
+
+  // Split right: the active tab MOVES into the new pane, which takes focus.
+  h.update(cx, |ws, _, cx| ws.split_focused_pane(super::super::SplitAxis::Horizontal, cx));
+  h.read(cx, |ws| {
+    assert_eq!(ws.pane_tree.pane_count(), 2);
+    assert_eq!(ws.active_document_id, Some(second), "the moved tab stays active");
+    assert_eq!(ws.pane_tree.focused_active(), Some(second));
+    let leaves = ws.pane_tree.leaves();
+    assert_eq!(leaves[0].tab_order.len(), 1, "source pane kept the other tab");
+    assert_eq!(leaves[1].tab_order.len(), 1, "new pane holds the moved tab");
+  });
+
+  // Cycle focus: the mirrors follow the other pane's active tab.
+  h.update(cx, |ws, _, cx| ws.focus_next_pane(cx));
+  let first = h.read(cx, |ws| {
+    let leaves = ws.pane_tree.leaves();
+    leaves[0].active.expect("first pane has an active tab")
+  });
+  assert_eq!(
+    h.read(cx, |ws| ws.active_document_id),
+    Some(first),
+    "focus cycling re-pointed the active mirrors"
+  );
+
+  // Activating the OTHER pane's tab focuses that pane (one doc, one pane).
+  h.update(cx, |ws, _, cx| ws.activate_document_id(second, cx));
+  h.read(cx, |ws| {
+    assert_eq!(ws.pane_tree.focused_active(), Some(second));
+    assert_eq!(ws.pane_tree.pane_of(second), Some(ws.pane_tree.focused));
+  });
+
+  // Closing the split pane's only tab collapses the split. A fresh
+  // untitled doc is dirty, so the close prompt asks — answer Don't Save.
+  h.update(cx, |ws, window, cx| ws.close_document_panel(second, window, cx));
+  cx.run_until_parked();
+  cx.simulate_prompt_answer("Don't Save");
+  cx.run_until_parked();
+  h.read(cx, |ws| {
+    assert_eq!(ws.pane_tree.pane_count(), 1, "the emptied pane collapsed");
+    assert_eq!(ws.active_document_id, Some(first), "the survivor is active");
+  });
+
+  // The last pane refuses to close, out loud.
+  h.update(cx, |ws, _, cx| ws.close_focused_pane(cx));
+  assert_eq!(h.read(cx, |ws| ws.pane_tree.pane_count()), 1);
+  assert!(h.read(cx, |ws| ws.activity_event.is_some()), "the refusal speaks");
+}

@@ -191,6 +191,10 @@ pub(crate) fn action_for_command(command: CommandId) -> Option<Box<dyn Action>> 
     | CommandId::ExportFormat
     | CommandId::ExportSend
     | CommandId::ToggleInvisibility
+    | CommandId::SplitRight
+    | CommandId::SplitDown
+    | CommandId::FocusNextPane
+    | CommandId::ClosePane
     | CommandId::MarkCard
     | CommandId::SwitchToTab1
     | CommandId::SwitchToTab2

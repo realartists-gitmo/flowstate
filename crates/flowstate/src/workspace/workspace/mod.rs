@@ -108,8 +108,12 @@ pub struct Workspace {
   /// P5-S6: bumping this re-mints the keyed row states so inputs re-read the
   /// active keymap after record/steal/import.
   keymap_ui_generation: u64,
-  tab_bar_scroll_handle: ScrollHandle,
   pinned_document_ids: Vec<Uuid>,
+  /// W-S4 P1: the window's viewing surface — nested splits whose leaves are
+  /// panes. References panels by id; ownership stays flat on the workspace.
+  pub(crate) pane_tree: PaneTree,
+  /// Per-pane tab-strip scroll handles (lazily minted per `PaneId`).
+  pane_tab_scrolls: HashMap<u64, ScrollHandle>,
   speech_document_id: Option<Uuid>,
   /// CT-S2: transient sent-count shown beside the speech tab's badge after a
   /// send (success feedback WITHOUT an activity-log line, per Adam's CT2
@@ -387,6 +391,9 @@ impl DocumentStyleSection {
     }
   }
 }
+
+mod pane;
+pub(crate) use pane::{PaneId, PaneLeaf, PaneNode, PaneTree, SplitAxis};
 
 include!("documents.rs");
 include!("palette_actions.rs");

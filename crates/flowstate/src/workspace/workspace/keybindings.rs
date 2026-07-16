@@ -391,6 +391,23 @@ impl Workspace {
           false
         }
       },
+      // W-S4: the pane verbs (Q4-A chords; palette carries them too).
+      CommandId::SplitRight => {
+        self.split_focused_pane(SplitAxis::Horizontal, cx);
+        true
+      },
+      CommandId::SplitDown => {
+        self.split_focused_pane(SplitAxis::Vertical, cx);
+        true
+      },
+      CommandId::FocusNextPane => {
+        self.focus_next_pane(cx);
+        true
+      },
+      CommandId::ClosePane => {
+        self.close_focused_pane(cx);
+        true
+      },
       CommandId::ToggleInvisibility => {
         if let Some(editor) = self.active_editor.clone() {
           editor.update(cx, |editor, cx| editor.toggle_invisibility_mode(cx));

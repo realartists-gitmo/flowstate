@@ -1,7 +1,110 @@
 #[hotpath::measure_all]
 impl Workspace {
+  /// W-S4 P1: the viewing surface is the pane TREE — recursive splits whose
+  /// leaves each render their own tab strip + body. One pane = exactly the
+  /// historical window body.
   fn render_document_pane(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-    let active_index = self.active_document_index(cx).unwrap_or(0);
+    let root = self.pane_tree.root().clone();
+    div()
+      .flex_1()
+      .w_full()
+      .min_w_0()
+      .h_full()
+      .overflow_hidden()
+      .bg(cx.theme().background)
+      .child(self.render_pane_node(&root, cx))
+  }
+
+  fn render_pane_node(&mut self, node: &PaneNode, cx: &mut Context<Self>) -> gpui::AnyElement {
+    match node {
+      PaneNode::Pane(leaf) => self.render_pane_leaf(leaf, cx),
+      PaneNode::Split { axis, ratio, children } => {
+        let first = self.render_pane_node(&children[0], cx);
+        let second = self.render_pane_node(&children[1], cx);
+        let ratio = ratio.clamp(0.15, 0.85);
+        match axis {
+          SplitAxis::Horizontal => h_flex()
+            .size_full()
+            .min_w_0()
+            .min_h_0()
+            .child(
+              div()
+                .w(gpui::relative(ratio))
+                .h_full()
+                .min_w_0()
+                .overflow_hidden()
+                .child(first),
+            )
+            .child(div().w(px(1.0)).h_full().flex_none().bg(cx.theme().border))
+            .child(div().flex_1().h_full().min_w_0().overflow_hidden().child(second))
+            .into_any_element(),
+          SplitAxis::Vertical => v_flex()
+            .size_full()
+            .min_w_0()
+            .min_h_0()
+            .child(
+              div()
+                .h(gpui::relative(ratio))
+                .w_full()
+                .min_h_0()
+                .overflow_hidden()
+                .child(first),
+            )
+            .child(div().h(px(1.0)).w_full().flex_none().bg(cx.theme().border))
+            .child(div().flex_1().w_full().min_h_0().overflow_hidden().child(second))
+            .into_any_element(),
+        }
+      },
+    }
+  }
+
+  fn render_pane_leaf(&mut self, leaf: &PaneLeaf, cx: &mut Context<Self>) -> gpui::AnyElement {
+    let focused = leaf.id == self.pane_tree.focused;
+    let pane_id = leaf.id;
+    let body: gpui::AnyElement = match leaf.active {
+      Some(active) if focused && self.active_document_id == Some(active) => self.render_focused_pane_body(cx),
+      Some(active) => {
+        // An unfocused pane paints its live editor entity read-hot; the
+        // first click anywhere inside focuses the pane (capture phase, so
+        // the click still lands where it was aimed).
+        let editor: Option<gpui::AnyElement> = self
+          .document_panels
+          .iter()
+          .find(|panel| panel.read(cx).id() == active)
+          .map(|panel| panel.read(cx).editor().into_any_element())
+          .or_else(|| {
+            self
+              .flow_panels
+              .iter()
+              .find(|panel| panel.read(cx).id() == active)
+              .map(|panel| panel.read(cx).editor().into_any_element())
+          });
+        match editor {
+          Some(editor) => div().size_full().overflow_hidden().child(editor).into_any_element(),
+          None => self.render_empty_state(cx).into_any_element(),
+        }
+      },
+      // Q3-A: an empty pane hosts the home surface.
+      None => self.render_empty_state(cx).into_any_element(),
+    };
+    v_flex()
+      .size_full()
+      .min_w_0()
+      .min_h_0()
+      .overflow_hidden()
+      .capture_any_mouse_down(cx.listener(move |workspace, _, _, cx| {
+        workspace.focus_pane(pane_id, cx);
+      }))
+      .when(!leaf.tab_order.is_empty(), |this| {
+        this.child(self.render_pane_tab_bar(leaf, focused, cx))
+      })
+      .child(div().flex_1().w_full().min_h_0().overflow_hidden().child(body))
+      .into_any_element()
+  }
+
+  /// The FOCUSED pane's body — the historical window body: session strip,
+  /// search bar, alt-text bar, history takeover, the active editor/flow.
+  fn render_focused_pane_body(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
     let active_search_bar = self.active_document_id.and_then(|active_document_id| {
       self
         .document_panels
@@ -14,15 +117,10 @@ impl Workspace {
     });
 
     v_flex()
-      .flex_1()
-      .w_full()
+      .size_full()
       .min_w_0()
-      .h_full()
+      .min_h_0()
       .overflow_hidden()
-      .bg(cx.theme().background)
-      .when(!(self.document_panels.is_empty() && self.flow_panels.is_empty()), |this| {
-        this.child(self.render_document_tab_bar(active_index, cx))
-      })
       // CO-S4: the live session strip — attached-only chrome (the status-bar
       // pill defers to this band while it shows).
       .when_some(self.render_session_strip(cx), |this, strip| this.child(strip))
@@ -99,6 +197,7 @@ impl Workspace {
             this.child(self.render_empty_state(cx))
           }),
       )
+      .into_any_element()
   }
 
   /// CO-S4: peer chips + invite/leave for the active document's ATTACHED
@@ -172,8 +271,38 @@ impl Workspace {
     )
   }
 
-  fn render_document_tab_bar(&self, active_index: usize, cx: &mut Context<Self>) -> impl IntoElement {
-    let tabs = self.document_tabs(cx);
+  /// W-S4 P1: one tab strip PER PANE — its tabs only, its own scroll
+  /// handle; the "+"/overflow prefix rides the focused strip.
+  fn render_pane_tab_bar(&mut self, leaf: &PaneLeaf, focused: bool, cx: &mut Context<Self>) -> gpui::AnyElement {
+    let tabs: Vec<DocumentTab> = self
+      .document_tabs(cx)
+      .into_iter()
+      .filter(|tab| leaf.tab_order.contains(&tab.id))
+      .map(|mut tab| {
+        tab.active = leaf.active == Some(tab.id);
+        tab
+      })
+      .collect();
+    let active_index = tabs.iter().position(|tab| tab.active).unwrap_or(0);
+    let scroll = self
+      .pane_tab_scrolls
+      .entry(leaf.id.0)
+      .or_default()
+      .clone();
+    self
+      .render_document_tab_bar(tabs, active_index, leaf.id, focused, scroll, cx)
+      .into_any_element()
+  }
+
+  fn render_document_tab_bar(
+    &self,
+    tabs: Vec<DocumentTab>,
+    active_index: usize,
+    pane: PaneId,
+    focused: bool,
+    scroll: ScrollHandle,
+    cx: &mut Context<Self>,
+  ) -> impl IntoElement {
     let active_is_speech = tabs.get(active_index).is_some_and(|tab| tab.speech);
     let active_tab_bg = if active_is_speech {
       cx.theme().success.opacity(0.18)
@@ -182,11 +311,13 @@ impl Workspace {
     };
     let active_tab_fg = cx.theme().foreground;
     let workspace = cx.entity().downgrade();
-    TabBar::new("document-tab-bar")
+    TabBar::new(("document-tab-bar", pane.0))
       .small()
-      .track_scroll(&self.tab_bar_scroll_handle)
+      .track_scroll(&scroll)
       .menu(true)
-      .prefix(self.render_document_tab_bar_prefix(active_index, tabs.len(), cx))
+      .when(focused, |this| {
+        this.prefix(self.render_document_tab_bar_prefix(active_index, tabs.len(), cx))
+      })
       .active_tab_bg(active_tab_bg)
       .active_tab_fg(active_tab_fg)
       .selected_index(active_index)
@@ -324,6 +455,8 @@ impl Workspace {
             let _ = window;
             let tear_windows = crate::workspace::live_workspace_windows(cx);
             let tear_windows_self = workspace.clone();
+            let split_right_workspace = workspace.clone();
+            let split_down_workspace = workspace.clone();
             let pin_workspace = workspace.clone();
             let left_workspace = workspace.clone();
             let right_workspace = workspace.clone();
@@ -354,6 +487,26 @@ impl Workspace {
               }))
               .item(PopupMenuItem::new("Move tab right").on_click(move |_, _, cx| {
                 let _ = right_workspace.update(cx, |workspace, cx| workspace.move_document_tab(panel_id, 1, cx));
+              }))
+              // W-S4: split verbs live beside the move verbs — the tab
+              // activates first, then rides the split into the new pane.
+              .item(PopupMenuItem::new("Split right with this tab").on_click({
+                let workspace = split_right_workspace.clone();
+                move |_, _, cx| {
+                  let _ = workspace.update(cx, |workspace, cx| {
+                    workspace.activate_document_id(panel_id, cx);
+                    workspace.split_focused_pane(SplitAxis::Horizontal, cx);
+                  });
+                }
+              }))
+              .item(PopupMenuItem::new("Split down with this tab").on_click({
+                let workspace = split_down_workspace.clone();
+                move |_, _, cx| {
+                  let _ = workspace.update(cx, |workspace, cx| {
+                    workspace.activate_document_id(panel_id, cx);
+                    workspace.split_focused_pane(SplitAxis::Vertical, cx);
+                  });
+                }
               }))
               // W-S3: rich-text tabs move LIVE (entity handoff — pathless
               // moves too). Flows still reopen by path, so unsaved flows

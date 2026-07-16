@@ -319,8 +319,9 @@ impl Workspace {
       keymap_recording: None,
       keymap_conflicts: FxHashMap::default(),
       keymap_ui_generation: 0,
-      tab_bar_scroll_handle: ScrollHandle::new(),
       pinned_document_ids: Vec::new(),
+      pane_tree: PaneTree::default(),
+      pane_tab_scrolls: HashMap::new(),
       speech_document_id: None,
       speech_sent_recent: 0,
       speech_sent_clear_generation: 0,
@@ -611,6 +612,8 @@ impl Workspace {
     self.active_editor = Some(editor);
     self.active_flow = None;
     self.document_panels.push(panel.clone());
+    // W-S4: the new tab lands in the focused pane and becomes its active.
+    self.pane_tree.insert_tab(id);
     // CT-S3: a just-opened (or just-joined) doc may already carry the team
     // speech-target marker in its snapshot — reconcile immediately.
     self.schedule_speech_target_reconcile(cx);
@@ -649,6 +652,7 @@ impl Workspace {
       .position(|panel| panel.read(cx).id() == panel_id)?;
     let panel = self.document_panels.remove(ix);
     let io = self.document_runtimes.remove(&panel_id);
+    self.pane_tree.remove_tab(panel_id);
     self.editor_subscriptions.retain(|(id, _)| *id != panel_id);
     self.pinned_document_ids.retain(|id| *id != panel_id);
     let editor = panel.read(cx).editor();
@@ -690,6 +694,7 @@ impl Workspace {
       .editor_subscriptions
       .push((id, install_equation_composer_opening(&editor, window, cx)));
     self.document_panels.push(panel);
+    self.pane_tree.insert_tab(id);
     self.active_document_id = Some(id);
     self.active_editor = Some(editor.clone());
     self.active_flow = None;
@@ -876,6 +881,7 @@ impl Workspace {
     self
       .flow_panels
       .retain(|panel| panel.read(cx).id() != panel_id);
+    self.pane_tree.remove_tab(panel_id);
     self.editor_subscriptions.retain(|(id, _)| *id != panel_id);
     self.pinned_document_ids.retain(|id| *id != panel_id);
     self.speech_word_count_cache.remove(&panel_id);
@@ -884,7 +890,26 @@ impl Workspace {
       self.speech_document_id = None;
     }
     if closing_active_document {
-      if let Some(panel) = self.document_panels.last() {
+      // W-S4: the pane tree already knows the next tab — the focused pane's
+      // active after the removal (its own last tab, or the collapse target's).
+      if let Some(next) = self.pane_tree.focused_active().and_then(|id| {
+        self
+          .document_panels
+          .iter()
+          .find(|panel| panel.read(cx).id() == id)
+          .map(|panel| (id, Some(panel.read(cx).editor()), None))
+          .or_else(|| {
+            self
+              .flow_panels
+              .iter()
+              .find(|panel| panel.read(cx).id() == id)
+              .map(|panel| (id, None, Some(panel.read(cx).editor())))
+          })
+      }) {
+        self.active_document_id = Some(next.0);
+        self.active_editor = next.1;
+        self.active_flow = next.2;
+      } else if let Some(panel) = self.document_panels.last() {
         self.active_document_id = Some(panel.read(cx).id());
         self.active_editor = Some(panel.read(cx).editor());
         self.active_flow = None;
@@ -1639,6 +1664,8 @@ impl Workspace {
     self.active_editor = None;
     self.active_flow = Some(editor);
     self.flow_panels.push(panel.clone());
+    // W-S4: flows are pane-legal tabs from P1 (Q2-A).
+    self.pane_tree.insert_tab(id);
     self.outline_cache = None;
     self.outline_viewport_paragraph = None;
     self.outline_active_paragraph = None;

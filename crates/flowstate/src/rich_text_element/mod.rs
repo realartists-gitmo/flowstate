@@ -105,6 +105,10 @@ pub fn flowstate_command_to_rich_text(command: CommandId) -> Option<RichTextEdit
     | CommandId::ExportFormat
     | CommandId::ExportSend
     | CommandId::ToggleInvisibility
+    | CommandId::SplitRight
+    | CommandId::SplitDown
+    | CommandId::FocusNextPane
+    | CommandId::ClosePane
     | CommandId::MarkCard
     | CommandId::SwitchToTab1
     | CommandId::SwitchToTab2
