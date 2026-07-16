@@ -1,13 +1,6 @@
 #[hotpath::measure]
 fn flowstate_top_bar_button(cx: &mut Context<Workspace>) -> impl IntoElement {
   let workspace = cx.entity().downgrade();
-  let current_theme = Theme::global(cx).theme_name().to_string();
-  let theme_names = ThemeRegistry::global(cx)
-    .sorted_themes()
-    .into_iter()
-    .map(|theme| theme.name.to_string())
-    .collect::<Vec<_>>();
-
   div()
     .h_full()
     .flex_none()
@@ -25,35 +18,18 @@ fn flowstate_top_bar_button(cx: &mut Context<Workspace>) -> impl IntoElement {
         .label("Flowstate")
         .xsmall()
         .ghost()
-        .dropdown_menu(move |menu, window, cx| {
+        .dropdown_menu(move |menu, _window, _cx| {
           let workspace = workspace.clone();
+          let appearance_workspace = workspace.clone();
           menu
-            .submenu("Change Theme", window, cx, {
-              let theme_names = theme_names.clone();
-              let current_theme = current_theme.clone();
-              let workspace = workspace.clone();
-              move |menu, _, _| {
-                let menu = menu
-                  .scrollable(true)
-                  .scrollbar_show(gpui_component::scroll::ScrollbarShow::Always);
-                theme_names.iter().fold(menu, |menu, theme_name| {
-                  let selected = theme_name == &current_theme;
-                  let apply_theme = theme_name.clone();
-                  menu.item(
-                    PopupMenuItem::new(theme_name.clone())
-                      .checked(selected)
-                      .keep_open(true)
-                      .radio(true)
-                      .on_click({
-                        let workspace = workspace.clone();
-                        move |_, window, cx| {
-                          apply_app_theme(&apply_theme, workspace.clone(), Some(window), cx);
-                        }
-                      }),
-                  )
-                })
-              }
-            })
+            // P5-S2: theme moved to Settings ▸ Appearance (live-applied there).
+            .item(PopupMenuItem::new("Appearance Settings…").on_click(move |_, _, cx| {
+              let _ = appearance_workspace.update(cx, |workspace, cx| {
+                workspace.settings_section = WorkspaceSettingsSection::Appearance;
+                workspace.settings_overlay = Some(WorkspaceSettingsOverlay::Settings);
+                cx.notify();
+              });
+            }))
             .separator()
             .item(PopupMenuItem::new("Quit Flowstate").on_click(move |_, window, cx| {
               let _ = workspace.update(cx, |workspace, cx| workspace.request_close_window(window, cx));

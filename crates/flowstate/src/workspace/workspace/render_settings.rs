@@ -198,6 +198,7 @@ impl Workspace {
       },
       WorkspaceSettingsOverlay::Settings => match self.settings_section {
         WorkspaceSettingsSection::General => "app-popup-settings-general",
+        WorkspaceSettingsSection::Appearance => "app-popup-settings-appearance",
         WorkspaceSettingsSection::Collaboration => "app-popup-settings-collaboration",
         WorkspaceSettingsSection::Keymap => "app-popup-settings-keymap",
       },
@@ -214,6 +215,20 @@ impl Workspace {
       .items_center()
       .justify_center()
       .occlude()
+      // P5-S6: while a keymap row is recording, the next chord pressed
+      // anywhere in the overlay becomes the binding (Escape cancels).
+      .on_key_down(cx.listener(|workspace, event: &gpui::KeyDownEvent, _, cx| {
+        if workspace.handle_keymap_recording_key(event, cx) {
+          cx.stop_propagation();
+          return;
+        }
+        // P5-S2 (keyboard law): Escape closes the settings overlay.
+        if event.keystroke.key.as_str() == "escape" {
+          workspace.settings_overlay = None;
+          cx.notify();
+          cx.stop_propagation();
+        }
+      }))
       .on_mouse_down(
         MouseButton::Left,
         cx.listener(|workspace, _, _, cx| {
@@ -276,8 +291,11 @@ impl Workspace {
   fn document_style_pages(&self, workspace: WeakEntity<Workspace>) -> Vec<SettingPage> {
     vec![
       SettingPage::new("Text")
+        .description("Stored inside this document — collaborators see these styles.")
         .default_open(true)
         .group(reset_document_style_section_group(workspace.clone(), DocumentStyleSection::Text))
+        // P5-S4: the live specimen leads — every control below repaints it.
+        .group(SettingGroup::new().title("Specimen").item(style_specimen_item(workspace.clone())))
         .group(
           SettingGroup::new()
             .title("Text")
@@ -585,6 +603,7 @@ impl Workspace {
   fn workspace_settings_pages(&self, workspace: WeakEntity<Workspace>) -> Vec<SettingPage> {
     vec![
       SettingPage::new("General")
+        .description("Applies to this machine — every document.")
         .default_open(true)
         .group(reset_workspace_settings_section_group(
           workspace.clone(),
@@ -597,8 +616,23 @@ impl Workspace {
             .item(autosave_item(workspace.clone()))
             .item(send_to_document_directory_item(workspace.clone()))
             .item(send_custom_directory_item(workspace.clone())),
+        )
+        .group(
+          SettingGroup::new()
+            .title("Workspace")
+            .item(tub_root_item(workspace.clone())),
+        ),
+      // P5-S2: theme moved in from the Flowstate menu — Appearance is its home.
+      SettingPage::new("Appearance")
+        .description("Applies to this machine — every document. Document styles live under Document ▸ Styles.")
+        .group(
+          SettingGroup::new()
+            .title("Theme")
+            .description("Applies immediately.")
+            .item(theme_picker_item(workspace.clone())),
         ),
       SettingPage::new("Collaboration")
+        .description("Applies to this machine — identity, trust, and transports.")
         .group(reset_workspace_settings_section_group(
           workspace.clone(),
           WorkspaceSettingsSection::Collaboration,
@@ -619,10 +653,16 @@ impl Workspace {
             .item(dropbox_document_binding_item(workspace.clone())),
         ),
       SettingPage::new("Keymap")
+        .description("Applies to this machine — every document.")
         .group(reset_workspace_settings_section_group(
           workspace.clone(),
           WorkspaceSettingsSection::Keymap,
         ))
+        .group(
+          SettingGroup::new()
+            .title("Exchange")
+            .item(keymap_exchange_item(workspace.clone())),
+        )
         .group(
           SettingGroup::new()
             .title("Keyboard shortcuts")
@@ -727,6 +767,12 @@ impl Workspace {
 
   fn reset_workspace_settings_section(&mut self, cx: &mut Context<Self>) {
     match self.settings_section {
+      // P5-S2: Appearance's reset returns to the registry's default light theme.
+      WorkspaceSettingsSection::Appearance => {
+        let default_theme = gpui_component::ThemeRegistry::global(cx).default_light_theme().name.to_string();
+        let workspace = cx.entity().downgrade();
+        apply_app_theme(&default_theme, workspace, None, cx);
+      },
       WorkspaceSettingsSection::General => {
         self.autosave_enabled = false;
         self.autosave_document_generations.clear();
@@ -775,4 +821,66 @@ impl Workspace {
       },
     }
   }
+}
+
+
+/// P5-S2: the theme picker, live-applied (moved in from the Flowstate menu).
+#[hotpath::measure]
+fn theme_picker_item(workspace: WeakEntity<Workspace>) -> SettingItem {
+  SettingItem::render(move |_, _, cx| {
+    let current_theme = gpui_component::Theme::global(cx).theme_name().to_string();
+    let theme_names = gpui_component::ThemeRegistry::global(cx)
+      .sorted_themes()
+      .into_iter()
+      .map(|theme| theme.name.to_string());
+    let workspace = workspace.clone();
+    div()
+      .w_full()
+      .flex()
+      .flex_wrap()
+      .gap_1()
+      .children(theme_names.enumerate().map(|(ix, theme_name)| {
+        let selected = theme_name == current_theme;
+        let apply_theme = theme_name.clone();
+        let workspace = workspace.clone();
+        Button::new(("appearance-theme", ix))
+          .xsmall()
+          .when(selected, |this| this.primary())
+          .when(!selected, |this| this.ghost())
+          .label(theme_name)
+          .on_click(move |_, window, cx| {
+            apply_app_theme(&apply_theme, workspace.clone(), Some(window), cx);
+          })
+      }))
+      .into_any_element()
+  })
+}
+
+/// P5-S2: where the tub lives, with a change affordance (the old buried row).
+#[hotpath::measure]
+fn tub_root_item(workspace: WeakEntity<Workspace>) -> SettingItem {
+  SettingItem::render(move |_, _, cx| {
+    let root_label: SharedString = workspace
+      .upgrade()
+      .and_then(|workspace| workspace.read(cx).tub_root.clone())
+      .map_or_else(
+        || SharedString::from("No tub selected"),
+        |root| root.to_string_lossy().into_owned().into(),
+      );
+    let change_workspace = workspace.clone();
+    h_flex()
+      .w_full()
+      .gap_2()
+      .items_center()
+      .child(div().text_sm().text_color(cx.theme().muted_foreground).flex_1().min_w_0().overflow_hidden().text_ellipsis().child(root_label))
+      .child(
+        Button::new("settings-tub-root")
+          .xsmall()
+          .label("Change tub…")
+          .on_click(move |_, window, cx| {
+            let _ = change_workspace.update(cx, |workspace, cx| workspace.prompt_select_tub(window, cx));
+          }),
+      )
+      .into_any_element()
+  })
 }

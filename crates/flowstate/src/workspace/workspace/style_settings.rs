@@ -739,3 +739,107 @@ fn pixels_to_pt(value: Pixels) -> f64 {
 fn pt_to_pixels(value: f64) -> Pixels {
   px((value as f32) * 96.0 / 72.0)
 }
+
+
+/// P5-S4: the live specimen — the styles page shows what the document will
+/// actually look like, re-rendered on every control change (the overlay
+/// re-renders on the style revision bump, so the specimen is always current).
+pub(super) fn style_specimen_item(workspace: WeakEntity<Workspace>) -> SettingItem {
+  SettingItem::render(move |_, _, cx| {
+    let Some(settings) = active_theme_value(cx, &workspace, |theme| DocumentThemeSettings::from(theme)) else {
+      return div()
+        .text_sm()
+        .text_color(cx.theme().muted_foreground)
+        .child("Open a document to preview its styles.")
+        .into_any_element();
+    };
+    let family: SharedString = settings.default_font_family.clone().into();
+    let text_color: Hsla = settings.default_text_color.into();
+    let background: Hsla = settings.document_background_color.into();
+    let line = |label: &'static str, size_px: f32, bold: bool, italic: bool, boxed: bool, border_width: f32| {
+      div()
+        .font_family(family.clone())
+        .text_size(px(size_px))
+        .text_color(text_color)
+        .when(bold, |this| this.font_weight(gpui::FontWeight::BOLD))
+        .when(italic, |this| this.italic())
+        .when(boxed, |this| {
+          this
+            .border(px(border_width.max(1.0)))
+            .border_color(text_color)
+            .px_1()
+        })
+        .child(label)
+    };
+    v_flex()
+      .w_full()
+      .gap_1()
+      .p_3()
+      .rounded_md()
+      .bg(background)
+      .border_1()
+      .border_color(cx.theme().border)
+      .child(line(
+        "Pocket — Warming Bad",
+        settings.pocket_font_size,
+        settings.pocket_bold,
+        settings.pocket_italic,
+        settings.pocket_box_enabled,
+        settings.pocket_border_width,
+      ))
+      .child(line(
+        "Hat — 1AC Advantage One",
+        settings.hat_font_size,
+        settings.hat_bold,
+        settings.hat_italic,
+        settings.hat_box_enabled,
+        settings.hat_border_width,
+      ))
+      .child(line(
+        "Block — AT: Economy DA",
+        settings.block_font_size,
+        settings.block_bold,
+        settings.block_italic,
+        settings.block_box_enabled,
+        settings.block_border_width,
+      ))
+      .child(line(
+        "Tag — Warming causes extinction",
+        settings.tag_font_size,
+        settings.tag_bold,
+        settings.tag_italic,
+        settings.tag_box_enabled,
+        settings.tag_border_width,
+      ))
+      .child(
+        div()
+          .font_family(family.clone())
+          .text_size(px(settings.body_font_size))
+          .text_color(text_color)
+          .child(
+            h_flex()
+              .flex_wrap()
+              .gap_x_1()
+              .child("Body text with a")
+              .child(
+                div()
+                  .text_size(px(settings.cite_font_size))
+                  .when(settings.cite_bold, |this| this.font_weight(gpui::FontWeight::BOLD))
+                  .when(settings.cite_italic, |this| this.italic())
+                  .child("Cite '26"),
+              )
+              .child("and condensed evidence reading like"),
+          ),
+      )
+      .child(
+        div()
+          .font_family(family)
+          .text_size(px(settings.condensed_font_size))
+          .text_color(text_color)
+          .when(settings.condensed_bold, |this| this.font_weight(gpui::FontWeight::BOLD))
+          .when(settings.condensed_italic, |this| this.italic())
+          .child("the un-highlighted parts of a card, kept small and dense so the highlighted line stands out."),
+      )
+      .into_any_element()
+  })
+}

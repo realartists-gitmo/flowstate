@@ -96,6 +96,13 @@ pub struct Workspace {
   /// P5-S1: per-command keybinding parse errors, rendered inline under the
   /// keymap row that caused them (they used to die in stderr).
   keymap_errors: FxHashMap<crate::commands::CommandId, String>,
+  /// P5-S6: the command currently capturing its next pressed chord.
+  keymap_recording: Option<crate::commands::CommandId>,
+  /// P5-S6: bindings that collide with another command (key, other command).
+  keymap_conflicts: FxHashMap<crate::commands::CommandId, Vec<(String, crate::commands::CommandId)>>,
+  /// P5-S6: bumping this re-mints the keyed row states so inputs re-read the
+  /// active keymap after record/steal/import.
+  keymap_ui_generation: u64,
   tab_bar_scroll_handle: ScrollHandle,
   pinned_document_ids: Vec<Uuid>,
   speech_document_id: Option<Uuid>,
@@ -224,6 +231,7 @@ enum WorkspaceSettingsOverlay {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum WorkspaceSettingsSection {
   General,
+  Appearance,
   Collaboration,
   Keymap,
 }
@@ -309,6 +317,7 @@ impl WorkspaceSettingsSection {
   fn title(self) -> &'static str {
     match self {
       Self::General => "General",
+      Self::Appearance => "Appearance",
       Self::Collaboration => "Collaboration",
       Self::Keymap => "Keymap",
     }
@@ -317,8 +326,9 @@ impl WorkspaceSettingsSection {
   fn index(self) -> usize {
     match self {
       Self::General => 0,
-      Self::Collaboration => 1,
-      Self::Keymap => 2,
+      Self::Appearance => 1,
+      Self::Collaboration => 2,
+      Self::Keymap => 3,
     }
   }
 }
