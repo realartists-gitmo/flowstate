@@ -245,6 +245,15 @@ impl RichTextEditor {
     Some(paragraph)
   }
 
+  /// B-S4: the text of the `ix`-th paragraph block in the selected cell.
+  fn selected_table_cell_paragraph_text(&self, ix: usize) -> Option<&str> {
+    let cell = self.selected_table_cell()?;
+    let TableCellBlock::Paragraph(paragraph) = cell.blocks.get(table_cell_paragraph_block_ix(cell, ix)?)? else {
+      return None;
+    };
+    Some(paragraph.text.as_str())
+  }
+
   fn selected_table_cell(&self) -> Option<&TableCell> {
     let BlockSelection::TableCell { block_ix, row_ix, cell_ix, .. } = self.selected_block? else {
       return None;

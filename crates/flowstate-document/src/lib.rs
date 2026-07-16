@@ -34,6 +34,7 @@ pub use loro_schema::{
 pub use package::{
   AssetChunk, ChunkRef, DEFAULT_UPDATE_SEGMENT_COMPACTION_THRESHOLD, DocumentPackage, DocumentPackageManifest, IntegrityIndexEntry,
   LORO_PACKAGE_FORMAT_VERSION, LORO_SCHEMA_VERSION, PackageRevision, ProjectionCacheChunk, RevisionKind, RevisionStamp,
+  SUPPORTED_LORO_SCHEMA_VERSIONS,
   SchemaMigrationRecord, SearchUnitChunk,
   ThumbnailChunk, loro_db8_bytes, read_loro_db8, write_loro_db8,
 };

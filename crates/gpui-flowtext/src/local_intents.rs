@@ -14,9 +14,9 @@
 use std::ops::Range;
 
 use crate::{
-  BlockId, ColumnId, DocumentOffset, DocumentProjection, EditorSelection, InputBlock, InputBlockAlignment, InputImageSizing, InputParagraph,
-  InputTableCell, InputTableColumnWidth, InputTableRow, ParagraphId, ParagraphStyle, ProjectionPatchBatch, RowId, RunStyles, SelectionAffinity,
-  VisualGravity,
+  BlockId, CellId, ColumnId, DocumentOffset, DocumentProjection, EditorSelection, InputBlock, InputBlockAlignment, InputImageSizing,
+  InputParagraph, InputTableCell, InputTableColumnWidth, InputTableRow, ParagraphId, ParagraphStyle, ProjectionPatchBatch, RowId, RunStyles,
+  SelectionAffinity, VisualGravity,
 };
 
 /// A position in body text addressed by stable identity.
@@ -226,6 +226,81 @@ pub struct SetImageLayoutIntent {
   pub alignment: InputBlockAlignment,
 }
 
+/// B-S4: a TEXT op inside one table cell, executed as MINIMAL Loro ops on the
+/// cell's flow text so concurrent same-cell edits merge char-level at the
+/// CRDT — retiring the whole-cell LWW rewrite for typing. Addressing is
+/// cell-local POSITIONAL (paragraph-in-cell index + byte), pinned by
+/// `expected_text_hash`: the op REJECTS (never mis-splices) when the cell's
+/// text changed since the editor's snapshot, and the editor re-resolves and
+/// retries. Durable per-cell paragraph identity + CRDT cursors are the B-S5
+/// follow-up. Cells containing nested tables refuse (positional addressing
+/// cannot see object anchors) and stay on the whole-cell path.
+#[derive(Clone, Debug)]
+pub struct TableCellTextIntent {
+  pub table: BlockId,
+  pub cell: CellId,
+  /// Hash of the cell's canonical flow text (see [`table_cell_text_hash`]) at
+  /// the editor's snapshot. In-process only — never serialized.
+  pub expected_text_hash: u64,
+  pub op: TableCellTextOp,
+}
+
+/// One cell-text operation. Positions are `(paragraph index within the cell,
+/// BYTE offset within that paragraph's text)`.
+#[derive(Clone, Debug)]
+pub enum TableCellTextOp {
+  Insert {
+    paragraph: usize,
+    byte: usize,
+    text: String,
+    style_override: Option<RunStyles>,
+  },
+  Delete {
+    start: (usize, usize),
+    end: (usize, usize),
+  },
+  Split {
+    at: (usize, usize),
+    inherited_style: ParagraphStyle,
+  },
+  /// Join paragraph `second` into the one before it.
+  Join { second: usize },
+  SetMarks {
+    start: (usize, usize),
+    end: (usize, usize),
+    styles: RunStyles,
+  },
+  SetParagraphStyle { paragraph: usize, style: ParagraphStyle },
+}
+
+/// The canonical string a cell's flow text serializes to, reconstructed from
+/// projected paragraphs: the leading boundary sentinel, then each paragraph's
+/// text separated by boundary `\n`s. ONLY valid for cells without nested
+/// tables (the intent refuses those). Both the editor snapshot and the
+/// runtime's live cell text hash THIS shape — equality pins the op's
+/// positional addressing to exact text.
+#[must_use]
+pub fn table_cell_flow_string(paragraph_texts: &[&str]) -> String {
+  let mut flow = String::with_capacity(paragraph_texts.iter().map(|text| text.len() + 1).sum::<usize>().max(1));
+  for text in paragraph_texts {
+    flow.push('\n');
+    flow.push_str(text);
+  }
+  if flow.is_empty() {
+    flow.push('\n');
+  }
+  flow
+}
+
+/// Deterministic in-process hash for [`TableCellTextIntent::expected_text_hash`].
+#[must_use]
+pub fn table_cell_text_hash(flow_string: &str) -> u64 {
+  use std::hash::{Hash as _, Hasher as _};
+  let mut hasher = std::collections::hash_map::DefaultHasher::new();
+  flow_string.hash(&mut hasher);
+  hasher.finish()
+}
+
 /// Table intents — durable row/column/cell identities throughout (§P2b).
 /// `InsertTableRow`/`InsertTableColumn` identities are minted by the write
 /// path; `after_*` anchors falling back deterministically to the tail when the
@@ -303,6 +378,7 @@ pub enum LocalIntent {
   ReplaceImageCaption(ReplaceImageCaptionIntent),
   SetImageLayout(SetImageLayoutIntent),
   Table(TableIntent),
+  TableCellText(TableCellTextIntent),
 }
 
 impl LocalIntent {
@@ -329,6 +405,7 @@ impl LocalIntent {
       Self::ReplaceImageCaption(_) => "replace-image-caption",
       Self::SetImageLayout(_) => "set-image-layout",
       Self::Table(_) => "table-op",
+      Self::TableCellText(_) => "table-cell-text",
     }
   }
 
@@ -380,6 +457,9 @@ pub enum WriteRejected {
   UnresolvedCursor,
   /// The intent is a no-op (empty text, empty range, empty fragment).
   EmptyIntent,
+  /// B-S4: the cell's text changed since the editor snapshot this positional
+  /// op was built against — re-resolve against the fresh projection and retry.
+  StaleCellText,
   /// The intent would violate document structure (e.g. delete the boundary-0
   /// sentinel, join across a non-adjacent pair).
   StructureViolation(&'static str),
@@ -405,6 +485,7 @@ impl std::fmt::Display for WriteRejected {
       },
       Self::UnresolvedCursor => f.write_str("supplied cursor could not be decoded/resolved against canonical state"),
       Self::EmptyIntent => f.write_str("intent is a no-op"),
+      Self::StaleCellText => f.write_str("cell text changed since the editor snapshot; re-resolve and retry"),
       Self::StructureViolation(reason) => write!(f, "intent violates document structure: {reason}"),
       Self::GatePoisoned => f.write_str("write gate poisoned; reload from persisted state"),
       Self::CompensatedFailure { class, diagnostic } => {

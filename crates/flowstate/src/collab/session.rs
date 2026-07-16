@@ -890,6 +890,19 @@ impl CollabSession {
     doc
       .import_with(snapshot, "remote")
       .context("importing collaboration snapshot failed")?;
+    // B-S4 THE JOIN-TIME SCHEMA GATE (rich text finally gets what Flow always
+    // had): a document whose schema is NEWER than this binary must refuse
+    // LOUDLY here — an old binary that proceeds doesn't just misread, it
+    // actively corrupts the shared doc (its whole-cell writer destroys
+    // in-cell records; its repair passes fight the new shape and publish).
+    if let Some(version) = flowstate_document::document_schema_version(&doc)
+      && !flowstate_document::SUPPORTED_LORO_SCHEMA_VERSIONS.contains(&version)
+    {
+      bail!(
+        "this document uses a newer Flowstate format (schema v{version}; this build reads up to v{}) — update Flowstate to join this session",
+        flowstate_document::LORO_SCHEMA_VERSION
+      );
+    }
     let runtime = CrdtRuntime::from_doc(doc, None, None).context("creating joined collaboration CRDT runtime")?;
     let mut document = runtime
       .projection_snapshot()

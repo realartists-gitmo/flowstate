@@ -134,6 +134,8 @@ pub(crate) enum ResolvedPlan {
     table_ix: usize,
     op: ResolvedTableOp,
   },
+  /// B-S4: a positional, hash-pinned text op inside one table cell.
+  TableCellText(super::table_cell_text::ResolvedCellText),
 }
 
 #[derive(Debug)]
@@ -589,6 +591,12 @@ fn resolve_intent(core: &CrdtRuntime, intent: &LocalIntent) -> Result<ResolvedPl
           .collect(),
         style: styles.style,
       })
+    },
+    LocalIntent::TableCellText(cell_text) => {
+      let table_ix = index
+        .block_index(cell_text.table)
+        .ok_or(WriteRejected::UnresolvedBlock(cell_text.table))?;
+      super::table_cell_text::resolve_cell_text(core, table_ix, cell_text).map(ResolvedPlan::TableCellText)
     },
     LocalIntent::InsertObject(insert) => {
       let at = resolve_text_anchor(doc, projection, index, &insert.at)?;
@@ -1173,6 +1181,10 @@ fn execute_plan(core: &mut CrdtRuntime, plan: &ResolvedPlan) -> Result<MutationS
     },
     ResolvedPlan::Table { table, op, .. } => {
       summary.containers_touched = execute_table_op(&doc, *table, op)?;
+    },
+    ResolvedPlan::TableCellText(plan) => {
+      super::table_cell_text::execute_cell_text(&doc, plan)?;
+      summary.containers_touched = 1;
     },
     ResolvedPlan::ReplaceMatches { matches, replacement } => {
       let body = body_text(&doc);

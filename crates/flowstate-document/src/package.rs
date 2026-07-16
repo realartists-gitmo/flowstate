@@ -27,7 +27,20 @@ fn open_probe() -> bool {
 fn package_format_version_supported(version: u32) -> bool {
   version == LORO_PACKAGE_FORMAT_VERSION || version == LORO_PACKAGE_FORMAT_VERSION_SHALLOW
 }
-pub const LORO_SCHEMA_VERSION: u32 = 1;
+/// B-S4 (cell flows): v2 marks documents that carry per-cell paragraph
+/// records / objects-in-cells. New binaries read v1 AND v2 (v1 upgrades
+/// LAZILY via the repair law — no up-front migration commit); old binaries
+/// hard-reject v2 at open, which is the POINT: their whole-cell writer would
+/// silently destroy the new in-cell structure. COUPLED with
+/// `PROTOCOL_VERSION` (`proto_gossip.rs`) — bump both together; a unit test
+/// enforces the pair.
+pub const LORO_SCHEMA_VERSION: u32 = 2;
+/// The schema versions this binary can open.
+pub const SUPPORTED_LORO_SCHEMA_VERSIONS: &[u32] = &[1, 2];
+
+pub(crate) fn loro_schema_version_supported(version: u32) -> bool {
+  SUPPORTED_LORO_SCHEMA_VERSIONS.contains(&version)
+}
 pub const DEFAULT_UPDATE_SEGMENT_COMPACTION_THRESHOLD: usize = 256;
 
 const PACKAGE_MAGIC: &[u8; 16] = b"FLOWDB8-LORO\0\0\0\0";
@@ -734,7 +747,7 @@ impl DocumentPackage {
     } else {
       cached_search_units_from_compact_bytes(bytes)?
     };
-    if !package_format_version_supported(manifest.package_format_version) || manifest.loro_schema_version != LORO_SCHEMA_VERSION {
+    if !package_format_version_supported(manifest.package_format_version) || !loro_schema_version_supported(manifest.loro_schema_version) {
       return Err(io::Error::new(
         io::ErrorKind::InvalidData,
         "unsupported Flowstate cached search package version",
@@ -1788,7 +1801,7 @@ impl DocumentPackage {
     if !package_format_version_supported(self.manifest.package_format_version) {
       return Err(io::Error::new(io::ErrorKind::InvalidData, "unsupported Flowstate package format version"));
     }
-    if self.manifest.loro_schema_version != LORO_SCHEMA_VERSION {
+    if !loro_schema_version_supported(self.manifest.loro_schema_version) {
       return Err(io::Error::new(io::ErrorKind::InvalidData, "unsupported Flowstate Loro schema version"));
     }
     let segment = self
@@ -1829,7 +1842,7 @@ impl DocumentPackage {
     if !package_format_version_supported(self.manifest.package_format_version) {
       return Err(io::Error::new(io::ErrorKind::InvalidData, "unsupported Flowstate package format version"));
     }
-    if self.manifest.loro_schema_version != LORO_SCHEMA_VERSION {
+    if !loro_schema_version_supported(self.manifest.loro_schema_version) {
       return Err(io::Error::new(io::ErrorKind::InvalidData, "unsupported Flowstate Loro schema version"));
     }
     let snapshot = self

@@ -143,6 +143,11 @@ impl LocalDocHandle {
     self.apply_intent(LocalIntent::ReplaceMatches(intent))
   }
 
+  /// B-S4: a positional, hash-pinned text op inside one table cell.
+  pub fn table_cell_text(&self, intent: gpui_flowtext::TableCellTextIntent) -> Result<LocalWriteOutcome, WriteRejected> {
+    self.apply_intent(LocalIntent::TableCellText(intent))
+  }
+
   pub fn replace_equation_source_range(&self, intent: ReplaceEquationSourceRangeIntent) -> Result<LocalWriteOutcome, WriteRejected> {
     self.apply_intent(LocalIntent::ReplaceEquationSourceRange(intent))
   }

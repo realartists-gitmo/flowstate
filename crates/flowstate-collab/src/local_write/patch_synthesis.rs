@@ -445,6 +445,12 @@ pub(crate) fn synthesize_patches(core: &CrdtRuntime, intent: &LocalIntent, plan:
     })
     .map(|patches| (patches, body_invalidation(0, 0))),
     ResolvedPlan::Table { table, table_ix, op } => table_patch(core, *table, *table_ix, op).map(|patches| (patches, body_invalidation(0, 0))),
+    // B-S4: cell text reprojects via the SAME one-table readback law as
+    // structural table ops (sub-cell patch coordinates are the B-S5 follow-up
+    // — a cell keystroke repaints one table, no longer LWW-rewrites the cell).
+    ResolvedPlan::TableCellText(plan) => {
+      cell_text_table_patch(core, plan.table, plan.table_ix).map(|patches| (patches, body_invalidation(0, 0)))
+    },
     ResolvedPlan::ReplaceMatches { matches, replacement } => {
       // Matches are same-paragraph and sorted descending (resolution
       // contract); group per paragraph and read each affected paragraph back
@@ -581,6 +587,17 @@ fn image_patch(
   };
   mutate(&mut image_input);
   object_replacement_patch(projection, block_ix, InputBlock::Image(image_input))
+}
+
+fn cell_text_table_patch(core: &CrdtRuntime, table: flowstate_document::BlockId, table_ix: usize) -> Option<Vec<ProjectionPatch>> {
+  let projection = core.projection_ref();
+  let block_ix = core.projection_index_ref().block_index(table)?;
+  debug_assert_eq!(block_ix, table_ix);
+  let (table_input, defects) = flowstate_document::materialize_table_block(core.doc(), table.0).ok()?;
+  if !defects.is_empty() {
+    return None;
+  }
+  object_replacement_patch(projection, block_ix, InputBlock::Table(table_input))
 }
 
 fn table_patch(core: &CrdtRuntime, table: flowstate_document::BlockId, table_ix: usize, op: &ResolvedTableOp) -> Option<Vec<ProjectionPatch>> {

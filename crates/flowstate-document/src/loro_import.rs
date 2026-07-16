@@ -739,7 +739,7 @@ fn paragraph_style_attributes(style: ParagraphStyle) -> FxHashMap<String, LoroVa
   attributes
 }
 
-fn run_style_attributes(styles: RunStyles) -> Option<FxHashMap<String, LoroValue>> {
+pub fn run_style_attributes(styles: RunStyles) -> Option<FxHashMap<String, LoroValue>> {
   let mut attributes = FxHashMap::default();
   if let RunSemanticStyle::Custom(slot) = styles.semantic {
     attributes.insert(MARK_RUN_SEMANTIC_STYLE.to_string(), i64::from(slot).into());

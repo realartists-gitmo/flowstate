@@ -20,6 +20,7 @@ pub(crate) mod commit;
 pub(crate) mod patch_synthesis;
 pub(crate) mod recorded_inverse;
 pub(crate) mod resolve;
+pub(crate) mod table_cell_text;
 
 #[cfg(test)]
 mod tests;

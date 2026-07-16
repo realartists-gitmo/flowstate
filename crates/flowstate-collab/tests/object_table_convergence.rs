@@ -1353,4 +1353,145 @@ mod tests {
       .expect("insert object at paragraph start");
     check("post-insert-object");
   }
+
+
+  // ------------------------------------------------------------- B-S4 -----
+
+  /// The cell's canonical flow string + hash, from a peer's projected cell.
+  fn cell_snapshot(peer: &Peer, table: BlockId, row_ix: usize, cell_ix: usize) -> (gpui_flowtext::CellId, u64, Vec<String>) {
+    let projection = peer.projection();
+    let block = projection
+      .blocks
+      .iter()
+      .find_map(|block| match block {
+        Block::Table(candidate) => Some(candidate.clone()),
+        _ => None,
+      })
+      .expect("table present");
+    let cell = &block.rows[row_ix].cells[cell_ix];
+    let texts: Vec<String> = cell
+      .blocks
+      .iter()
+      .filter_map(|cell_block| match cell_block {
+        gpui_flowtext::TableCellBlock::Paragraph(paragraph) => Some(paragraph.text.clone()),
+        gpui_flowtext::TableCellBlock::Table(_) => None,
+      })
+      .collect();
+    let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+    let flow = gpui_flowtext::table_cell_flow_string(&refs);
+    let _ = table;
+    (
+      gpui_flowtext::CellId::from_coordinate(cell.row_id, cell.column_id),
+      gpui_flowtext::table_cell_text_hash(&flow),
+      texts,
+    )
+  }
+
+  /// B-S4 THE WIN: concurrent typing in the SAME cell merges char-level —
+  /// the whole-cell `ReplaceCell` rewrite made this last-writer-wins (one
+  /// peer's sentence vanished).
+  #[test]
+  fn concurrent_same_cell_typing_merges_char_level() {
+    let mut peers: Vec<Peer> = (0..2).map(|_| Peer::new("cell-text-merge", 2)).collect();
+    sync_all(&mut peers);
+    let projection = peers[0].projection();
+    let paragraph = projection.ids.paragraph_ids[0];
+    peers[0]
+      .handle
+      .insert_object(InsertObjectIntent {
+        at: TextAnchor::new(paragraph, 0),
+        block: table_input(1, 1),
+      })
+      .expect("table seeds");
+    sync_all(&mut peers);
+    let (table_id, _) = first_table(&peers[0].projection()).expect("table");
+
+    // Both peers type into the SAME cell ("r0c0"): A prepends, B appends.
+    let (cell, hash_a, _) = cell_snapshot(&peers[0], table_id, 0, 0);
+    peers[0]
+      .handle
+      .table_cell_text(gpui_flowtext::TableCellTextIntent {
+        table: table_id,
+        cell,
+        expected_text_hash: hash_a,
+        op: gpui_flowtext::TableCellTextOp::Insert {
+          paragraph: 0,
+          byte: 0,
+          text: "A-lead ".into(),
+          style_override: None,
+        },
+      })
+      .expect("peer A cell insert");
+    let (cell_b, hash_b, texts_b) = cell_snapshot(&peers[1], table_id, 0, 0);
+    peers[1]
+      .handle
+      .table_cell_text(gpui_flowtext::TableCellTextIntent {
+        table: table_id,
+        cell: cell_b,
+        expected_text_hash: hash_b,
+        op: gpui_flowtext::TableCellTextOp::Insert {
+          paragraph: 0,
+          byte: texts_b[0].len(),
+          text: " B-tail".into(),
+          style_override: None,
+        },
+      })
+      .expect("peer B cell insert");
+
+    sync_all(&mut peers);
+    let (_, _, texts) = cell_snapshot(&peers[0], table_id, 0, 0);
+    assert_eq!(texts[0], "A-lead r0c0 B-tail", "BOTH peers' concurrent cell edits survive");
+    let (_, _, texts_other) = cell_snapshot(&peers[1], table_id, 0, 0);
+    assert_eq!(texts, texts_other, "peers converge on the merged cell");
+  }
+
+  /// B-S4 THE PIN: a positional op built against stale text REJECTS instead
+  /// of mis-splicing.
+  #[test]
+  fn stale_cell_text_hash_rejects() {
+    let peer = Peer::new("cell-text-stale", 1);
+    let projection = peer.projection();
+    let paragraph = projection.ids.paragraph_ids[0];
+    peer
+      .handle
+      .insert_object(InsertObjectIntent {
+        at: TextAnchor::new(paragraph, 0),
+        block: table_input(1, 1),
+      })
+      .expect("table seeds");
+    let (table_id, _) = first_table(&peer.projection()).expect("table");
+    let (cell, hash, _) = cell_snapshot(&peer, table_id, 0, 0);
+
+    // First edit succeeds and CHANGES the text…
+    peer
+      .handle
+      .table_cell_text(gpui_flowtext::TableCellTextIntent {
+        table: table_id,
+        cell,
+        expected_text_hash: hash,
+        op: gpui_flowtext::TableCellTextOp::Insert {
+          paragraph: 0,
+          byte: 0,
+          text: "x".into(),
+          style_override: None,
+        },
+      })
+      .expect("first insert");
+    // …so the SAME hash is now stale: the op must refuse, not mis-splice.
+    let result = peer.handle.table_cell_text(gpui_flowtext::TableCellTextIntent {
+      table: table_id,
+      cell,
+      expected_text_hash: hash,
+      op: gpui_flowtext::TableCellTextOp::Insert {
+        paragraph: 0,
+        byte: 0,
+        text: "y".into(),
+        style_override: None,
+      },
+    });
+    assert!(
+      matches!(result, Err(gpui_flowtext::WriteRejected::StaleCellText)),
+      "stale positional op must reject, got {result:?}"
+    );
+  }
 }

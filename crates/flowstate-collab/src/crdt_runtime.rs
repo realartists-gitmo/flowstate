@@ -5852,7 +5852,7 @@ pub(crate) fn empty_input_table_cell(row_id: RowId, column_id: ColumnId) -> Inpu
   }
 }
 
-fn projection_table_map_by_block_id(doc: &LoroDoc, table_block_id: flowstate_document::BlockId) -> Option<LoroMap> {
+pub(crate) fn projection_table_map_by_block_id(doc: &LoroDoc, table_block_id: flowstate_document::BlockId) -> Option<LoroMap> {
   let body = body_text(doc);
   let (_, block, _) = object_loro_block_by_projected_id(doc, &body, table_block_id)?;
   if map_string_opt(&block, "kind").as_deref() != Some("table") {
@@ -7423,7 +7423,7 @@ fn map_keys(map: &LoroMap) -> Vec<String> {
   keys
 }
 
-fn child_map(parent: &LoroMap, key: &str) -> Option<LoroMap> {
+pub(crate) fn child_map(parent: &LoroMap, key: &str) -> Option<LoroMap> {
   parent.get(key).and_then(|value| match value {
     ValueOrContainer::Container(container) => container.into_map().ok(),
     ValueOrContainer::Value(_) => None,

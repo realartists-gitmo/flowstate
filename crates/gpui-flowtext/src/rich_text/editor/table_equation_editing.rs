@@ -10,6 +10,44 @@ impl RichTextEditor {
     false
   }
 
+  /// B-S4: build a positional, hash-pinned cell-text intent for the selected
+  /// cell and commit it. Returns `None` when the cell can't take the fine
+  /// path (nested tables, missing ids) — callers fall back to the whole-cell
+  /// `ReplaceCell` rewrite.
+  fn write_table_cell_text(&mut self, op: crate::local_intents::TableCellTextOp, cx: &mut Context<Self>) -> Option<bool> {
+    let Some(BlockSelection::TableCell {
+      block_ix, row_ix, cell_ix, ..
+    }) = self.selected_block
+    else {
+      return None;
+    };
+    let Some(Block::Table(table)) = self.document.blocks.get(block_ix) else {
+      return None;
+    };
+    let cell = table.rows.get(row_ix)?.cells.get(cell_ix)?;
+    // Nested tables make positional addressing unsound — whole-cell path.
+    if cell.blocks.iter().any(|block| matches!(block, TableCellBlock::Table(_))) {
+      return None;
+    }
+    let paragraph_texts: Vec<&str> = cell
+      .blocks
+      .iter()
+      .filter_map(|block| match block {
+        TableCellBlock::Paragraph(paragraph) => Some(paragraph.text.as_str()),
+        TableCellBlock::Table(_) => None,
+      })
+      .collect();
+    let flow = crate::local_intents::table_cell_flow_string(&paragraph_texts);
+    let table_id = self.semantic_block_id(block_ix)?;
+    let intent = crate::local_intents::TableCellTextIntent {
+      table: table_id,
+      cell: CellId::from_coordinate(cell.row_id, cell.column_id),
+      expected_text_hash: crate::local_intents::table_cell_text_hash(&flow),
+      op,
+    };
+    Some(self.write_intent(LocalIntent::TableCellText(intent), cx).is_some())
+  }
+
   fn insert_text_into_selected_table_cell(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
     let Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix, .. }) = self.selected_block else {
       return false;
@@ -26,6 +64,63 @@ impl RichTextEditor {
       .selected_table_cell_paragraph()
       .map(|paragraph| table_cell_styles_at(paragraph, insert_at))
       .unwrap_or_default();
+    // B-S4: the fine-grained path — one insert op (plus a preceding delete op
+    // for selection-replace typing, grouped as one undo unit). Concurrent
+    // same-cell typing now merges char-level instead of LWW-losing a peer.
+    let paragraph_ix = self.table_cell_block_ix;
+    // `None` = cell ineligible for the fine path (fall back to whole-cell);
+    // `Some(committed)` = the fine path handled it (even a rejected op stays
+    // on the fine path — falling back after a partial commit would
+    // double-apply).
+    let fine = 'fine: {
+      let grouped = selection_range.is_some();
+      if grouped {
+        self.begin_undo_group();
+      }
+      let mut deleted_ok = true;
+      if let Some(range) = selection_range.clone() {
+        match self.write_table_cell_text(
+          crate::local_intents::TableCellTextOp::Delete {
+            start: (paragraph_ix, range.start),
+            end: (paragraph_ix, range.end),
+          },
+          cx,
+        ) {
+          Some(true) => {},
+          Some(false) => deleted_ok = false,
+          None => {
+            if grouped {
+              self.end_undo_group();
+            }
+            break 'fine None;
+          },
+        }
+      }
+      let result = if deleted_ok {
+        self.write_table_cell_text(
+          crate::local_intents::TableCellTextOp::Insert {
+            paragraph: paragraph_ix,
+            byte: insert_at,
+            text: text.to_string(),
+            style_override: (styles != RunStyles::default()).then_some(styles),
+          },
+          cx,
+        )
+      } else {
+        Some(false)
+      };
+      if grouped {
+        self.end_undo_group();
+      }
+      result
+    };
+    if let Some(committed) = fine {
+      if committed {
+        self.table_cell_caret = insert_at.saturating_add(text.len());
+        self.table_cell_anchor = self.table_cell_caret;
+      }
+      return true;
+    }
     let committed = self.edit_table_cell_paragraph(block_ix, row_ix, cell_ix, cx, |paragraph| {
       if let Some(range) = selection_range.clone() {
         delete_range_in_table_cell_paragraph(paragraph, range);
@@ -47,6 +142,25 @@ impl RichTextEditor {
     };
     let paragraph_ix = self.table_cell_block_ix;
     let caret = self.table_cell_caret;
+    // B-S4: fine-grained boundary split.
+    let inherited_style = self
+      .selected_table_cell_paragraph()
+      .map(|paragraph| paragraph.paragraph.style)
+      .unwrap_or(ParagraphStyle::Normal);
+    if let Some(committed) = self.write_table_cell_text(
+      crate::local_intents::TableCellTextOp::Split {
+        at: (paragraph_ix, caret),
+        inherited_style,
+      },
+      cx,
+    ) {
+      if committed {
+        self.table_cell_block_ix = paragraph_ix + 1;
+        self.table_cell_caret = 0;
+        cx.notify();
+      }
+      return true;
+    }
     let mut new_paragraph_ix = None;
     let committed = self.edit_table_cell(block_ix, row_ix, cell_ix, cx, |cell| {
       new_paragraph_ix = split_table_cell_paragraph_at(cell, paragraph_ix, caret);
@@ -133,6 +247,44 @@ impl RichTextEditor {
       return false;
     };
     let caret = self.table_cell_caret;
+    // B-S4: fine-grained path — a one-char delete op / a boundary join op.
+    if caret == 0 && self.table_cell_block_ix > 0 {
+      let second = self.table_cell_block_ix;
+      let previous_len = self
+        .selected_table_cell_paragraph_text(second - 1)
+        .map(|text| text.len())
+        .unwrap_or(0);
+      if let Some(committed) = self.write_table_cell_text(crate::local_intents::TableCellTextOp::Join { second }, cx) {
+        if committed {
+          self.table_cell_block_ix = second - 1;
+          self.table_cell_caret = previous_len;
+          cx.notify();
+        }
+        return true;
+      }
+    } else if caret > 0
+      && let Some(text) = self.selected_table_cell_text()
+    {
+      let caret_clamped = caret.min(text.len());
+      let prev = text[..caret_clamped]
+        .char_indices()
+        .next_back()
+        .map(|(byte, _)| byte)
+        .unwrap_or(0);
+      let paragraph_ix = self.table_cell_block_ix;
+      if let Some(committed) = self.write_table_cell_text(
+        crate::local_intents::TableCellTextOp::Delete {
+          start: (paragraph_ix, prev),
+          end: (paragraph_ix, caret_clamped),
+        },
+        cx,
+      ) {
+        if committed {
+          self.table_cell_caret = prev;
+        }
+        return true;
+      }
+    }
     if caret == 0 {
       let mut merged_caret = None;
       let current_paragraph_ix = self.table_cell_block_ix;
@@ -195,6 +347,20 @@ impl RichTextEditor {
       caret
     };
     if next > caret {
+      // B-S4: fine-grained one-char delete.
+      let paragraph_ix = self.table_cell_block_ix;
+      if let Some(committed) = self.write_table_cell_text(
+        crate::local_intents::TableCellTextOp::Delete {
+          start: (paragraph_ix, caret),
+          end: (paragraph_ix, next),
+        },
+        cx,
+      ) {
+        if committed {
+          self.table_cell_caret = caret;
+        }
+        return true;
+      }
       let committed = self.edit_table_cell_paragraph(block_ix, row_ix, cell_ix, cx, |paragraph| {
         delete_range_in_table_cell_paragraph(paragraph, caret..next);
       });

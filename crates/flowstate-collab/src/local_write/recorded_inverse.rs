@@ -158,6 +158,15 @@ enum RecordedMutation {
   },
   /// B-S2: delete an object block through the `DeleteBlocks` executor.
   DeleteObjectBlock { block_id: BlockId },
+  /// B-S4: splice a table cell's flow text (either direction) — the undo
+  /// shape for cell typing. Body-position-stable (the table's placeholder
+  /// never moves); the flow id re-fetches the container at replay.
+  SpliceCellText {
+    flow_id: String,
+    start: usize,
+    delete_len: usize,
+    insert: Vec<TextDelta>,
+  },
 }
 
 /// One rich splice: replace `[start, start+delete_len)` with `insert` (a
@@ -302,8 +311,59 @@ pub(crate) fn capture_before_execute(core: &CrdtRuntime, plan: &ResolvedPlan) ->
     ResolvedPlan::SetImageLayout { .. } => capture_image_layout(core, plan),
     ResolvedPlan::InsertObject { .. } => capture_insert_object(core, plan),
     ResolvedPlan::DeleteBlocks { .. } => capture_delete_blocks(core, plan),
+    // B-S4: cell typing captures like body typing — insert/delete splices on
+    // the cell's flow text. Cell split/join/marks stay uncaptured (slow path).
+    ResolvedPlan::TableCellText(_) => capture_cell_text(core, plan),
     _ => None,
   }
+}
+
+fn capture_cell_text(core: &CrdtRuntime, plan: &ResolvedPlan) -> Option<PendingInverseCapture> {
+  use super::table_cell_text::{ResolvedCellTextOp, flow_text_by_id};
+  let ResolvedPlan::TableCellText(cell_plan) = plan else {
+    return None;
+  };
+  let placeholder = block_placeholder_unicode(core, cell_plan.table_ix);
+  let (undo_splice, redo_splice) = match &cell_plan.op {
+    ResolvedCellTextOp::Insert { pos, text, style_override } => {
+      let len = text.chars().count();
+      let attributes = style_override.and_then(flowstate_document::loro_import::run_style_attributes);
+      (
+        (*pos, len, Vec::new()),
+        (
+          *pos,
+          0,
+          vec![TextDelta::Insert {
+            insert: text.clone(),
+            attributes,
+          }],
+        ),
+      )
+    },
+    ResolvedCellTextOp::Delete { pos, len } => {
+      let text = flow_text_by_id(core.doc(), &cell_plan.flow_id)?;
+      let restore = text.slice_delta(*pos, *pos + *len, PosType::Unicode).ok()?;
+      ((*pos, 0, restore), (*pos, *len, Vec::new()))
+    },
+    _ => return None,
+  };
+  let splice = |(start, delete_len, insert): (usize, usize, Vec<TextDelta>)| RecordedMutation::SpliceCellText {
+    flow_id: cell_plan.flow_id.clone(),
+    start,
+    delete_len,
+    insert,
+  };
+  Some(PendingInverseCapture {
+    undo: RecordedDelta {
+      mutation: splice(undo_splice),
+      reproject: Reproject::Derive,
+      invalidation_ranges: vec![(placeholder, 1)],
+    },
+    redo_mutation: splice(redo_splice),
+    redo_invalidation_ranges: vec![(placeholder, 1)],
+    redo_derive: true,
+    redo_replace_finalize: None,
+  })
 }
 
 /// B-S2: the body-unicode position of a block's placeholder — the invalidation
@@ -1286,7 +1346,8 @@ fn delta_min_coordinate(delta: &RecordedDelta) -> Option<usize> {
     | RecordedMutation::SetImageAltText { .. }
     | RecordedMutation::SetImageLayout { .. }
     | RecordedMutation::InsertObjectBlock { .. }
-    | RecordedMutation::DeleteObjectBlock { .. } => {},
+    | RecordedMutation::DeleteObjectBlock { .. }
+    | RecordedMutation::SpliceCellText { .. } => {},
   }
   for (start, _) in &delta.invalidation_ranges {
     fold(*start);
@@ -1331,7 +1392,8 @@ fn shift_delta_coordinates(delta: &mut RecordedDelta, by: isize) -> bool {
     | RecordedMutation::SetImageAltText { .. }
     | RecordedMutation::SetImageLayout { .. }
     | RecordedMutation::InsertObjectBlock { .. }
-    | RecordedMutation::DeleteObjectBlock { .. } => true,
+    | RecordedMutation::DeleteObjectBlock { .. }
+    | RecordedMutation::SpliceCellText { .. } => true,
   };
   mutation_ok
     && delta
@@ -1994,6 +2056,29 @@ fn apply_recorded_mutation(core: &mut CrdtRuntime, kind: UndoOrRedo) -> Result<(
       if !delete_projection_object_block(&doc, *block_id).context("replaying recorded-inverse object delete")? {
         anyhow::bail!("recorded-inverse object delete reported no-op");
       }
+    },
+    RecordedMutation::SpliceCellText {
+      flow_id,
+      start,
+      delete_len,
+      insert,
+    } => {
+      let text = super::table_cell_text::flow_text_by_id(&doc, flow_id)
+        .ok_or_else(|| anyhow::anyhow!("recorded-inverse cell flow vanished"))?;
+      let mut delta = Vec::with_capacity(insert.len() + 2);
+      if *start > 0 {
+        delta.push(TextDelta::Retain {
+          retain: *start,
+          attributes: None,
+        });
+      }
+      if *delete_len > 0 {
+        delta.push(TextDelta::Delete { delete: *delete_len });
+      }
+      delta.extend(insert.iter().cloned());
+      text
+        .apply_delta(&delta)
+        .context("applying recorded-inverse cell text splice")?;
     },
   }
   Ok(())

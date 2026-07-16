@@ -5,11 +5,18 @@ use serde::{Deserialize, Serialize};
 
 use crate::ids::{BlobId, SessionId};
 
-/// Version 4 adds the session's document kind (rich text vs flow) to the
+/// Version 5 fences the B-S4 cell-flow schema (.db8 `LORO_SCHEMA_VERSION` 2):
+/// an old binary in a v2 session would silently corrupt the doc — its
+/// whole-cell writer destroys in-cell records and its repair passes fight the
+/// new shape — so the wire refuses the pairing outright, with the existing
+/// direction-aware upgrade message. COUPLED with
+/// `flowstate_document::LORO_SCHEMA_VERSION` — bump both together (unit test
+/// `wire_and_schema_versions_bump_together` enforces the pair).
+/// Version 4 added the session's document kind (rich text vs flow) to the
 /// ticket, inside the authenticated metadata. Version 3 used symmetric,
 /// session-lifetime editor admission. Pre-release protocol versions are
 /// intentionally not accepted.
-pub const PROTOCOL_VERSION: u16 = 4;
+pub const PROTOCOL_VERSION: u16 = 5;
 pub const GOSSIP_INLINE_LIMIT: usize = 2 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -84,4 +91,22 @@ pub fn decode(bytes: &[u8]) -> Result<GossipMsg> {
     return Err(ProtocolVersionMismatch { version }.into());
   }
   Ok(postcard::from_bytes(&bytes[2..])?)
+}
+
+#[cfg(test)]
+mod version_fence_tests {
+  use super::PROTOCOL_VERSION;
+
+  /// B-S4 THE FENCE PAIR: a .db8 schema bump without a wire bump lets an old
+  /// binary join a session it will silently corrupt (whole-cell writer +
+  /// old-shape repairs against the new schema). If this fails, you bumped one
+  /// constant without the other — read the doc comments on BOTH.
+  #[test]
+  fn wire_and_schema_versions_bump_together() {
+    assert_eq!(
+      (PROTOCOL_VERSION, flowstate_document::LORO_SCHEMA_VERSION),
+      (5, 2),
+      "PROTOCOL_VERSION and LORO_SCHEMA_VERSION are a coupled pair — bump them together"
+    );
+  }
 }
