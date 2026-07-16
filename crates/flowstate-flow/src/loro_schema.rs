@@ -32,6 +32,8 @@ pub const ANNOTATIONS_MAP: &str = "flow.annotations";
 /// C-S2: flow comment threads (the .db8 `comments_by_id` shape, cell-anchored).
 /// `flow.annotations` was taken — it holds ink strokes.
 pub const COMMENTS_BY_ID: &str = "flow.comments_by_id";
+/// H-S6: the checkpoint records (named pins / session saves / auto grain).
+pub const CHECKPOINTS_LIST: &str = "flow.checkpoints";
 pub const CELL_ORDER_KEY: &str = "cell_order";
 pub const CELL_FLOW_KEY: &str = "flow";
 pub const CELL_PARAGRAPHS_KEY: &str = "paragraphs_by_id";

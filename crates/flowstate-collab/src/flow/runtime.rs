@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 use flowstate_flow::{
   CellId, CellSummary, FlowBoardProjection, FlowDefect, FlowDocument, FlowIntent, MaterializedBoard, board_from_loro_cached, loro_schema, mutate,
 };
-use loro::{ContainerID, ContainerTrait as _, ExportMode, LoroDoc, Subscription, UndoManager, VersionVector};
+use loro::{ContainerID, ContainerTrait as _, ExportMode, Frontiers, LoroDoc, Subscription, UndoManager, VersionVector};
 use rustc_hash::FxHashMap;
 use uuid::Uuid;
 
@@ -612,6 +612,16 @@ impl FlowRuntime {
 /// [`CellId`]. Cell moves/re-parenting never orphan (the id survives); only
 /// cell deletion does, and `cell_alive` reports it while the quoted text and
 /// birth frontier keep the thread readable + history-jumpable (C-S6).
+/// H-S6: one flow checkpoint record (the .fl0 mirror of a .db8 revision).
+#[derive(Clone, Debug, PartialEq)]
+pub struct FlowCheckpoint {
+  pub checkpoint_id: u128,
+  pub title: String,
+  pub kind: flowstate_document::RevisionKind,
+  pub frontier: Vec<u8>,
+  pub created_at_unix_secs: i64,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct FlowCommentThread {
   pub comment_id: u128,
@@ -816,6 +826,185 @@ impl FlowRuntime {
   fn existing_flow_thread(&self, comment_id: u128) -> anyhow::Result<loro::LoroMap> {
     let comments = self.comments_map();
     crate::crdt_runtime::existing_child_map(&comments, &comment_id.to_string())
+  }
+
+  // ---- H-S6: flow history parity — the checkpoint subtree ------------------
+
+  /// The `flow.checkpoints` records, oldest-first. Same tiering as .db8
+  /// revisions (named pins / session saves / autosave grain).
+  pub fn flow_checkpoints(&self) -> Vec<FlowCheckpoint> {
+    let list = self.doc.get_list(flowstate_flow::loro_schema::CHECKPOINTS_LIST);
+    let mut checkpoints = Vec::with_capacity(list.len());
+    for index in 0..list.len() {
+      let Some(loro::ValueOrContainer::Container(loro::Container::Map(record))) = list.get(index) else {
+        continue;
+      };
+      let get_string = |key: &str| match record.get(key) {
+        Some(loro::ValueOrContainer::Value(loro::LoroValue::String(value))) => Some(value.to_string()),
+        _ => None,
+      };
+      let Some(checkpoint_id) = get_string("id").and_then(|id| id.parse::<u128>().ok()) else {
+        continue;
+      };
+      let frontier = match record.get("frontier") {
+        Some(loro::ValueOrContainer::Value(loro::LoroValue::Binary(bytes))) => bytes.to_vec(),
+        _ => continue,
+      };
+      let created_at_unix_secs = match record.get("timestamp") {
+        Some(loro::ValueOrContainer::Value(loro::LoroValue::I64(value))) => value,
+        _ => 0,
+      };
+      checkpoints.push(FlowCheckpoint {
+        checkpoint_id,
+        title: get_string("title").unwrap_or_else(|| "Checkpoint".to_string()),
+        kind: flowstate_document::RevisionKind::from_str_or_session(&get_string("kind").unwrap_or_default()),
+        frontier,
+        created_at_unix_secs,
+      });
+    }
+    checkpoints
+  }
+
+  /// Mint a checkpoint record at the CURRENT content frontier.
+  pub fn create_flow_checkpoint(
+    &mut self,
+    title: Option<&str>,
+    kind: flowstate_document::RevisionKind,
+  ) -> anyhow::Result<u128> {
+    let frontier = self.doc.state_frontiers().encode();
+    self.create_flow_checkpoint_at(frontier, title, kind)
+  }
+
+  /// Restore support: re-mint a checkpoint record the revert erased,
+  /// preserving its identity and stamp.
+  fn remint_flow_checkpoint(&mut self, record: &FlowCheckpoint) -> anyhow::Result<()> {
+    let vv_before = self.doc.oplog_vv();
+    let list = self.doc.get_list(flowstate_flow::loro_schema::CHECKPOINTS_LIST);
+    let entry = list.insert_container(list.len(), loro::LoroMap::new())?;
+    entry.insert("id", record.checkpoint_id.to_string())?;
+    entry.insert("title", record.title.as_str())?;
+    entry.insert("kind", record.kind.as_str())?;
+    entry.insert("frontier", loro::LoroValue::Binary(record.frontier.clone().into()))?;
+    entry.insert("timestamp", record.created_at_unix_secs)?;
+    self.doc.set_next_commit_origin("meta");
+    self.doc.commit();
+    self.queue_local_update(&vv_before)?;
+    Ok(())
+  }
+
+  /// The record commits at the current head but points at an explicit
+  /// frontier — restore mints its safety pin AFTER the revert.
+  fn create_flow_checkpoint_at(
+    &mut self,
+    frontier: Vec<u8>,
+    title: Option<&str>,
+    kind: flowstate_document::RevisionKind,
+  ) -> anyhow::Result<u128> {
+    let checkpoint_id = uuid::Uuid::new_v4().as_u128();
+    let vv_before = self.doc.oplog_vv();
+    let list = self.doc.get_list(flowstate_flow::loro_schema::CHECKPOINTS_LIST);
+    let record = list.insert_container(list.len(), loro::LoroMap::new())?;
+    record.insert("id", checkpoint_id.to_string())?;
+    record.insert(
+      "title",
+      title
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .unwrap_or(kind.default_title()),
+    )?;
+    record.insert("kind", kind.as_str())?;
+    record.insert("frontier", loro::LoroValue::Binary(frontier.into()))?;
+    record.insert(
+      "timestamp",
+      std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs() as i64),
+    )?;
+    // Meta origin: checkpoint records are undo-inert, like .db8 revisions.
+    self.doc.set_next_commit_origin("meta");
+    self.doc.commit();
+    self.queue_local_update(&vv_before)?;
+    Ok(checkpoint_id)
+  }
+
+  /// Rename PINS (kind → named), mirroring the .db8 law.
+  pub fn rename_flow_checkpoint(&mut self, checkpoint_id: u128, title: &str) -> anyhow::Result<()> {
+    let title = title.trim();
+    anyhow::ensure!(!title.is_empty(), "A checkpoint name cannot be empty");
+    let vv_before = self.doc.oplog_vv();
+    let list = self.doc.get_list(flowstate_flow::loro_schema::CHECKPOINTS_LIST);
+    let wanted = checkpoint_id.to_string();
+    for index in 0..list.len() {
+      let Some(loro::ValueOrContainer::Container(loro::Container::Map(record))) = list.get(index) else {
+        continue;
+      };
+      let matches = matches!(
+        record.get("id"),
+        Some(loro::ValueOrContainer::Value(loro::LoroValue::String(id))) if id.as_str() == wanted
+      );
+      if !matches {
+        continue;
+      }
+      record.insert("title", title)?;
+      record.insert("kind", flowstate_document::RevisionKind::Named.as_str())?;
+      self.doc.set_next_commit_origin("meta");
+      self.doc.commit();
+      self.queue_local_update(&vv_before)?;
+      return Ok(());
+    }
+    anyhow::bail!("That checkpoint no longer exists")
+  }
+
+  /// H-S6 restore, under the same LAW as .db8: a named safety pin of the
+  /// present first, then `revert_to` as ordinary local ops — one-step
+  /// undoable, and peers converge on a normal edit. The whole board and every
+  /// open cell refresh.
+  pub fn restore_flow_frontier(&mut self, frontier: &[u8]) -> anyhow::Result<()> {
+    let target = Frontiers::decode(frontier).map_err(|error| anyhow::anyhow!("decoding flow frontier for restore: {error}"))?;
+    if self.doc.state_frontiers() == target {
+      return Ok(());
+    }
+    let pre_restore_frontier = self.doc.state_frontiers().encode();
+    // Flow checkpoint records live IN the doc, so the revert erases every
+    // record minted after the target — snapshot them for re-minting.
+    let records_before = self.flow_checkpoints();
+    let vv_before = self.doc.oplog_vv();
+    self
+      .doc
+      .revert_to(&target)
+      .map_err(|error| anyhow::anyhow!("reverting flow document to historical frontier: {error}"))?;
+    // revert_to leaves its ops in the pending txn: commit them with the
+    // default (undoable) origin before any meta re-minting below.
+    self.doc.commit();
+    // Re-mint the records the revert erased (only this peer writes them, so
+    // there is no concurrent-duplicate hazard), then the safety pin of the
+    // present — minted AFTER the revert, pointing at the pre-restore
+    // frontier, riding the same publish window.
+    let surviving: std::collections::HashSet<u128> = self
+      .flow_checkpoints()
+      .iter()
+      .map(|checkpoint| checkpoint.checkpoint_id)
+      .collect();
+    for record in records_before {
+      if !surviving.contains(&record.checkpoint_id) {
+        self.remint_flow_checkpoint(&record)?;
+      }
+    }
+    self.create_flow_checkpoint_at(pre_restore_frontier, Some("Before restore"), flowstate_document::RevisionKind::Named)?;
+    self.touch_modified_meta();
+    self.queue_local_update(&vv_before)?;
+    self.refresh(None)?;
+    self.push_board_stream();
+    let cells: Vec<CellId> = self
+      .board
+      .sheets
+      .iter()
+      .flat_map(|sheet| sheet.cells.iter().map(|cell| cell.id))
+      .collect();
+    for cell in cells {
+      self.push_cell_replace(cell);
+    }
+    Ok(())
   }
 
   /// One commit (origin `comment`), modified-meta touch, publish — the same

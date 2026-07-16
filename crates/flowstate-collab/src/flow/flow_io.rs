@@ -24,7 +24,7 @@ use async_channel::{Receiver, Sender};
 use flowstate_flow::FlowBoardProjection;
 use loro::{ExportMode, VersionVector};
 
-use super::runtime::{FlowCommentThread, FlowPublishEvent, FlowRuntime};
+use super::runtime::{FlowCheckpoint, FlowCommentThread, FlowPublishEvent, FlowRuntime};
 use flowstate_flow::CellId;
 use crate::io_util::{gate_call, send_reply};
 use crate::local_write::{GateHolder, WriteGate};
@@ -108,6 +108,25 @@ pub enum FlowIoRequest {
     actor_user_id: u128,
     reply: ReplySender<()>,
   },
+  /// H-S6: the checkpoint subtree — full .db8 history parity.
+  Checkpoints {
+    reply: ReplySender<Vec<FlowCheckpoint>>,
+  },
+  CreateCheckpoint {
+    title: Option<String>,
+    kind: flowstate_document::RevisionKind,
+    reply: ReplySender<u128>,
+  },
+  RenameCheckpoint {
+    checkpoint_id: u128,
+    title: String,
+    reply: ReplySender<()>,
+  },
+  /// Restore under the .db8 law: safety pin first, forward op, undoable.
+  RestoreFrontier {
+    frontier: Vec<u8>,
+    reply: ReplySender<()>,
+  },
 }
 
 fn io_request_kind(request: &FlowIoRequest) -> &'static str {
@@ -127,6 +146,10 @@ fn io_request_kind(request: &FlowIoRequest) -> &'static str {
     FlowIoRequest::EditCommentMessage { .. } => "edit-comment-message",
     FlowIoRequest::DeleteCommentMessage { .. } => "delete-comment-message",
     FlowIoRequest::DeleteComment { .. } => "delete-comment",
+    FlowIoRequest::Checkpoints { .. } => "checkpoints",
+    FlowIoRequest::CreateCheckpoint { .. } => "create-checkpoint",
+    FlowIoRequest::RenameCheckpoint { .. } => "rename-checkpoint",
+    FlowIoRequest::RestoreFrontier { .. } => "restore-frontier",
   }
 }
 
@@ -211,6 +234,28 @@ impl FlowIoHandle {
 
   pub async fn comments(&self) -> Result<Vec<FlowCommentThread>> {
     self.request(|reply| FlowIoRequest::Comments { reply }).await
+  }
+
+  pub async fn checkpoints(&self) -> Result<Vec<FlowCheckpoint>> {
+    self.request(|reply| FlowIoRequest::Checkpoints { reply }).await
+  }
+
+  pub async fn create_checkpoint(&self, title: Option<String>, kind: flowstate_document::RevisionKind) -> Result<u128> {
+    self
+      .request(|reply| FlowIoRequest::CreateCheckpoint { title, kind, reply })
+      .await
+  }
+
+  pub async fn rename_checkpoint(&self, checkpoint_id: u128, title: String) -> Result<()> {
+    self
+      .request(|reply| FlowIoRequest::RenameCheckpoint { checkpoint_id, title, reply })
+      .await
+  }
+
+  pub async fn restore_frontier(&self, frontier: Vec<u8>) -> Result<()> {
+    self
+      .request(|reply| FlowIoRequest::RestoreFrontier { frontier, reply })
+      .await
   }
 
   pub async fn create_comment(
@@ -409,6 +454,31 @@ fn io_loop(core: &Arc<WriteGate<FlowRuntime>>, receiver: &Receiver<FlowIoRequest
       },
       FlowIoRequest::Comments { reply } => {
         send_reply(&reply, gate_call(core, GateHolder::DocumentService, |runtime| Ok(runtime.flow_comments())));
+      },
+      FlowIoRequest::Checkpoints { reply } => {
+        send_reply(&reply, gate_call(core, GateHolder::DocumentService, |runtime| Ok(runtime.flow_checkpoints())));
+      },
+      FlowIoRequest::CreateCheckpoint { title, kind, reply } => {
+        send_reply(
+          &reply,
+          gate_call(core, GateHolder::DocumentService, |runtime| {
+            runtime.create_flow_checkpoint(title.as_deref(), kind)
+          }),
+        );
+      },
+      FlowIoRequest::RenameCheckpoint { checkpoint_id, title, reply } => {
+        send_reply(
+          &reply,
+          gate_call(core, GateHolder::DocumentService, |runtime| {
+            runtime.rename_flow_checkpoint(checkpoint_id, &title)
+          }),
+        );
+      },
+      FlowIoRequest::RestoreFrontier { frontier, reply } => {
+        send_reply(
+          &reply,
+          gate_call(core, GateHolder::DocumentService, |runtime| runtime.restore_flow_frontier(&frontier)),
+        );
       },
       FlowIoRequest::CreateComment {
         cell,

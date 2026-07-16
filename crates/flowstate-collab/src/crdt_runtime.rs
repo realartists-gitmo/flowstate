@@ -4257,8 +4257,16 @@ impl CrdtRuntime {
   /// H-S4: mint a named pin at the CURRENT frontier without touching disk —
   /// the restore safety checkpoint. Thinning-exempt by kind.
   pub fn mint_named_pin_now(&mut self, title: &str) -> Result<u128> {
-    let revision_id = Uuid::new_v4().as_u128();
     let frontiers = self.doc.state_frontiers();
+    self.mint_named_pin_at(&frontiers, title)
+  }
+
+  /// H-S4: the pin record commits at the CURRENT head but points at an
+  /// explicit (possibly historical) frontier — restore mints AFTER the
+  /// revert, or the revert would erase the record itself.
+  fn mint_named_pin_at(&mut self, frontiers: &Frontiers, title: &str) -> Result<u128> {
+    let revision_id = Uuid::new_v4().as_u128();
+    let frontiers = frontiers.clone();
     match &mut self.package {
       Some(package) => {
         // Writes the doc-side record, persists it as a journaled segment, and
@@ -4303,7 +4311,6 @@ impl CrdtRuntime {
     if current == target {
       return Ok(Vec::new());
     }
-    self.mint_named_pin_now("Before restore")?;
     let from_frontier = self.doc.state_frontiers();
     let from_vv = self.doc.state_vv();
     flowstate_document::touch_document_metadata(&self.doc).context("updating document metadata for restore")?;
@@ -4315,6 +4322,26 @@ impl CrdtRuntime {
       .revert_to(&target)
       .map_err(|error| anyhow::anyhow!(error.to_string()))
       .context("reverting document to historical frontier")?;
+    // revert_to leaves its ops in the pending txn: commit them NOW with the
+    // default (undoable) origin — otherwise they'd ride the pin's meta commit
+    // and become undo-inert.
+    self.doc.commit();
+    // LAW: the safety pin of the PRESENT — minted AFTER the revert (a record
+    // minted before it would be reverted away with everything else) but
+    // pointing at the pre-restore frontier. Record-only here: the pin's ops
+    // ride the SAME export/persist window as the revert below (a separate
+    // segment append would break the persisted-tip chain), and the package
+    // manifest syncs from the doc records afterwards.
+    let pin_id = Uuid::new_v4().as_u128();
+    flowstate_document::record_revision(
+      &self.doc,
+      pin_id,
+      current.encode(),
+      "Before restore",
+      flowstate_document::RevisionKind::Named,
+      self.author_user_id,
+    )
+    .map_err(|error| anyhow::anyhow!(error))?;
     let mut projection_invalidation = ProjectionInvalidation {
       frontier_before: from_frontier.encode(),
       frontier_after: self.doc.state_frontiers().encode(),
@@ -4327,6 +4354,14 @@ impl CrdtRuntime {
     let drained = self.merge_subscription_invalidation(&mut projection_invalidation);
     let mut events = self.events_after_local_change(from_frontier, from_vv, projection_invalidation.clone(), false)?;
     self.derive_body_projection_events(projection_invalidation, &drained, "restore", &mut events)?;
+    // Manifest entry for the safety pin (segment-less — the ops persisted in
+    // the shared window above).
+    if let Some(package) = &mut self.package {
+      package
+        .sync_revisions_from_loro(&self.doc)
+        .map_err(|error| anyhow::anyhow!(error))
+        .context("syncing the restore safety pin into the package manifest")?;
+    }
     Ok(events)
   }
 

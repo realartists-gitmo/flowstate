@@ -756,6 +756,98 @@ fn history_scrubber_replays_the_lamport_prefix() {
   );
 }
 
+// ---- H-S6/H-S7: flow checkpoints converge; restore obeys the .db8 law -----
+
+#[test]
+fn flow_checkpoints_converge_and_restore_pins_then_reverts_undoably() {
+  use flowstate_document::RevisionKind;
+  let (a, sheet) = handle_with_sheet();
+  let cell = add_cell(&a, sheet, CellPlacement::SheetEnd { column_index: 0 }, "alpha");
+  let snapshot = {
+    let guard = a.gate().lock(GateHolder::DocumentService).unwrap();
+    guard.snapshot_bytes().unwrap()
+  };
+  let (b, _gate_b) = FlowDocHandle::new(FlowRuntime::from_snapshot(&snapshot).unwrap());
+  {
+    let mut guard = a.gate().lock(GateHolder::DocumentService).unwrap();
+    let _ = guard.take_pending_publish();
+  }
+
+  // Checkpoint at "alpha", then grow the board.
+  let (checkpoint_id, historical_frontier) = {
+    let mut guard = a.gate().lock(GateHolder::DocumentService).unwrap();
+    let id = guard.create_flow_checkpoint(None, RevisionKind::Session).unwrap();
+    let frontier = guard
+      .flow_checkpoints()
+      .iter()
+      .find(|checkpoint| checkpoint.checkpoint_id == id)
+      .expect("checkpoint recorded")
+      .frontier
+      .clone();
+    drop(guard);
+    (id, frontier)
+  };
+  let _second_cell = add_cell(&a, sheet, CellPlacement::SheetEnd { column_index: 0 }, "beta");
+
+  // Rename PINS.
+  let mut rename_guard = a.gate().lock(GateHolder::DocumentService).unwrap();
+  rename_guard.rename_flow_checkpoint(checkpoint_id, "Before the block").unwrap();
+  drop(rename_guard);
+
+  // Restore to the checkpoint: the law demands a safety pin of the present
+  // first, then a forward op.
+  let mut guard = a.gate().lock(GateHolder::DocumentService).unwrap();
+  guard.restore_flow_frontier(&historical_frontier).unwrap();
+    let board = guard.board();
+    assert_eq!(board.sheets[0].cells.len(), 1, "the board reads as it did at the checkpoint");
+    assert!(board.sheets[0].cells.iter().any(|c| c.id == cell));
+    let checkpoints = guard.flow_checkpoints();
+    assert!(
+      checkpoints
+        .iter()
+        .any(|checkpoint| checkpoint.kind == RevisionKind::Named && checkpoint.title == "Before restore"),
+      "flow restore is always preceded by a safety checkpoint"
+    );
+    assert!(
+      checkpoints
+        .iter()
+        .any(|checkpoint| checkpoint.checkpoint_id == checkpoint_id
+          && checkpoint.kind == RevisionKind::Named
+          && checkpoint.title == "Before the block"),
+      "rename pins the record"
+    );
+  drop(guard);
+
+  // Convergence: B imports everything and agrees on board + checkpoints.
+  let from_a: Vec<Vec<u8>> = {
+    let mut guard = a.gate().lock(GateHolder::DocumentService).unwrap();
+    guard
+      .take_pending_publish()
+      .into_iter()
+      .map(|FlowPublishEvent::LocalUpdate { bytes, .. }| bytes)
+      .collect()
+  };
+  let mut guard = b.gate().lock(GateHolder::DocumentService).unwrap();
+  let blobs: Vec<&[u8]> = from_a.iter().map(Vec::as_slice).collect();
+    guard.import_remote_updates(&blobs).unwrap();
+    assert_eq!(guard.board().sheets[0].cells.len(), 1, "the restore converges like a normal edit");
+    assert_eq!(
+      guard.flow_checkpoints(),
+      {
+        let guard_a = a.gate().lock(GateHolder::DocumentService).unwrap();
+        guard_a.flow_checkpoints()
+      },
+      "checkpoint records converge"
+    );
+  drop(guard);
+
+  // Forward op: one undo on A returns the pre-restore board.
+  let mut undo_guard = a.gate().lock(GateHolder::DocumentService).unwrap();
+  assert!(undo_guard.undo().unwrap(), "restore is undoable");
+  assert_eq!(undo_guard.board().sheets[0].cells.len(), 2, "undo returns the pre-restore board");
+  drop(undo_guard);
+}
+
 // ---- C-S2: flow comments converge like any other flow state ---------------
 
 #[test]
