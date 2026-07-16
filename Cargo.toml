@@ -12,6 +12,7 @@ publish = false
 
 [workspace.dependencies]
 anyhow = "1.0.102"
+arboard = "3"
 async-channel = "2"
 base64 = "0.22"
 clap = { version = "4.5", features = ["derive"] }

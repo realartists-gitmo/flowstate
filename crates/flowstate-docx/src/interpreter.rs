@@ -873,7 +873,7 @@ fn recognize_run_semantic(style_id: &str, styles: &StyleResolver) -> Option<RunS
 }
 
 #[hotpath::measure]
-fn run_semantic_from_canonical_name(name: &str) -> Option<RunSemanticStyle> {
+pub(crate) fn run_semantic_from_canonical_name(name: &str) -> Option<RunSemanticStyle> {
   match canonical_run_style_name(name) {
     Some("Style13ptBold") => Some(flowstate_document::SEMANTIC_CITE),
     Some("Emphasis") => Some(flowstate_document::SEMANTIC_EMPHASIS),
@@ -1103,7 +1103,7 @@ fn canonical_paragraph_style_name(name: &str) -> Option<&'static str> {
 }
 
 #[hotpath::measure]
-fn paragraph_style_from_canonical_name(name: &str) -> Option<ParagraphStyle> {
+pub(crate) fn paragraph_style_from_canonical_name(name: &str) -> Option<ParagraphStyle> {
   match canonical_paragraph_style_name(name) {
     Some("Heading1") => Some(flowstate_document::PARAGRAPH_POCKET),
     Some("Heading2") => Some(flowstate_document::PARAGRAPH_HAT),

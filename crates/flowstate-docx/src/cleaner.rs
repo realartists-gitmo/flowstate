@@ -56,7 +56,6 @@ pub struct DocxCleanStats {
   pub styles_removed: usize,
   pub paragraphs_restyled: usize,
   pub runs_restyled: usize,
-  pub hyperlinks_flattened: usize,
 }
 
 #[hotpath::measure]

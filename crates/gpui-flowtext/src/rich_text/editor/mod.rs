@@ -497,6 +497,12 @@ pub enum EditorContextTarget {
 /// (and applies standard right-click selection semantics); the host owns the
 /// menu itself, because its verbs reach workspace surfaces.
 pub type ContextMenuHook = Rc<dyn Fn(Point<Pixels>, EditorContextTarget, &mut Window, &mut App)>;
+
+/// R1-B: the host's recognized-style HTML paste provider. Called at paste
+/// time (after the internal rich-fragment path, before the plain-text
+/// flatten); returns paragraphs only when the platform `text/html` slot
+/// carries recognized style names — `None` keeps the paste plain.
+pub type HtmlPasteInterpreter = Rc<dyn Fn() -> Option<Vec<crate::InputParagraph>>>;
 pub type NativeExportHook = Rc<dyn Fn(PathBuf, DocumentExportFormat, Vec<AssetRecord>) -> Pin<Box<dyn Future<Output = io::Result<()>>>>>;
 pub type NativeRecoveryHook = Rc<dyn Fn(PathBuf) -> Pin<Box<dyn Future<Output = io::Result<()>>>>>;
 
@@ -967,6 +973,7 @@ pub struct RichTextEditor {
   reconciliation_recoveries: u64,
   native_save_hook: Option<NativeSaveHook>,
   context_menu_hook: Option<ContextMenuHook>,
+  html_paste_interpreter: Option<HtmlPasteInterpreter>,
   native_export_hook: Option<NativeExportHook>,
   native_recovery_hook: Option<NativeRecoveryHook>,
   collaboration_role: Option<CollaborationRole>,

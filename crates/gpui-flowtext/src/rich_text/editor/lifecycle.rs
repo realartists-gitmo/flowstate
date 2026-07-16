@@ -84,6 +84,7 @@ impl RichTextEditor {
       reconciliation_recoveries: 0,
       native_save_hook: None,
       context_menu_hook: None,
+      html_paste_interpreter: None,
       native_export_hook: None,
       native_recovery_hook: None,
       collaboration_role: None,
@@ -319,6 +320,11 @@ impl RichTextEditor {
 
   pub fn set_context_menu_hook(&mut self, hook: Option<ContextMenuHook>) {
     self.context_menu_hook = hook;
+  }
+
+  /// R1-B: install the host's recognized-style HTML paste provider.
+  pub fn set_html_paste_interpreter(&mut self, hook: Option<HtmlPasteInterpreter>) {
+    self.html_paste_interpreter = hook;
   }
 
   pub fn set_native_save_hook(&mut self, hook: Option<NativeSaveHook>) {

@@ -57,6 +57,19 @@ fn install_equation_composer_opening(editor: &Entity<RichTextEditor>, window: &m
   .detach();
 }
 
+/// R1-B: read the platform's `text/html` clipboard slot through `arboard`
+/// (gpui cannot — `ClipboardEntry` is String|Image by construction) and hand
+/// back paragraphs ONLY when recognized .docx style names appear. Webpages
+/// carry no recognized names and stay plain.
+fn install_recognized_html_paste(editor: &Entity<RichTextEditor>, cx: &mut Context<Workspace>) {
+  editor.update(cx, |editor, _| {
+    editor.set_html_paste_interpreter(Some(Rc::new(|| {
+      let html = arboard::Clipboard::new().ok()?.get().html().ok()?;
+      flowstate_docx::paragraphs_from_recognized_html(&html)
+    })));
+  });
+}
+
 fn install_editor_refusal_reporting(editor: &Entity<RichTextEditor>, cx: &mut Context<Workspace>) {
   cx.subscribe(editor, |workspace, _, event: &crate::rich_text_element::EditorEvent, cx| {
     if let crate::rich_text_element::EditorEvent::Refused { message } = event {
@@ -434,6 +447,7 @@ impl Workspace {
     let editor = cx.new(|cx| RichTextEditor::new_with_path(document.clone(), path.clone(), cx));
     install_editor_context_menu(&editor, cx);
     install_editor_refusal_reporting(&editor, cx);
+    install_recognized_html_paste(&editor, cx);
     install_equation_composer_opening(&editor, window, cx);
     install_editor_write_authority(&editor, &attachment, document, cx);
     let workspace = cx.entity().downgrade();

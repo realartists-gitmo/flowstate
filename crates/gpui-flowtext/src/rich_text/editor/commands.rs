@@ -595,6 +595,28 @@ impl RichTextEditor {
         return;
       }
     }
+    // R1-B: recognized-style HTML — the host inspects the platform's
+    // text/html slot for the fixed style catalog (.docx names). `None` =
+    // fall through to the plain-text flatten (webpages STAY plain; the
+    // flattening is a feature, not a gap).
+    if let Some(interpreter) = self.html_paste_interpreter.clone()
+      && let Some(paragraphs) = interpreter()
+    {
+      let fragment = RichClipboardFragment {
+        format: RICH_TEXT_CLIPBOARD_FORMAT.to_string(),
+        paragraphs,
+        blocks: Vec::new(),
+        assets: Vec::new(),
+      };
+      if self.insert_rich_fragment_into_selected_table_cell(&fragment, cx) {
+        return;
+      }
+      if self.insert_rich_fragment_paste_at_caret(&fragment, cx) {
+        return;
+      }
+      self.apply_document_edit(cx, |editor, cx| editor.insert_rich_fragment(fragment, cx));
+      return;
+    }
     if let Some(text) = item.text() {
       if let Some(PasteCache::Plain { text: cached_text }) = &self.paste_cache
         && cached_text == &text

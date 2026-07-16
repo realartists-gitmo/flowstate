@@ -1,6 +1,7 @@
 mod cleaner;
 mod exporter;
 mod fragment_parse;
+mod html_paste;
 #[cfg(test)]
 mod import_roundtrip_tests;
 mod interpreter;
@@ -10,6 +11,7 @@ mod pdf_recovery;
 use std::{io, path::Path};
 
 pub use cleaner::{CleanAction, CleanedDocx, DocxCleanReport, DocxCleanStats, clean_docx_bytes};
+pub use html_paste::paragraphs_from_recognized_html;
 pub use exporter::{ExportWarning, convert_db8_to_docx, write_docx, write_docx_with_report};
 pub use interpreter::{
   DocxConversionReport, RecognitionRule, convert_cleaned_docx_to_document, convert_docx_bytes_to_document, convert_docx_to_document,
