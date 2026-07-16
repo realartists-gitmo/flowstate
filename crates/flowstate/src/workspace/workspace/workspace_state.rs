@@ -329,6 +329,10 @@ impl Workspace {
       let expand_workspace = workspace.clone();
       let collapse_workspace = workspace.clone();
       let copy_workspace = workspace.clone();
+      let select_workspace = workspace.clone();
+      let comment_workspace = workspace.clone();
+      let speech_workspace = workspace.clone();
+      let siblings_workspace = workspace.clone();
       menu
         .min_w(px(180.0))
         .item(
@@ -360,6 +364,47 @@ impl Workspace {
               workspace.outline_context_menu = None;
               if let Some(paragraph_ix) = paragraph_ix {
                 workspace.copy_outline_section_text(paragraph_ix, cx);
+              }
+            });
+          }),
+        )
+        // O-S6: the section toolkit.
+        .item(
+          PopupMenuItem::new("Select in editor").on_click(move |_, window, cx| {
+            let _ = select_workspace.update(cx, |workspace, cx| {
+              workspace.outline_context_menu = None;
+              if let Some(paragraph_ix) = paragraph_ix {
+                workspace.select_outline_section_in_editor(paragraph_ix, window, cx);
+              }
+            });
+          }),
+        )
+        .item(
+          PopupMenuItem::new("Comment on section").on_click(move |_, window, cx| {
+            let _ = comment_workspace.update(cx, |workspace, cx| {
+              workspace.outline_context_menu = None;
+              if let Some(paragraph_ix) = paragraph_ix {
+                workspace.comment_on_outline_section(paragraph_ix, window, cx);
+              }
+            });
+          }),
+        )
+        .item(
+          PopupMenuItem::new("Send section to speech").on_click(move |_, window, cx| {
+            let _ = speech_workspace.update(cx, |workspace, cx| {
+              workspace.outline_context_menu = None;
+              if let Some(paragraph_ix) = paragraph_ix {
+                workspace.send_outline_section_to_speech(paragraph_ix, window, cx);
+              }
+            });
+          }),
+        )
+        .item(
+          PopupMenuItem::new("Collapse siblings").on_click(move |_, _, cx| {
+            let _ = siblings_workspace.update(cx, |workspace, cx| {
+              workspace.outline_context_menu = None;
+              if let Some(paragraph_ix) = paragraph_ix {
+                workspace.collapse_outline_siblings(paragraph_ix, cx);
               }
             });
           }),
@@ -407,19 +452,27 @@ impl Workspace {
 
   /// O-S4: copy a section (heading through the last paragraph before the next
   /// heading at the same-or-higher level) to the clipboard as plain text.
-  pub(super) fn copy_outline_section_text(&mut self, paragraph_ix: usize, cx: &mut Context<Self>) {
-    let Some(editor) = self.active_editor.as_ref() else { return };
-    let Some(cache) = self.outline_cache.as_ref() else { return };
-    let Some(level) = cache.levels.get(&paragraph_ix).copied() else { return };
+  /// O-S4/O-S6: a heading's section extent — the heading through the last
+  /// paragraph before the next same-or-higher heading.
+  pub(super) fn outline_section_range(&self, paragraph_ix: usize, cx: &App) -> Option<(usize, usize)> {
+    let editor = self.active_editor.as_ref()?;
+    let cache = self.outline_cache.as_ref()?;
+    let level = cache.levels.get(&paragraph_ix).copied()?;
     let end = cache
       .levels
       .iter()
       .filter(|(ix, lvl)| **ix > paragraph_ix && **lvl <= level)
       .map(|(ix, _)| *ix)
-      .min();
+      .min()
+      .unwrap_or(editor.read(cx).document().paragraphs.len());
+    Some((paragraph_ix, end))
+  }
+
+  pub(super) fn copy_outline_section_text(&mut self, paragraph_ix: usize, cx: &mut Context<Self>) {
+    let Some((paragraph_ix, end)) = self.outline_section_range(paragraph_ix, cx) else { return };
+    let Some(editor) = self.active_editor.as_ref() else { return };
     let editor = editor.read(cx);
     let document = editor.document();
-    let end = end.unwrap_or(document.paragraphs.len());
     let text: Vec<String> = (paragraph_ix..end)
       .filter_map(|ix| {
         document
@@ -432,6 +485,70 @@ impl Workspace {
       return;
     }
     cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.join("\n")));
+  }
+
+  /// O-S6: select the whole section in the editor (and focus it).
+  pub(super) fn select_outline_section_in_editor(&mut self, paragraph_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+    let Some((start, end)) = self.outline_section_range(paragraph_ix, cx) else { return };
+    let Some(editor) = self.active_editor.clone() else { return };
+    editor.update(cx, |editor, cx| {
+      let last_paragraph = end.saturating_sub(1);
+      let end_byte = editor
+        .document()
+        .paragraphs
+        .get(last_paragraph)
+        .map_or(0, crate::rich_text_element::paragraph_text_len);
+      editor.set_selection(
+        crate::rich_text_element::EditorSelection::range(
+          crate::rich_text_element::DocumentOffset {
+            paragraph: start,
+            byte: 0,
+          },
+          crate::rich_text_element::DocumentOffset {
+            paragraph: last_paragraph,
+            byte: end_byte,
+          },
+        ),
+        cx,
+      );
+      editor.scroll_to_paragraph(start, window, cx);
+      editor.focus_handle(cx).focus(window);
+    });
+  }
+
+  /// O-S6: comment on the section — select it, open the comments rail; the
+  /// composer reads the live selection (C-S3's law).
+  pub(super) fn comment_on_outline_section(&mut self, paragraph_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+    self.select_outline_section_in_editor(paragraph_ix, window, cx);
+    self.open_comments_panel(window, cx);
+  }
+
+  /// O-S6: send the section to the speech document via the existing path.
+  pub(super) fn send_outline_section_to_speech(&mut self, paragraph_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+    self.select_outline_section_in_editor(paragraph_ix, window, cx);
+    self.send_selection_to_speech_document(window, cx);
+  }
+
+  /// O-S6: collapse every sibling heading at this level, leaving this one
+  /// open — the "focus on my section" fold.
+  pub(super) fn collapse_outline_siblings(&mut self, paragraph_ix: usize, cx: &mut Context<Self>) {
+    let Some(cache) = self.outline_cache.as_ref() else { return };
+    let Some(level) = cache.levels.get(&paragraph_ix).copied() else { return };
+    let siblings: Vec<usize> = cache
+      .levels
+      .iter()
+      .filter(|(ix, lvl)| **lvl == level && **ix != paragraph_ix)
+      .map(|(ix, _)| *ix)
+      .collect();
+    if siblings.is_empty() {
+      return;
+    }
+    self.collapsed_outline_items.extend(siblings);
+    self.collapsed_outline_items.remove(&paragraph_ix);
+    self.outline_revision = self.outline_revision.wrapping_add(1);
+    self.refresh_outline_tree(cx);
+    self.save_current_outline_state(cx);
+    cx.notify();
   }
 
   pub fn dirty_editors(&self, cx: &App) -> Vec<Entity<RichTextEditor>> {
