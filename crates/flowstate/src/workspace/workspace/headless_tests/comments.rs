@@ -65,3 +65,72 @@ fn comments_panel_owns_review_marks_across_open_close_reopen(cx: &mut TestAppCon
   h.update(cx, |ws, window, cx| ws.open_comments_panel(window, cx));
   wait_for_marks(&h, cx, true, "review marks re-armed on reopen");
 }
+
+// C-S5: the unread lifecycle — a comment created while the rail is closed
+// raises the badge; opening the panel shows the per-thread dot and marks the
+// thread seen, killing the badge.
+#[gpui::test]
+fn unread_badge_raises_while_closed_and_clears_on_view(cx: &mut TestAppContext) {
+  let h = support::open_workspace(cx);
+  h.new_document(cx);
+  h.wait_until(cx, "document runtime attach", |ws| {
+    ws.active_document_id
+      .is_some_and(|id| ws.document_runtimes.contains_key(&id))
+  });
+
+  let selection = h.update(cx, |ws, _window, cx| {
+    let editor = ws.active_editor.clone().expect("active editor");
+    editor.update(cx, |editor, cx| {
+      editor.insert_text_command("Unread threads must announce themselves.", cx);
+      editor.select_all(cx);
+      editor.selection().clone()
+    })
+  });
+  let io = h.read(cx, |ws| {
+    let id = ws.active_document_id.expect("active document");
+    ws.document_runtimes.get(&id).cloned().expect("document runtime")
+  });
+  cx.executor().allow_parking();
+  cx.executor()
+    .block_test(io.create_comment(Some(selection), "new activity".into(), 7, "Tester".into()))
+    .expect("comment creation succeeds");
+
+  // Recount with the rail closed: the badge must raise.
+  h.update(cx, |ws, _window, cx| ws.schedule_comment_unread_refresh(cx));
+  cx.executor().advance_clock(std::time::Duration::from_millis(450));
+  for _ in 0..500 {
+    cx.run_until_parked();
+    if h.read(cx, |ws| ws.unread_comment_count) == 1 {
+      break;
+    }
+    std::thread::sleep(std::time::Duration::from_millis(10));
+  }
+  assert_eq!(h.read(cx, |ws| ws.unread_comment_count), 1, "badge raises while the rail is closed");
+
+  // Open the panel: the thread shows its dot and the badge clears.
+  h.update(cx, |ws, window, cx| ws.open_comments_panel(window, cx));
+  for _ in 0..500 {
+    cx.run_until_parked();
+    let cleared = h.read(cx, |ws| ws.unread_comment_count) == 0;
+    let dotted = h.update(cx, |ws, _window, cx| {
+      ws.comments_panel
+        .as_ref()
+        .is_some_and(|panel| panel.read(cx).unread_thread_count() == 1)
+    });
+    if cleared && dotted {
+      break;
+    }
+    std::thread::sleep(std::time::Duration::from_millis(10));
+  }
+  assert_eq!(h.read(cx, |ws| ws.unread_comment_count), 0, "viewing the panel marks threads seen");
+  let dotted = h.update(cx, |ws, _window, cx| {
+    ws.comments_panel
+      .as_ref()
+      .is_some_and(|panel| panel.read(cx).unread_thread_count() == 1)
+  });
+  assert!(dotted, "the viewed thread carries its new-activity dot for this viewing session");
+  assert!(
+    h.read(cx, |ws| !ws.comment_last_seen.is_empty()),
+    "the read-state store records the thread"
+  );
+}

@@ -141,6 +141,13 @@ pub struct Workspace {
   file_search_overlay: Option<Entity<FileSearchOverlay>>,
   command_palette: Option<Entity<crate::workspace::command_palette::CommandPalette>>,
   comments_panel: Option<Entity<crate::workspace::comments_panel::CommentsPanel>>,
+  /// C-S5: local read-state for comment threads — thread id → the latest
+  /// activity timestamp already seen. Feeds the rail badge and per-thread dots.
+  comment_last_seen: std::collections::HashMap<u128, i64>,
+  /// C-S5: unread-thread count for the ACTIVE document (the rail badge).
+  unread_comment_count: usize,
+  comment_unread_refresh_pending: bool,
+  comment_unread_refresh_generation: u64,
   tub_root: Option<PathBuf>,
   tub_index: Option<Arc<TubIndex>>,
   tub_files: Vec<TubFile>,

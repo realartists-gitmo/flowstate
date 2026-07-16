@@ -61,6 +61,9 @@ impl CollabSession {
       let peer_count_changed = self.refresh_peer_count();
       self.evaluate_connectivity(cx);
       self.refresh_external_carets(cx);
+      // C-S5: typing-indicator liveness — a presence frame that changes no
+      // caret still matters to the comments panel, which observes the editor.
+      self.nudge_comment_observers(cx);
       if roster_changed || peer_count_changed {
         cx.notify();
       }
@@ -101,6 +104,7 @@ impl CollabSession {
             color_rgb: crate::app_settings::load_local_user_profile().color_rgb,
             selection,
             flow_focus: None,
+            comment_typing: session.comment_typing,
           };
           tracing::trace!(session = %session_id, has_selection = state.selection.is_some(), "refreshing own collaboration presence");
           if let Some(presence) = &session.presence
@@ -134,6 +138,7 @@ impl CollabSession {
         editing: focus.editing,
         caret: focus.caret,
       }),
+      comment_typing: None,
     };
     if let Some(presence) = &self.presence
       && let Err(error) = presence.set_self(&state)

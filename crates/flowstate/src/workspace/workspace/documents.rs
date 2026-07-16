@@ -229,6 +229,10 @@ impl Workspace {
       file_search_overlay: None,
       command_palette: None,
       comments_panel: None,
+      comment_last_seen: std::collections::HashMap::new(),
+      unread_comment_count: 0,
+      comment_unread_refresh_pending: false,
+      comment_unread_refresh_generation: 0,
       tub_root: None,
       tub_index: None,
       tub_files: Vec::new(),
@@ -383,6 +387,8 @@ impl Workspace {
         let viewport_paragraph = workspace.active_editor_viewport_paragraph(cx);
         workspace.update_outline_viewport_paragraph(viewport_paragraph, cx);
         workspace.maybe_autosave_document(id, editor.clone(), cx);
+        // C-S5: the session's comment nudge lands here too — recount unread.
+        workspace.schedule_comment_unread_refresh(cx);
       }),
     ));
     self.active_document_id = Some(id);
@@ -500,6 +506,8 @@ impl Workspace {
     self.restore_outline_state_for_document(panel_id, cx);
     self.outline_cache = None;
     self.refresh_outline_tree(cx);
+    // C-S5: the badge counts the ACTIVE document's threads — recount on switch.
+    self.schedule_comment_unread_refresh(cx);
     self.persist_temporary_workspace_session(cx);
     cx.notify();
   }
@@ -799,6 +807,11 @@ impl Workspace {
         .iter()
         .map(|dir| dir.to_string_lossy().into_owned())
         .collect(),
+      comment_last_seen: self
+        .comment_last_seen
+        .iter()
+        .map(|(id, seen)| (format!("{id:032x}"), *seen))
+        .collect(),
     });
     if self.temporary_workspace_session_persist_scheduled {
       return;
@@ -904,6 +917,12 @@ impl Workspace {
     self
       .tub_expanded_dirs
       .extend(session.tub_expanded_dirs.iter().map(PathBuf::from));
+    self.comment_last_seen.extend(
+      session
+        .comment_last_seen
+        .iter()
+        .filter_map(|(id, seen)| u128::from_str_radix(id, 16).ok().map(|id| (id, *seen))),
+    );
     self.pinned_document_ids = pinned_ids;
     self.speech_document_id = speech_id;
 
@@ -1243,6 +1262,8 @@ impl Workspace {
         let viewport_paragraph = workspace.active_editor_viewport_paragraph(cx);
         workspace.update_outline_viewport_paragraph(viewport_paragraph, cx);
         workspace.maybe_autosave_document(panel_id, editor.clone(), cx);
+        // C-S5: the session's comment nudge lands here too — recount unread.
+        workspace.schedule_comment_unread_refresh(cx);
       }),
     ));
     // Bind the durable author identity (fire-and-forget; never blocks open).
@@ -1920,6 +1941,10 @@ struct TemporaryWorkspaceSession {
   toolkit_filter: Option<String>,
   #[serde(default)]
   tub_expanded_dirs: Vec<String>,
+  /// C-S5: comment read-state (thread id as hex → last-seen activity stamp),
+  /// so unread dots survive restarts.
+  #[serde(default)]
+  comment_last_seen: Vec<(String, i64)>,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]

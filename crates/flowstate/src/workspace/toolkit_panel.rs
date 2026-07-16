@@ -134,23 +134,56 @@ impl Workspace {
           })),
       )
       .child(
-        Button::new("toolkit-comments-tool")
-          .icon(
-            Icon::default()
-              .path("icons/message-square-reply.svg")
-              .text_color(if self.active_toolkit_tool == Some(ToolkitTool::Comments) {
-                cx.theme().link
+        // C-S5: the unread badge rides the rail icon — a count chip when any
+        // thread in the active document has activity newer than last seen.
+        div()
+          .relative()
+          .child(
+            Button::new("toolkit-comments-tool")
+              .icon(
+                Icon::default()
+                  .path("icons/message-square-reply.svg")
+                  .text_color(if self.active_toolkit_tool == Some(ToolkitTool::Comments) {
+                    cx.theme().link
+                  } else {
+                    cx.theme().muted_foreground
+                  }),
+              )
+              .xsmall()
+              .ghost()
+              .selected(self.active_toolkit_tool == Some(ToolkitTool::Comments))
+              .tooltip(if self.unread_comment_count > 0 {
+                format!("Comments — {} unread", self.unread_comment_count).into()
               } else {
-                cx.theme().muted_foreground
-              }),
+                gpui::SharedString::from("Comments")
+              })
+              .on_click(cx.listener(|workspace, _, _, cx| {
+                workspace.toggle_toolkit_tool(ToolkitTool::Comments, cx);
+              })),
           )
-          .xsmall()
-          .ghost()
-          .selected(self.active_toolkit_tool == Some(ToolkitTool::Comments))
-          .tooltip("Comments")
-          .on_click(cx.listener(|workspace, _, _, cx| {
-            workspace.toggle_toolkit_tool(ToolkitTool::Comments, cx);
-          })),
+          .when(self.unread_comment_count > 0, |this| {
+            this.child(
+              div()
+                .absolute()
+                .top(px(-2.0))
+                .right(px(-2.0))
+                .min_w(px(14.0))
+                .h(px(14.0))
+                .px(px(3.0))
+                .rounded_full()
+                .bg(cx.theme().warning)
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(cx.theme().background)
+                .text_size(px(9.0))
+                .child(if self.unread_comment_count > 9 {
+                  "9+".to_string()
+                } else {
+                  self.unread_comment_count.to_string()
+                }),
+            )
+          }),
       )
       .child(
         Button::new("toolkit-tub-tool")

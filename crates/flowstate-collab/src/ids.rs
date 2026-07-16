@@ -37,6 +37,14 @@ impl SessionId {
     Self::color_index_for_peer_bytes(peer.as_bytes())
   }
 
+  /// C-S5: the same palette keyed by a durable AUTHOR user id (comment
+  /// authorship survives sessions, so its accent color must too — one id, one
+  /// rendering, online or off).
+  #[must_use]
+  pub fn color_for_user(user_id: u128) -> u32 {
+    PALETTE[Self::color_index_for_peer_bytes(&user_id.to_le_bytes())]
+  }
+
   #[must_use]
   pub fn color_index_for_peer_bytes(bytes: &[u8]) -> usize {
     let mut hash = 0usize;

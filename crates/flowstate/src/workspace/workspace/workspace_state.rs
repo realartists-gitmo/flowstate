@@ -43,6 +43,72 @@ impl Workspace {
     }
   }
 
+  /// C-S5: recount unread comment threads for the active document (the rail
+  /// badge). Debounced; triggered from the editor observers (the session's
+  /// comment nudge lands there too) and on document switches.
+  pub(crate) fn schedule_comment_unread_refresh(&mut self, cx: &mut Context<Self>) {
+    if self.comment_unread_refresh_pending {
+      return;
+    }
+    self.comment_unread_refresh_pending = true;
+    cx.spawn(async move |workspace, cx| {
+      cx.background_executor()
+        .timer(std::time::Duration::from_millis(400))
+        .await;
+      let Ok(Some((io, generation))) = workspace.update(cx, |workspace, _| {
+        workspace.comment_unread_refresh_pending = false;
+        workspace.comment_unread_refresh_generation = workspace.comment_unread_refresh_generation.wrapping_add(1);
+        let io = workspace
+          .active_document_id
+          .and_then(|id| workspace.document_runtimes.get(&id).cloned());
+        io.map(|io| (io, workspace.comment_unread_refresh_generation))
+      }) else {
+        return;
+      };
+      let result = io.comments().await;
+      let _ = workspace.update(cx, |workspace, cx| {
+        if workspace.comment_unread_refresh_generation != generation {
+          return;
+        }
+        let Ok(threads) = result else { return };
+        let count = threads
+          .iter()
+          .filter(|thread| !thread.resolved)
+          .filter(|thread| comment_thread_latest_activity(thread) > workspace.comment_seen_stamp(thread.comment_id))
+          .count();
+        if workspace.unread_comment_count != count {
+          workspace.unread_comment_count = count;
+          cx.notify();
+        }
+      });
+    })
+    .detach();
+  }
+
+  pub(crate) fn comment_seen_stamp(&self, comment_id: u128) -> i64 {
+    self.comment_last_seen.get(&comment_id).copied().unwrap_or(i64::MIN)
+  }
+
+  /// C-S5: the panel viewed these threads — record their latest activity as
+  /// seen, kill the badge, and persist so the read-state survives restarts.
+  pub(crate) fn mark_comment_threads_seen(&mut self, stamps: &[(u128, i64)], cx: &mut Context<Self>) {
+    let mut changed = false;
+    for (comment_id, stamp) in stamps {
+      let entry = self.comment_last_seen.entry(*comment_id).or_insert(i64::MIN);
+      if *stamp > *entry {
+        *entry = *stamp;
+        changed = true;
+      }
+    }
+    if self.unread_comment_count != 0 {
+      self.unread_comment_count = 0;
+      cx.notify();
+    }
+    if changed {
+      self.persist_temporary_workspace_session(cx);
+    }
+  }
+
   fn toggle_toolkit_tool(&mut self, tool: ToolkitTool, cx: &mut Context<Self>) {
     let was_expanded = self.active_toolkit_tool.is_some();
     self.active_toolkit_tool = if self.active_toolkit_tool == Some(tool) { None } else { Some(tool) };
@@ -801,4 +867,14 @@ fn enclosing_section_bounds(document: &DocumentProjection, paragraph_ix: usize, 
       (start <= paragraph_ix && paragraph_ix < end).then_some((start, end))
     })
     .min_by_key(|(start, end)| end - start)
+}
+
+/// C-S5: a thread's newest activity stamp — thread metadata or any message,
+/// whichever moved last. This is what "unread" is measured against.
+fn comment_thread_latest_activity(thread: &flowstate_collab::crdt_runtime::RuntimeCommentThread) -> i64 {
+  thread
+    .messages
+    .iter()
+    .map(|message| message.updated_at_unix_secs.max(message.created_at_unix_secs))
+    .fold(thread.updated_at_unix_secs.max(thread.created_at_unix_secs), i64::max)
 }

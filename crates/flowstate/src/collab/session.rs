@@ -175,6 +175,8 @@ pub struct CollabSession {
   anti_entropy: AntiEntropyState,
   direct_pump_started: bool,
   presence_refresh_pending: bool,
+  // C-S5: our live comment-composer state, broadcast in every presence frame.
+  comment_typing: Option<flowstate_collab::presence::CommentTyping>,
   presence_refresh_generation: u64,
   external_caret_refresh_pending: bool,
   external_caret_refresh_generation: u64,
@@ -250,6 +252,7 @@ impl CollabSession {
       anti_entropy: AntiEntropyState::new(session, now),
       direct_pump_started: false,
       presence_refresh_pending: false,
+      comment_typing: None,
       presence_refresh_generation: 0,
       external_caret_refresh_pending: false,
       external_caret_refresh_generation: 0,
@@ -341,6 +344,7 @@ impl CollabSession {
       anti_entropy: AntiEntropyState::new(session, now),
       direct_pump_started: false,
       presence_refresh_pending: false,
+      comment_typing: None,
       presence_refresh_generation: 0,
       external_caret_refresh_pending: false,
       external_caret_refresh_generation: 0,
@@ -649,6 +653,31 @@ impl CollabSession {
     if let Some(editor) = self.rich_text_editor() {
       editor.update(cx, |_, cx| cx.notify());
     }
+  }
+
+  /// C-S5: the comments panel publishes composer activity through its
+  /// document's session; the next own-presence frame carries it.
+  pub fn set_comment_typing(&mut self, typing: Option<flowstate_collab::presence::CommentTyping>, cx: &mut Context<Self>) {
+    if self.comment_typing == typing {
+      return;
+    }
+    self.comment_typing = typing;
+    self.refresh_own_presence(cx);
+  }
+
+  /// C-S5: remote peers currently composing comments — (name, color, where).
+  #[must_use]
+  pub fn comment_typing_roster(&self) -> Vec<(String, u32, flowstate_collab::presence::CommentTyping)> {
+    let Some(presence) = &self.presence else {
+      return Vec::new();
+    };
+    let self_key = presence.self_key().to_string();
+    presence
+      .roster()
+      .into_iter()
+      .filter(|entry| entry.key != self_key)
+      .filter_map(|entry| entry.comment_typing.map(|typing| (entry.name, entry.color_rgb, typing)))
+      .collect()
   }
 
   pub(super) fn flow_editor(&self) -> Option<Entity<FlowEditor>> {

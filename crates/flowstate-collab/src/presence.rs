@@ -28,6 +28,18 @@ pub struct PresenceState {
   /// Flow-session focus (spec S11): board hands + real cell carets. `None`
   /// on rich-text sessions.
   pub flow_focus: Option<FlowPresenceFocus>,
+  /// C-S5: live comment-composer activity, for the panel's typing indicator.
+  pub comment_typing: Option<CommentTyping>,
+}
+
+/// Where a peer is composing a comment right now (C-S5). Ephemeral like the
+/// rest of presence: it clears with the peer's next frame or timeout.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum CommentTyping {
+  /// Writing in the new-thread composer.
+  NewThread,
+  /// Writing a reply inside the thread with this comment id.
+  InThread(u128),
 }
 
 /// Where a peer is on the flow board (spec S11): which sheet/cell their hand
@@ -110,6 +122,7 @@ pub struct RosterEntry {
   pub color_rgb: u32,
   pub selection: Option<PresenceSelection>,
   pub flow_focus: Option<FlowPresenceFocus>,
+  pub comment_typing: Option<CommentTyping>,
 }
 
 #[derive(Clone, Debug)]
@@ -300,6 +313,7 @@ fn roster_entry_from_value(key: String, value: LoroValue) -> Option<RosterEntry>
     name: state.name,
     selection: state.selection,
     flow_focus: state.flow_focus,
+    comment_typing: state.comment_typing,
   })
 }
 
@@ -326,6 +340,7 @@ fn sanitize_presence_state(state: &PresenceState) -> PresenceState {
     color_rgb: state.color_rgb & 0x00ff_ffff,
     selection,
     flow_focus,
+    comment_typing: state.comment_typing,
   }
 }
 
@@ -380,7 +395,26 @@ mod tests {
       color_rgb: 0x3b82f6,
       selection: None,
       flow_focus: None,
+      comment_typing: None,
     }
+  }
+
+  #[test]
+  fn comment_typing_rides_the_presence_frame() {
+    let peer_a = test_peer(11);
+    let peer_b = test_peer(12);
+    let store_a = PresenceStore::new(&peer_a);
+    let mut state = named_state("Ada");
+    state.comment_typing = Some(CommentTyping::InThread(42));
+    store_a.set_self(&state).expect("set self presence");
+
+    let receiver = PresenceStore::new(&peer_b);
+    receiver
+      .apply_from(&peer_a, &store_a.encode_self())
+      .expect("apply presence frame");
+    let roster = receiver.roster();
+    let ada = roster.iter().find(|entry| entry.name == "Ada").expect("Ada in roster");
+    assert_eq!(ada.comment_typing, Some(CommentTyping::InThread(42)));
   }
 
   #[test]
