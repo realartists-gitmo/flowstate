@@ -2237,9 +2237,35 @@ impl CrdtRuntime {
     self.finish_comment_mutation(from_frontier, from_vv, "comment-delete")
   }
 
+  /// CT-S3: designate or clear THIS doc as the team speech target. The
+  /// marker is one atomic LWW register in META
+  /// ([`flowstate_document::loro_schema::set_speech_target`]); the commit is
+  /// undo-inert ("meta" origin) and REPLICATES through the normal publish
+  /// queue — the `rename_revision` anti-template (persists but never
+  /// publishes) is exactly what this must not copy.
+  pub fn set_speech_target(&mut self, marker: &flowstate_document::loro_schema::SpeechTargetMarker) -> Result<()> {
+    let from_frontier = self.doc.state_frontiers();
+    let from_vv = self.doc.state_vv();
+    flowstate_document::loro_schema::set_speech_target(&self.doc, marker).context("writing the speech-target marker")?;
+    self.finish_replicated_mutation(from_frontier, from_vv, "meta", "speech-target")
+  }
+
+  /// The doc's current speech-target self-marker, if any.
+  pub fn speech_target(&self) -> Option<flowstate_document::loro_schema::SpeechTargetMarker> {
+    flowstate_document::loro_schema::speech_target(&self.doc)
+  }
+
   fn finish_comment_mutation(&mut self, from_frontier: Frontiers, from_vv: VersionVector, message: &str) -> Result<()> {
+    self.finish_replicated_mutation(from_frontier, from_vv, "comment", message)
+  }
+
+  /// Shared tail for non-body replicated mutations (comments, the speech
+  /// marker): touch metadata, commit under `origin`, publish the update to
+  /// peers, re-arm the recorded-undo frontier, and emit an empty-patch
+  /// projection event so the UI layer re-reads the mutated registry.
+  fn finish_replicated_mutation(&mut self, from_frontier: Frontiers, from_vv: VersionVector, origin: &str, message: &str) -> Result<()> {
     flowstate_document::touch_document_metadata(&self.doc)?;
-    self.doc.set_next_commit_origin("comment");
+    self.doc.set_next_commit_origin(origin);
     self.doc.set_next_commit_message(message);
     self.doc.commit();
     let frontier_before = self.projection.frontier.clone();

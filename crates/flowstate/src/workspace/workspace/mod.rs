@@ -111,6 +111,15 @@ pub struct Workspace {
   /// amendment).
   speech_sent_recent: u64,
   speech_sent_clear_generation: u64,
+  /// CT-S3: debounce/generation for the team speech-target reconcile — every
+  /// doc's META self-marker is re-read after editor activity and the open doc
+  /// with the greatest `designated_at_ms` wins the local designation.
+  speech_target_reconcile_pending: bool,
+  speech_target_reconcile_generation: u64,
+  /// Greatest speech-designation timestamp this workspace has written or
+  /// observed. New designations write `max(now, this + 1)` so re-designating
+  /// within the same millisecond still BEATS the previous winner.
+  last_speech_designation_ms: i64,
   /// W-S1 (W2-B): exactly one window — the first — owns the on-disk workspace
   /// session. Secondary windows neither restore nor persist it, so two windows
   /// can never clobber each other's `flowstate-open-tabs-session.json`.

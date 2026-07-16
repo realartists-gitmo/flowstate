@@ -983,6 +983,13 @@ impl Workspace {
     }
   }
 
+  /// Unix milliseconds — the speech-target marker's cross-doc tiebreaker.
+  fn unix_time_ms() -> i64 {
+    std::time::SystemTime::now()
+      .duration_since(std::time::UNIX_EPOCH)
+      .map_or(0, |elapsed| i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX))
+  }
+
   pub(crate) fn toggle_speech_document(&mut self, panel_id: Uuid, cx: &mut Context<Self>) {
     // CT-S1: the flow-speech trap dies here. A flow used to accept the "S"
     // designation and then silently swallow every send (sends only look up
@@ -995,13 +1002,134 @@ impl Workspace {
       );
       return;
     }
-    self.speech_document_id = if self.speech_document_id == Some(panel_id) {
-      None
-    } else {
-      Some(panel_id)
-    };
+    let designating = self.speech_document_id != Some(panel_id);
+    self.speech_document_id = designating.then_some(panel_id);
     cx.notify();
     self.persist_temporary_workspace_session(cx);
+    // CT-S3 (CT5-B): the designation is the doc's replicated SELF-MARKER —
+    // every peer's backtick targets the same doc and every peer's tab wears
+    // the "S". The write is undo-inert and rides the normal publish queue;
+    // solo docs carry the marker too (same path solo and collab).
+    let Some(io) = self.document_runtimes.get(&panel_id).cloned() else {
+      return;
+    };
+    // Monotonic per workspace: a re-designation in the same millisecond as
+    // the previous one must still read as NEWER, or the cross-doc winner
+    // rule flips a coin (real double-toggles and headless tests both hit
+    // millisecond ties).
+    let designated_at_ms = Self::unix_time_ms().max(self.last_speech_designation_ms + 1);
+    self.last_speech_designation_ms = designated_at_ms;
+    let workspace = cx.entity().downgrade();
+    cx.spawn(async move |_, cx| {
+      let (user_id, display_name) = cx
+        .background_executor()
+        .spawn(async { crate::app_settings::load_local_user_identity() })
+        .await;
+      let marker = flowstate_document::loro_schema::SpeechTargetMarker {
+        active: designating,
+        designated_by: display_name.unwrap_or_else(|| user_id.to_string()),
+        designated_at_ms,
+      };
+      if let Err(error) = io.set_speech_target(marker).await {
+        let _ = workspace.update(cx, |workspace, cx| {
+          workspace.report_failure(format!("Marking the speech document for the session failed: {error:#}"), None, cx);
+        });
+      }
+    })
+    .detach();
+  }
+
+  /// CT-S3: re-read every open doc's speech-target self-marker (debounced —
+  /// editor activity includes remote imports, which is how a peer's
+  /// designation arrives). The open doc with the greatest `designated_at_ms`
+  /// wins the local designation; open losers get their markers cleared so
+  /// the session converges on ONE speech doc.
+  pub(crate) fn schedule_speech_target_reconcile(&mut self, cx: &mut Context<Self>) {
+    if self.speech_target_reconcile_pending {
+      return;
+    }
+    self.speech_target_reconcile_pending = true;
+    cx.spawn(async move |workspace, cx| {
+      cx.background_executor()
+        .timer(std::time::Duration::from_millis(400))
+        .await;
+      let Ok(Some((runtimes, generation))) = workspace.update(cx, |workspace, cx| {
+        workspace.speech_target_reconcile_pending = false;
+        workspace.speech_target_reconcile_generation = workspace.speech_target_reconcile_generation.wrapping_add(1);
+        let runtimes: Vec<(Uuid, flowstate_collab::doc_io::DocIoHandle)> = workspace
+          .document_panels
+          .iter()
+          .filter_map(|panel| {
+            let id = panel.read(cx).id();
+            workspace
+              .document_runtimes
+              .get(&id)
+              .cloned()
+              .map(|io| (id, io))
+          })
+          .collect();
+        (!runtimes.is_empty()).then_some((runtimes, workspace.speech_target_reconcile_generation))
+      }) else {
+        return;
+      };
+      let mut marked: Vec<(Uuid, flowstate_collab::doc_io::DocIoHandle, flowstate_document::loro_schema::SpeechTargetMarker)> = Vec::new();
+      let mut cleared: Vec<Uuid> = Vec::new();
+      for (id, io) in runtimes {
+        match io.speech_target().await {
+          Ok(Some(marker)) if marker.active => marked.push((id, io, marker)),
+          Ok(Some(_)) => cleared.push(id),
+          _ => {},
+        }
+      }
+      // Winner = greatest (designated_at_ms, designated_by) — deterministic
+      // on every peer, so everyone clears the same losers.
+      let winner = marked
+        .iter()
+        .max_by(|a, b| {
+          (a.2.designated_at_ms, a.2.designated_by.as_str()).cmp(&(b.2.designated_at_ms, b.2.designated_by.as_str()))
+        })
+        .map(|(id, _, marker)| (*id, marker.designated_at_ms));
+      for (id, io, marker) in &marked {
+        if Some(*id) != winner.map(|(id, _)| id) {
+          // Clear with the LOSER's own identity/timestamp so racing peers
+          // write the identical register value (idempotent convergence).
+          let clear = flowstate_document::loro_schema::SpeechTargetMarker {
+            active: false,
+            designated_by: marker.designated_by.clone(),
+            designated_at_ms: marker.designated_at_ms,
+          };
+          let _ = io.set_speech_target(clear).await;
+        }
+      }
+      let _ = workspace.update(cx, |workspace, cx| {
+        if workspace.speech_target_reconcile_generation != generation {
+          return;
+        }
+        let Some((winner, winner_at)) = winner else {
+          // No marked doc is open. A designation whose doc carries an
+          // explicitly-cleared marker was toggled off (possibly by a peer) —
+          // drop it. A doc with NO marker at all keeps any local (legacy
+          // session-restored) designation.
+          if let Some(current) = workspace.speech_document_id
+            && cleared.contains(&current)
+          {
+            workspace.speech_document_id = None;
+            cx.notify();
+            workspace.persist_temporary_workspace_session(cx);
+          }
+          return;
+        };
+        // Track the observed maximum so this workspace's next designation
+        // outbids it even inside the same millisecond.
+        workspace.last_speech_designation_ms = workspace.last_speech_designation_ms.max(winner_at);
+        if workspace.speech_document_id != Some(winner) {
+          workspace.speech_document_id = Some(winner);
+          cx.notify();
+          workspace.persist_temporary_workspace_session(cx);
+        }
+      });
+    })
+    .detach();
   }
 
   fn toggle_tab_pin(&mut self, panel_id: Uuid, cx: &mut Context<Self>) {

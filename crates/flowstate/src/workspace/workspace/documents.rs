@@ -242,6 +242,9 @@ impl Workspace {
       speech_document_id: None,
       speech_sent_recent: 0,
       speech_sent_clear_generation: 0,
+      speech_target_reconcile_pending: false,
+      speech_target_reconcile_generation: 0,
+      last_speech_designation_ms: 0,
       // W-S1: overwritten by `open_workspace_window` before the first frame;
       // defaults to owner so bare `Workspace::new` construction (tests) keeps
       // the historical single-window behavior.
@@ -445,12 +448,18 @@ impl Workspace {
         workspace.maybe_autosave_document(id, editor.clone(), cx);
         // C-S5: the session's comment nudge lands here too — recount unread.
         workspace.schedule_comment_unread_refresh(cx);
+        // CT-S3: remote speech-target designations arrive as (empty-patch)
+        // editor activity — re-read the markers and follow the winner.
+        workspace.schedule_speech_target_reconcile(cx);
       }),
     ));
     self.active_document_id = Some(id);
     self.active_editor = Some(editor);
     self.active_flow = None;
     self.document_panels.push(panel.clone());
+    // CT-S3: a just-opened (or just-joined) doc may already carry the team
+    // speech-target marker in its snapshot — reconcile immediately.
+    self.schedule_speech_target_reconcile(cx);
     Ok(panel)
   }
 

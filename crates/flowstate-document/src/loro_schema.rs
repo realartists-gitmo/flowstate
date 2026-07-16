@@ -549,6 +549,63 @@ pub fn document_schema_version(doc: &LoroDoc) -> Option<u32> {
   u32::try_from(version).ok()
 }
 
+/// CT-S3: the team speech-doc SELF-MARKER, stored under
+/// `meta["speech_target"]` as ONE atomic value map — a single LWW register,
+/// so concurrent designations resolve whole (never peer A's `active` paired
+/// with peer B's timestamp). Across docs the app targets the open doc with
+/// the greatest `designated_at_ms` and clears the losers. META is never read
+/// by the materializer, so solo docs and old clients are unaffected.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SpeechTargetMarker {
+  pub active: bool,
+  pub designated_by: String,
+  /// Unix milliseconds at designation — the cross-doc tiebreaker.
+  pub designated_at_ms: i64,
+}
+
+pub fn set_speech_target(doc: &LoroDoc, marker: &SpeechTargetMarker) -> LoroResult<()> {
+  let meta = root_map(doc).ensure_mergeable_map(META)?;
+  let value = LoroValue::Map(
+    vec![
+      ("active".to_string(), LoroValue::Bool(marker.active)),
+      (
+        "designated_by".to_string(),
+        LoroValue::String(marker.designated_by.clone().into()),
+      ),
+      ("designated_at_ms".to_string(), LoroValue::I64(marker.designated_at_ms)),
+    ]
+    .into(),
+  );
+  meta.insert("speech_target", value)?;
+  touch_document_metadata(doc)?;
+  Ok(())
+}
+
+pub fn speech_target(doc: &LoroDoc) -> Option<SpeechTargetMarker> {
+  let ValueOrContainer::Container(container) = root_map(doc).get(META)? else {
+    return None;
+  };
+  let meta = container.into_map().ok()?;
+  let ValueOrContainer::Value(LoroValue::Map(map)) = meta.get("speech_target")? else {
+    return None;
+  };
+  let Some(LoroValue::Bool(active)) = map.get("active") else {
+    return None;
+  };
+  let Some(LoroValue::I64(designated_at_ms)) = map.get("designated_at_ms") else {
+    return None;
+  };
+  let designated_by = match map.get("designated_by") {
+    Some(LoroValue::String(name)) => name.to_string(),
+    _ => String::new(),
+  };
+  Some(SpeechTargetMarker {
+    active: *active,
+    designated_by,
+    designated_at_ms: *designated_at_ms,
+  })
+}
+
 pub fn fork_document_lineage(doc: &LoroDoc) -> LoroResult<Uuid> {
   let root = root_map(doc);
   let meta = root.ensure_mergeable_map(META)?;

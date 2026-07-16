@@ -150,6 +150,14 @@ pub enum IoRequest {
     resolved: bool,
     reply: Sender<Result<()>>,
   },
+  /// CT-S3: write the team speech-target self-marker (undo-inert, replicated).
+  SetSpeechTarget {
+    marker: flowstate_document::loro_schema::SpeechTargetMarker,
+    reply: Sender<Result<()>>,
+  },
+  SpeechTarget {
+    reply: Sender<Result<Option<flowstate_document::loro_schema::SpeechTargetMarker>>>,
+  },
   ReanchorComment {
     comment_id: u128,
     selection: gpui_flowtext::EditorSelection,
@@ -244,6 +252,8 @@ fn io_request_kind(request: &IoRequest) -> &'static str {
     IoRequest::CreateComment { .. } => "create-comment",
     IoRequest::ReplyToComment { .. } => "reply-to-comment",
     IoRequest::SetCommentResolved { .. } => "set-comment-resolved",
+    IoRequest::SetSpeechTarget { .. } => "set-speech-target",
+    IoRequest::SpeechTarget { .. } => "speech-target",
     IoRequest::ReanchorComment { .. } => "reanchor-comment",
     IoRequest::FrontierCommentContext { .. } => "frontier-comment-context",
     IoRequest::EditCommentMessage { .. } => "edit-comment-message",
@@ -471,6 +481,19 @@ impl DocIoHandle {
     self
       .request(|reply| IoRequest::SetCommentResolved { comment_id, resolved, reply })
       .await
+  }
+
+  /// CT-S3: designate/clear this doc as the team speech target (undo-inert
+  /// "meta" commit; replicates through the publish queue).
+  pub async fn set_speech_target(&self, marker: flowstate_document::loro_schema::SpeechTargetMarker) -> Result<()> {
+    self
+      .request(|reply| IoRequest::SetSpeechTarget { marker, reply })
+      .await
+  }
+
+  /// The doc's current speech-target self-marker.
+  pub async fn speech_target(&self) -> Result<Option<flowstate_document::loro_schema::SpeechTargetMarker>> {
+    self.request(|reply| IoRequest::SpeechTarget { reply }).await
   }
 
   pub async fn edit_comment_message(&self, comment_id: u128, message_id: u128, body: String, actor_user_id: u128) -> Result<()> {
@@ -989,6 +1012,18 @@ fn io_loop(core: &Arc<WriteGate<CrdtRuntime>>, receiver: &Receiver<IoRequest>) {
           gate_call(core, GateHolder::DocumentService, |runtime| {
             runtime.set_comment_resolved(comment_id, resolved)
           }),
+        );
+      },
+      IoRequest::SetSpeechTarget { marker, reply } => {
+        send_reply(
+          &reply,
+          gate_call(core, GateHolder::DocumentService, |runtime| runtime.set_speech_target(&marker)),
+        );
+      },
+      IoRequest::SpeechTarget { reply } => {
+        send_reply(
+          &reply,
+          gate_call(core, GateHolder::DocumentService, |runtime| Ok(runtime.speech_target())),
         );
       },
       IoRequest::ReanchorComment { comment_id, selection, reply } => {
