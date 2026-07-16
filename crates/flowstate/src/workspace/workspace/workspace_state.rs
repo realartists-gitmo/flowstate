@@ -769,6 +769,14 @@ impl Workspace {
             editor.delete_column_from_selected_table(cx);
           })))
           .separator()
+          // B-S7: the buried SetCellSpan op finally gets its UI.
+          .item(command_menu_item(workspace.clone(), "Merge Selected Cells", None, false, with_editor(|editor, cx| {
+            editor.merge_cell_range(cx);
+          })))
+          .item(command_menu_item(workspace.clone(), "Split Cell", None, false, with_editor(|editor, cx| {
+            editor.split_selected_cell(cx);
+          })))
+          .separator()
           .item(command_menu_item(workspace.clone(), "Widen Column", None, false, with_editor(|editor, cx| {
             editor.widen_selected_table_column(cx);
           })))

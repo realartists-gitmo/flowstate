@@ -8,6 +8,7 @@ impl RichTextEditor {
       | BlockSelection::TableCell { block_ix, .. } => block_ix,
     };
     self.selected_block = Some(selection);
+    self.cell_range = None;
     self.table_cell_block_ix = 0;
     self.table_cell_caret = self
       .selected_table_cell_text()
@@ -297,8 +298,48 @@ impl RichTextEditor {
     scroll_rect_into_view(&self.scroll_handle, rect, px(8.0));
   }
 
+  /// B-S7: Shift+arrow extends the rectangular cell range (the spreadsheet
+  /// idiom) while a table cell is selected. Movement clamps to the table.
+  pub(super) fn extend_cell_range(&mut self, row_delta: isize, cell_delta: isize, cx: &mut Context<Self>) -> bool {
+    let Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix, .. }) = self.selected_block else {
+      return false;
+    };
+    let Some(Block::Table(table)) = self.document.blocks.get(block_ix) else {
+      return false;
+    };
+    let current = self.cell_range.unwrap_or(CellRangeSelection {
+      block_ix,
+      anchor: (row_ix, cell_ix),
+      head: (row_ix, cell_ix),
+    });
+    let head_row = current
+      .head
+      .0
+      .saturating_add_signed(row_delta)
+      .min(table.rows.len().saturating_sub(1));
+    let row_cells = table.rows.get(head_row).map_or(1, |row| row.cells.len());
+    let head_cell = current
+      .head
+      .1
+      .saturating_add_signed(cell_delta)
+      .min(row_cells.saturating_sub(1));
+    self.cell_range = Some(CellRangeSelection {
+      head: (head_row, head_cell),
+      ..current
+    });
+    cx.notify();
+    true
+  }
+
+  /// The paint-facing range: only multi-cell ranges tint (a collapsed range
+  /// is just the ordinary selected cell).
+  pub(crate) fn cell_range_for_paint(&self) -> Option<CellRangeSelection> {
+    self.cell_range.filter(CellRangeSelection::is_multi)
+  }
+
   fn clear_block_selection(&mut self) {
     self.selected_block = None;
+    self.cell_range = None;
     self.table_cell_block_ix = 0;
     self.table_cell_anchor = 0;
     self.table_cell_caret = 0;

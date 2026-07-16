@@ -178,9 +178,20 @@ impl RichTextEditor {
         paragraph_ix,
         byte,
       )) = self.table_cell_selection_at(block_ix, event.position, window, cx)
-      && row_ix == hit_row
-      && cell_ix == hit_cell
     {
+      // B-S7: dragging OUT of the anchor cell selects the rectangle; back
+      // inside it resumes the in-cell text drag.
+      if row_ix != hit_row || cell_ix != hit_cell {
+        self.cell_range = Some(CellRangeSelection {
+          block_ix,
+          anchor: (row_ix, cell_ix),
+          head: (hit_row, hit_cell),
+        });
+        self.last_drag_position = Some(event.position);
+        cx.notify();
+        return;
+      }
+      self.cell_range = None;
       self.table_cell_block_ix = paragraph_ix;
       self.table_cell_caret = byte;
       self.last_drag_position = Some(event.position);

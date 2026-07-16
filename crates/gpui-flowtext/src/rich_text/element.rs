@@ -471,10 +471,11 @@ impl Element for VirtualBlockElement {
     window: &mut Window,
     cx: &mut App,
   ) {
-    let (selected_block, table_cell_caret, text_selected) = {
+    let (selected_block, cell_range, table_cell_caret, text_selected) = {
       let editor = self.editor.read(cx);
       (
         editor.selected_block,
+        editor.cell_range_for_paint(),
         editor.table_cell_caret_for_paint(window),
         editor.block_is_inside_text_selection(self.block_ix),
       )
@@ -483,7 +484,7 @@ impl Element for VirtualBlockElement {
       return;
     };
     for block in &layout.blocks {
-      paint_structural_block(block, selected_block, table_cell_caret, text_selected, bounds.origin, window, cx);
+      paint_structural_block(block, selected_block, cell_range, table_cell_caret, text_selected, bounds.origin, window, cx);
     }
   }
 }

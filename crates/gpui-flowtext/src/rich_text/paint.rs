@@ -265,6 +265,7 @@ pub(super) fn paint_layout(
 pub(super) fn paint_structural_block(
   block: &LaidOutBlock,
   selected_block: Option<BlockSelection>,
+  cell_range: Option<crate::rich_text::editor::CellRangeSelection>,
   table_cell_caret: Option<TableCellCaret>,
   text_selected: bool,
   origin: Point<Pixels>,
@@ -276,7 +277,9 @@ pub(super) fn paint_structural_block(
     LaidOutBlock::Paragraph(paragraph) => paint_table_paragraph(paragraph, origin, content_mask, window, cx),
     LaidOutBlock::Image(object) => paint_object_block(object, "Image", selected_block, origin, content_mask, window, cx),
     LaidOutBlock::Equation(object) => paint_object_block(object, "Equation", selected_block, origin, content_mask, window, cx),
-    LaidOutBlock::Table(table) => paint_table_block(table, selected_block, table_cell_caret, text_selected, origin, content_mask, window, cx),
+    LaidOutBlock::Table(table) => {
+      paint_table_block(table, selected_block, cell_range, table_cell_caret, text_selected, origin, content_mask, window, cx);
+    },
   }
 }
 
@@ -320,6 +323,7 @@ fn paint_object_block(
 fn paint_table_block(
   table: &LaidOutTable,
   selected_block: Option<BlockSelection>,
+  cell_range: Option<crate::rich_text::editor::CellRangeSelection>,
   table_cell_caret: Option<TableCellCaret>,
   text_selected: bool,
   origin: Point<Pixels>,
@@ -348,7 +352,9 @@ fn paint_table_block(
       );
       // B-S1 theme-is-law + the header row finally renders: row 0 of a
       // header table gets a muted band instead of being indistinguishable.
-      let cell_fill = if cell_selected {
+      // B-S7: rectangular range membership tints like the selected cell.
+      let cell_in_range = cell_range.is_some_and(|range| range.contains(table.block_ix, row_ix, cell_ix));
+      let cell_fill = if cell_selected || cell_in_range {
         cx.theme().primary.opacity(0.14)
       } else if table.header_row && row_ix == 0 {
         cx.theme().muted
@@ -409,7 +415,7 @@ fn paint_table_block(
               window.paint_quad(fill(snap_vertical_rule_to_device_pixels(bounds, window), black()));
             }
           },
-          LaidOutBlock::Table(table) => paint_table_block(table, None, None, text_selected, origin, content_mask, window, cx),
+          LaidOutBlock::Table(table) => paint_table_block(table, None, None, None, text_selected, origin, content_mask, window, cx),
           LaidOutBlock::Image(object) => paint_object_block(object, "Image", None, origin, content_mask, window, cx),
           LaidOutBlock::Equation(object) => paint_object_block(object, "Equation", None, origin, content_mask, window, cx),
         }

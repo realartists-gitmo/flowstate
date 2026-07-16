@@ -8,6 +8,147 @@ impl RichTextEditor {
   /// cell and commit it. Returns `None` when the cell can't take the fine
   /// path (nested tables, missing ids) — callers fall back to the whole-cell
   /// `ReplaceCell` rewrite.
+  /// B-S7: apply run styles to EVERY cell of the rectangular range — one
+  /// undo group of per-cell mark ops (the B-S4 fine path; cells that refuse
+  /// it — nested tables — are skipped, and the skip is reported). Returns
+  /// false when no multi-cell range is active.
+  pub fn apply_run_styles_to_cell_range(&mut self, styles: crate::RunStyles, cx: &mut Context<Self>) -> bool {
+    let Some(range) = self.cell_range.filter(CellRangeSelection::is_multi) else {
+      return false;
+    };
+    let Some(Block::Table(table)) = self.document.blocks.get(range.block_ix) else {
+      return false;
+    };
+    // Collect per-cell ops FIRST (immutable pass), then commit as one group.
+    let mut ops = Vec::new();
+    let mut skipped = 0usize;
+    for row_ix in range.rows() {
+      let Some(row) = table.rows.get(row_ix) else { continue };
+      for cell_ix in range.cells() {
+        let Some(cell) = row.cells.get(cell_ix) else { continue };
+        if cell.blocks.iter().any(|block| matches!(block, TableCellBlock::Table(_))) {
+          skipped += 1;
+          continue;
+        }
+        let paragraph_texts: Vec<&str> = cell
+          .blocks
+          .iter()
+          .filter_map(|block| match block {
+            TableCellBlock::Paragraph(paragraph) => Some(paragraph.text.as_str()),
+            TableCellBlock::Table(_) => None,
+          })
+          .collect();
+        let last_paragraph = paragraph_texts.len().saturating_sub(1);
+        let last_len = paragraph_texts.last().map_or(0, |text| text.len());
+        if paragraph_texts.iter().all(|text| text.is_empty()) {
+          continue;
+        }
+        let flow = crate::local_intents::table_cell_flow_string(&paragraph_texts);
+        ops.push(crate::local_intents::TableCellTextIntent {
+          table: match self.semantic_block_id(range.block_ix) {
+            Some(id) => id,
+            None => return false,
+          },
+          cell: CellId::from_coordinate(cell.row_id, cell.column_id),
+          expected_text_hash: crate::local_intents::table_cell_text_hash(&flow),
+          op: crate::local_intents::TableCellTextOp::SetMarks {
+            start: (0, 0),
+            end: (last_paragraph, last_len),
+            styles,
+          },
+        });
+      }
+    }
+    if ops.is_empty() {
+      return false;
+    }
+    let grouped = ops.len() > 1;
+    if grouped {
+      self.begin_undo_group();
+    }
+    for intent in ops {
+      let _ = self.write_intent(crate::local_intents::LocalIntent::TableCellText(intent), cx);
+    }
+    if grouped {
+      self.end_undo_group();
+    }
+    if skipped > 0 {
+      cx.emit(EditorEvent::Refused {
+        message: format!("{skipped} cell(s) with nested tables were left unstyled.").into(),
+      });
+    }
+    cx.notify();
+    true
+  }
+
+  /// B-S7: merge the rectangular cell range — ONE `SetCellSpan` on the
+  /// range's top-left cell (topology hides the covered cells; the CRDT op
+  /// existed since §P2b, buried without UI). Refuses out loud on ragged
+  /// ranges the topology can't express.
+  pub fn merge_cell_range(&mut self, cx: &mut Context<Self>) -> bool {
+    let Some(range) = self.cell_range.filter(CellRangeSelection::is_multi) else {
+      cx.emit(EditorEvent::Refused {
+        message: "Select a rectangle of cells first (drag across cells or Shift+arrows).".into(),
+      });
+      return false;
+    };
+    let Some(Block::Table(table)) = self.document.blocks.get(range.block_ix) else {
+      return false;
+    };
+    let top_row = *range.rows().start();
+    let left_cell = *range.cells().start();
+    let Some(cell) = table.rows.get(top_row).and_then(|row| row.cells.get(left_cell)) else {
+      return false;
+    };
+    let Some(table_id) = self.semantic_block_id(range.block_ix) else {
+      return false;
+    };
+    let row_span = u16::try_from(range.rows().count()).unwrap_or(u16::MAX);
+    let column_span = u16::try_from(range.cells().count()).unwrap_or(u16::MAX);
+    let merged = self
+      .write_intent(
+        crate::local_intents::LocalIntent::Table(crate::local_intents::TableIntent::SetCellSpan {
+          table: table_id,
+          row: cell.row_id,
+          column: cell.column_id,
+          row_span,
+          column_span,
+        }),
+        cx,
+      )
+      .is_some();
+    if merged {
+      self.cell_range = None;
+      cx.notify();
+    }
+    merged
+  }
+
+  /// B-S7: split the selected merged cell back to 1×1 spans.
+  pub fn split_selected_cell(&mut self, cx: &mut Context<Self>) -> bool {
+    let Some(BlockSelection::TableCell { block_ix, row_id, column_id, .. }) = self.selected_block else {
+      cx.emit(EditorEvent::Refused {
+        message: "Select the merged cell first.".into(),
+      });
+      return false;
+    };
+    let Some(table_id) = self.semantic_block_id(block_ix) else {
+      return false;
+    };
+    self
+      .write_intent(
+        crate::local_intents::LocalIntent::Table(crate::local_intents::TableIntent::SetCellSpan {
+          table: table_id,
+          row: row_id,
+          column: column_id,
+          row_span: 1,
+          column_span: 1,
+        }),
+        cx,
+      )
+      .is_some()
+  }
+
   fn write_table_cell_text(&mut self, op: crate::local_intents::TableCellTextOp, cx: &mut Context<Self>) -> Option<bool> {
     let Some(BlockSelection::TableCell {
       block_ix, row_ix, cell_ix, ..

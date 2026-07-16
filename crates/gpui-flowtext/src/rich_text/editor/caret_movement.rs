@@ -1,6 +1,20 @@
 #[hotpath::measure_all]
 impl RichTextEditor {
   fn move_horizontal(&mut self, dir: HDir, extend: bool, window: &mut Window, cx: &mut Context<Self>) {
+    // B-S7: Shift+arrow at the CELL level extends the rectangular range.
+    if extend
+      && matches!(self.selected_block, Some(BlockSelection::TableCell { .. }))
+      && self.extend_cell_range(
+        0,
+        match dir {
+          HDir::Left => -1,
+          HDir::Right => 1,
+        },
+        cx,
+      )
+    {
+      return;
+    }
     if !extend && matches!(self.selected_block, Some(BlockSelection::TableCell { .. })) {
       let text = self.selected_table_cell_text().unwrap_or_default();
       match dir {
@@ -137,6 +151,20 @@ impl RichTextEditor {
 
   fn move_vertical(&mut self, dir: VDir, extend: bool, window: &mut Window, cx: &mut Context<Self>) {
     self.pending_snap_to_paragraph = None;
+    // B-S7: Shift+Up/Down at the CELL level extends the rectangular range.
+    if extend
+      && matches!(self.selected_block, Some(BlockSelection::TableCell { .. }))
+      && self.extend_cell_range(
+        match dir {
+          VDir::Up => -1,
+          VDir::Down => 1,
+        },
+        0,
+        cx,
+      )
+    {
+      return;
+    }
     // B-S1: vertical movement learns objects exist. A selected block exits
     // vertically like it does horizontally (Up = leave upward, Down =
     // downward) — before this, Up/Down over a selected image was undefined

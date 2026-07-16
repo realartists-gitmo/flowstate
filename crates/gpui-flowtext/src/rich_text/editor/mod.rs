@@ -730,6 +730,35 @@ struct TableColumnResizeDrag {
   before: TableBlock,
 }
 
+/// B-S7: a rectangular CELL range on one table — anchor..head inclusive,
+/// the spreadsheet idiom. Never canonical state; range verbs iterate it into
+/// per-cell intents.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct CellRangeSelection {
+  pub block_ix: usize,
+  pub anchor: (usize, usize),
+  pub head: (usize, usize),
+}
+
+impl CellRangeSelection {
+  pub fn rows(&self) -> std::ops::RangeInclusive<usize> {
+    self.anchor.0.min(self.head.0)..=self.anchor.0.max(self.head.0)
+  }
+
+  pub fn cells(&self) -> std::ops::RangeInclusive<usize> {
+    self.anchor.1.min(self.head.1)..=self.anchor.1.max(self.head.1)
+  }
+
+  pub fn contains(&self, block_ix: usize, row_ix: usize, cell_ix: usize) -> bool {
+    block_ix == self.block_ix && self.rows().contains(&row_ix) && self.cells().contains(&cell_ix)
+  }
+
+  /// More than one cell — a single-cell "range" is just the selection.
+  pub fn is_multi(&self) -> bool {
+    self.anchor != self.head
+  }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum BlockSelection {
   Image(usize),
@@ -998,6 +1027,8 @@ pub struct RichTextEditor {
   image_resize_drag: Option<ImageResizeDrag>,
   table_column_resize_drag: Option<TableColumnResizeDrag>,
   pub(super) selected_block: Option<BlockSelection>,
+  /// B-S7: the rectangular cell range (anchor = where extension started).
+  pub(super) cell_range: Option<CellRangeSelection>,
   table_cell_block_ix: usize,
   table_cell_anchor: usize,
   table_cell_caret: usize,

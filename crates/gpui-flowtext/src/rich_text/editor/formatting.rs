@@ -57,6 +57,16 @@ impl RichTextEditor {
     if self.clear_matching_armed_inline_tool(ArmedInlineTool::Semantic(semantic), cx) {
       return;
     }
+    // B-S7: a rectangular cell range styles WHOLE cells (spreadsheet idiom).
+    if self.apply_run_styles_to_cell_range(
+      crate::RunStyles {
+        semantic,
+        ..crate::RunStyles::default()
+      },
+      cx,
+    ) {
+      return;
+    }
     self.toggle_semantic_style(semantic, cx);
   }
 
