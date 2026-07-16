@@ -146,6 +146,14 @@ pub struct EditorSettings {
   pub autosave: bool,
   pub send_to_document_directory: bool,
   pub send_custom_directory: Option<PathBuf>,
+  /// R4-B: each export verb remembers its own destination directory
+  /// (`None` = beside the document). Keyed by format: db8 / docx / pdf.
+  #[serde(default)]
+  pub export_db8_directory: Option<PathBuf>,
+  #[serde(default)]
+  pub export_docx_directory: Option<PathBuf>,
+  #[serde(default)]
+  pub export_pdf_directory: Option<PathBuf>,
   /// D-S4: collapse all app-level animation to zero duration. Settings-UI
   /// row lands with the P5-S2 unified home; editable in settings.toml now.
   #[serde(default)]
@@ -166,6 +174,9 @@ impl Default for EditorSettings {
       autosave: false,
       send_to_document_directory: true,
       send_custom_directory: None,
+      export_db8_directory: None,
+      export_docx_directory: None,
+      export_pdf_directory: None,
       reduce_motion: false,
     }
   }

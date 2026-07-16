@@ -719,6 +719,117 @@ struct SendDirectoryInputState {
   _subscription: Subscription,
 }
 
+/// R4-B: one remembered destination row per export verb. Empty = the verb
+/// exports beside the document (the historical default).
+#[hotpath::measure]
+fn export_directory_item(label: &'static str, extension: &'static str, workspace: WeakEntity<Workspace>) -> SettingItem {
+  SettingItem::render(move |_, window, cx| {
+    let current = crate::app_settings::load_export_directory(extension)
+      .map(|path| path.to_string_lossy().to_string())
+      .unwrap_or_default();
+    let key: gpui::SharedString = format!("workspace-export-directory-{extension}").into();
+    let state = window.use_keyed_state(key, cx, {
+      let current = current.clone();
+      let workspace = workspace.clone();
+      move |window, cx| {
+        let initial_value = current.clone();
+        let workspace = workspace.clone();
+        let input = cx.new(|cx| {
+          InputState::new(window, cx)
+            .default_value(initial_value)
+            .placeholder("Beside the document")
+        });
+        let _subscription = cx.subscribe_in(
+          &input,
+          window,
+          move |state: &mut SendDirectoryInputState, input, event: &InputEvent, _, cx| {
+            if let InputEvent::Change = event {
+              let value = input.read(cx).value().trim().to_string();
+              state.current_value = value.clone();
+              let path = (!value.is_empty()).then(|| PathBuf::from(value));
+              save_setting_reporting(
+                workspace.clone(),
+                "the export directory",
+                move || crate::app_settings::save_export_directory(extension, path),
+                cx,
+              );
+            }
+          },
+        );
+        SendDirectoryInputState {
+          input,
+          current_value: current,
+          _subscription,
+        }
+      }
+    });
+    let input = state.read(cx).input.clone();
+    let current_value = state.read(cx).current_value.clone();
+    if input.read(cx).value() != current_value.as_str() {
+      input.update(cx, |input, cx| {
+        input.set_value(SharedString::from(current_value), window, cx);
+      });
+    }
+
+    h_flex()
+      .w_full()
+      .items_center()
+      .justify_between()
+      .gap_3()
+      .child(div().w_40().text_sm().child(label))
+      .child(
+        div()
+          .flex_1()
+          .min_w(px(220.0))
+          .child(Input::new(&input).w_full()),
+      )
+      .child(
+        Button::new(gpui::SharedString::from(format!("workspace-export-directory-browse-{extension}")))
+          .label("Browse")
+          .small()
+          .outline()
+          .on_click({
+            let state = state.clone();
+            let workspace = workspace.clone();
+            move |_, _, cx| {
+              let paths = cx.prompt_for_paths(PathPromptOptions {
+                files: false,
+                directories: true,
+                multiple: false,
+                prompt: Some("Choose export directory".into()),
+              });
+              cx.spawn({
+                let state = state.clone();
+                let workspace = workspace.clone();
+                async move |cx| {
+                  let Ok(Ok(Some(paths))) = paths.await else {
+                    return;
+                  };
+                  let Some(path) = paths.into_iter().next() else {
+                    return;
+                  };
+                  let value = path.to_string_lossy().to_string();
+                  if let Err(error) = crate::app_settings::save_export_directory(extension, Some(path)) {
+                    tracing::error!("failed to save export directory setting: {error}");
+                    let _ = workspace.update(cx, |workspace, cx| {
+                      workspace.report_failure(format!("Couldn't save the export directory: {error}"), None, cx);
+                    });
+                  }
+                  let _ = state.update(cx, |state, cx| {
+                    state.current_value = value;
+                    cx.notify();
+                  });
+                  let _ = workspace.update(cx, |_, cx| cx.notify());
+                }
+              })
+              .detach();
+            }
+          }),
+      )
+      .into_any_element()
+  })
+}
+
 #[hotpath::measure]
 fn active_send_to_document_directory() -> bool {
   load_send_to_document_directory()

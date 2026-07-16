@@ -73,12 +73,29 @@ impl RichTextEditor {
   }
 
   pub fn export_document_format(&mut self, format: DocumentExportFormat, cx: &mut Context<Self>) -> Task<io::Result<PathBuf>> {
+    self.export_document_format_to(format, None, cx)
+  }
+
+  /// R4-B: export with a remembered per-verb destination. `output_dir: None`
+  /// keeps the historical beside-the-document placement.
+  pub fn export_document_format_to(
+    &mut self,
+    format: DocumentExportFormat,
+    output_dir: Option<PathBuf>,
+    cx: &mut Context<Self>,
+  ) -> Task<io::Result<PathBuf>> {
     if self.disposed {
       return cx
         .background_executor()
         .spawn(async { Err(io::Error::new(io::ErrorKind::NotFound, "editor is closed")) });
     }
-    let output_path = match format_output_path(self.document_path.as_deref(), self.recovery_path.as_deref(), self.document_display_name.as_ref(), format) {
+    let output_path = match format_output_path_in(
+      output_dir,
+      self.document_path.as_deref(),
+      self.recovery_path.as_deref(),
+      self.document_display_name.as_ref(),
+      format,
+    ) {
       Ok(path) => path,
       Err(error) => return cx.background_executor().spawn(async move { Err(error) }),
     };
@@ -149,17 +166,20 @@ fn send_output_path(
 }
 
 #[hotpath::measure]
-fn format_output_path(
+fn format_output_path_in(
+  output_dir: Option<PathBuf>,
   source_path: Option<&Path>,
   recovery_path: Option<&Path>,
   display_name: Option<&SharedString>,
   format: DocumentExportFormat,
 ) -> io::Result<PathBuf> {
-  let output_dir = source_path
-    .and_then(Path::parent)
-    .or_else(|| recovery_path.and_then(Path::parent))
-    .map(Path::to_path_buf)
-    .unwrap_or_else(default_send_directory);
+  let output_dir = output_dir.unwrap_or_else(|| {
+    source_path
+      .and_then(Path::parent)
+      .or_else(|| recovery_path.and_then(Path::parent))
+      .map(Path::to_path_buf)
+      .unwrap_or_else(default_send_directory)
+  });
   let stem = document_export_stem(source_path, recovery_path, display_name);
   unique_sibling_path(output_dir.join(format!("{stem}.{}", format.extension())))
 }

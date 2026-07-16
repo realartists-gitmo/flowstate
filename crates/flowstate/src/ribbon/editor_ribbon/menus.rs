@@ -536,7 +536,10 @@ fn export_format_from_ribbon(
   workspace: Option<WeakEntity<Workspace>>,
   cx: &mut App,
 ) {
-  let task = editor.update(cx, |editor, cx| editor.export_document_format(format, cx));
+  // R4-B: each verb remembers its destination (Settings ▸ export
+  // directories); unset = beside the document.
+  let output_dir = crate::app_settings::load_export_directory(format.extension());
+  let task = editor.update(cx, |editor, cx| editor.export_document_format_to(format, output_dir, cx));
   cx.spawn(async move |cx| {
     let result = task.await;
     let Some(workspace) = workspace else {
@@ -677,12 +680,33 @@ fn modern_export_format(
         }),
     )
     .dropdown_menu(move |menu, _, _| {
+      let db8_editor = editor.clone();
+      let db8_workspace = workspace.clone();
       let docx_editor = editor.clone();
       let docx_workspace = workspace.clone();
       let pdf_workspace = workspace.clone();
       let pdf_editor = editor.clone();
       menu
         .min_w(px(100.0))
+        // R4-B: the native package gets its own direct verb.
+        .item(
+          PopupMenuItem::element(|_, _| {
+            h_flex()
+              .flex_1()
+              .justify_end()
+              .child(".db8")
+              .into_any_element()
+          })
+          .icon(Icon::default().path("icons/save.svg").small())
+          .on_click(move |_, _, cx| {
+            export_format_from_ribbon(
+              db8_editor.clone(),
+              DocumentExportFormat::NativeWithExtension(flowstate_document::FLOWSTATE_EXTENSION),
+              db8_workspace.clone(),
+              cx,
+            );
+          }),
+        )
         .item(
           PopupMenuItem::element(|_, _| {
             h_flex()

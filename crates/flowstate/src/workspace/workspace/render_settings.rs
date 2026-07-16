@@ -615,7 +615,11 @@ impl Workspace {
             .item(smart_word_selection_item(workspace.clone()))
             .item(autosave_item(workspace.clone()))
             .item(send_to_document_directory_item(workspace.clone()))
-            .item(send_custom_directory_item(workspace.clone())),
+            .item(send_custom_directory_item(workspace.clone()))
+            // R4-B: per-verb export destinations (empty = beside the doc).
+            .item(export_directory_item("Export .db8 to", "db8", workspace.clone()))
+            .item(export_directory_item("Export .docx to", "docx", workspace.clone()))
+            .item(export_directory_item("Export .pdf to", "pdf", workspace.clone())),
         )
         .group(
           SettingGroup::new()

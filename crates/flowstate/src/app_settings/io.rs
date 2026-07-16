@@ -200,6 +200,18 @@ pub fn load_send_custom_directory() -> Option<PathBuf> {
   load_app_settings().editor.send_custom_directory
 }
 
+/// R4-B: the remembered destination for one export verb, keyed by the
+/// format's extension (`db8` / `docx` / `pdf`). `None` = beside the doc.
+pub fn load_export_directory(extension: &str) -> Option<PathBuf> {
+  let editor = load_app_settings().editor;
+  match extension {
+    "db8" => editor.export_db8_directory,
+    "docx" => editor.export_docx_directory,
+    "pdf" => editor.export_pdf_directory,
+    _ => None,
+  }
+}
+
 pub fn load_recent_documents() -> Vec<PathBuf> {
   load_app_settings().recent_documents
 }
@@ -507,6 +519,18 @@ pub fn save_send_to_document_directory(enabled: bool) -> io::Result<()> {
 pub fn save_send_custom_directory(path: Option<PathBuf>) -> io::Result<()> {
   let mut settings = load_app_settings();
   settings.editor.send_custom_directory = path;
+  save_app_settings(settings)
+}
+
+/// R4-B twin of [`load_export_directory`]. Unknown extensions are a no-op.
+pub fn save_export_directory(extension: &str, path: Option<PathBuf>) -> io::Result<()> {
+  let mut settings = load_app_settings();
+  match extension {
+    "db8" => settings.editor.export_db8_directory = path,
+    "docx" => settings.editor.export_docx_directory = path,
+    "pdf" => settings.editor.export_pdf_directory = path,
+    _ => return Ok(()),
+  }
   save_app_settings(settings)
 }
 

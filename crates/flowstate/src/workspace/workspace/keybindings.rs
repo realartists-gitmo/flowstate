@@ -360,8 +360,9 @@ impl Workspace {
       },
       CommandId::ExportFormat => {
         if let Some(editor) = self.active_editor.clone() {
+          let output_dir = crate::app_settings::load_export_directory("docx");
           let task = editor.update(cx, |editor, cx| {
-            editor.export_document_format(crate::rich_text_element::DocumentExportFormat::Docx, cx)
+            editor.export_document_format_to(crate::rich_text_element::DocumentExportFormat::Docx, output_dir, cx)
           });
           cx.spawn(async move |_, _| {
             if let Err(error) = task.await {
