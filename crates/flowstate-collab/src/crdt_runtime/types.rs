@@ -220,6 +220,27 @@ impl RuntimeEvent {
   }
 }
 
+/// H-S5: one differing span, in the BASE (historical) projection's
+/// coordinates, attributed to the author whose op wrote it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RuntimeDiffSpan {
+  pub start: gpui_flowtext::DocumentOffset,
+  pub end: gpui_flowtext::DocumentOffset,
+  pub author_user_id: Option<u128>,
+  pub author_display_name: Option<String>,
+}
+
+/// H-S5: a two-frontier diff, shaped for the history preview. `removed_since`
+/// paints on the historical view (that text no longer exists at the newer
+/// frontier); insertions have no home in the historical view, so they are
+/// summarized as counts.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RuntimeFrontierDiff {
+  pub removed_since: Vec<RuntimeDiffSpan>,
+  pub inserted_chars: usize,
+  pub removed_chars: usize,
+}
+
 #[derive(Clone, Debug)]
 pub struct RuntimePresenceCaretRequest {
   pub selection: crate::presence::PresenceSelection,

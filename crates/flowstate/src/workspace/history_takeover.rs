@@ -11,7 +11,11 @@
 
 use std::collections::HashSet;
 
-use flowstate_collab::{crdt_runtime::RuntimeEvent, crdt_runtime::RuntimeRevisionInfo, doc_io::DocIoHandle};
+use flowstate_collab::{
+  SessionId,
+  crdt_runtime::{RuntimeEvent, RuntimeFrontierDiff, RuntimeRevisionInfo},
+  doc_io::DocIoHandle,
+};
 use flowstate_document::RevisionKind;
 use gpui::{
   App, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Render,
@@ -55,6 +59,10 @@ pub struct HistoryTakeover {
   pin_input: Entity<InputState>,
   pinning: bool,
   busy: bool,
+  /// H-S5: paint what changed between the shown moment and now ("vs now"
+  /// default; any-two-points selection is a recorded deferral).
+  diff_enabled: bool,
+  diff: Option<RuntimeFrontierDiff>,
   collapsed_groups: HashSet<usize>,
   checkout_generation: u64,
   refresh_pending: bool,
@@ -96,6 +104,8 @@ impl HistoryTakeover {
       pin_input,
       pinning: false,
       busy: false,
+      diff_enabled: true,
+      diff: None,
       collapsed_groups: HashSet::new(),
       checkout_generation: 0,
       refresh_pending: false,
@@ -222,6 +232,7 @@ impl HistoryTakeover {
                   .update(cx, |preview, cx| preview.replace_document_projection(document, cx));
                 takeover.shown_frontier = Some(frontier);
                 takeover.error = None;
+                takeover.refresh_diff(generation, cx);
               },
               None => takeover.error = Some("The historical view returned no document".into()),
             }
@@ -232,6 +243,67 @@ impl HistoryTakeover {
       });
     })
     .detach();
+  }
+
+  /// H-S5: fetch the shown-moment→now diff and dress the preview — removed
+  /// text gets author-colored dashed underlines (the same review dress the
+  /// comments panel uses), insertions are summarized in the header.
+  fn refresh_diff(&mut self, generation: u64, cx: &mut Context<Self>) {
+    if !self.diff_enabled {
+      return;
+    }
+    let Some(frontier) = self.shown_frontier.clone() else { return };
+    let io = self.io.clone();
+    cx.spawn(async move |takeover, cx| {
+      let result = io.frontier_diff(frontier, None).await;
+      let _ = takeover.update(cx, |takeover, cx| {
+        if takeover.checkout_generation != generation || !takeover.diff_enabled {
+          return;
+        }
+        match result {
+          Ok(diff) => {
+            takeover.paint_diff(&diff, cx);
+            takeover.diff = Some(diff);
+          },
+          Err(error) => takeover.error = Some(format!("Computing the diff failed: {error:#}").into()),
+        }
+        cx.notify();
+      });
+    })
+    .detach();
+  }
+
+  fn paint_diff(&self, diff: &RuntimeFrontierDiff, cx: &mut Context<Self>) {
+    let marks: Vec<crate::rich_text_element::ExternalSelection> = diff
+      .removed_since
+      .iter()
+      .map(|span| crate::rich_text_element::ExternalSelection {
+        selection: crate::rich_text_element::EditorSelection::range(span.start, span.end),
+        color_rgb: span
+          .author_user_id
+          .map_or(0x008a_8a8a, SessionId::color_for_user),
+      })
+      .collect();
+    self
+      .preview
+      .update(cx, |preview, cx| preview.set_annotation_selections(marks, cx));
+  }
+
+  fn clear_diff(&mut self, cx: &mut Context<Self>) {
+    self.diff = None;
+    self
+      .preview
+      .update(cx, |preview, cx| preview.set_annotation_selections(Vec::new(), cx));
+  }
+
+  fn toggle_diff(&mut self, cx: &mut Context<Self>) {
+    self.diff_enabled = !self.diff_enabled;
+    if self.diff_enabled {
+      self.refresh_diff(self.checkout_generation, cx);
+    } else {
+      self.clear_diff(cx);
+    }
+    cx.notify();
   }
 
   /// H-S4 restore: forward op behind the runtime-enforced safety pin. The
@@ -473,11 +545,48 @@ impl Render for HistoryTakeover {
                 ),
               )
               .child(
-                Button::new("history-exit-top")
-                  .text()
-                  .compact()
-                  .child(div().text_xs().child("Exit history"))
-                  .on_click(cx.listener(|takeover, _, _, cx| takeover.exit(cx))),
+                h_flex()
+                  .gap_2()
+                  .items_center()
+                  // H-S5: author legend + change counts for the shown diff.
+                  .when_some(self.diff.as_ref().filter(|_| self.diff_enabled), |this, diff| {
+                    let mut authors: Vec<(Option<u128>, String)> = Vec::new();
+                    for span in &diff.removed_since {
+                      let name = span.author_display_name.clone().unwrap_or_else(|| "Unknown".to_string());
+                      if !authors.iter().any(|(id, _)| *id == span.author_user_id) {
+                        authors.push((span.author_user_id, name));
+                      }
+                    }
+                    this
+                      .children(authors.into_iter().map(|(user_id, name)| {
+                        h_flex()
+                          .gap_1()
+                          .items_center()
+                          .child(div().w(px(7.0)).h(px(7.0)).rounded_full().bg(gpui::Hsla::from(gpui::rgb(
+                            user_id.map_or(0x008a_8a8a, SessionId::color_for_user),
+                          ))))
+                          .child(div().text_xs().text_color(cx.theme().muted_foreground).child(name))
+                      }))
+                      .child(div().text_xs().text_color(cx.theme().muted_foreground).child(format!(
+                        "−{} · +{} since",
+                        diff.removed_chars, diff.inserted_chars
+                      )))
+                  })
+                  .child(
+                    Button::new("history-diff-toggle")
+                      .text()
+                      .compact()
+                      .tooltip("Underline what no longer exists in the present, by author")
+                      .child(div().text_xs().text_color(if self.diff_enabled { cx.theme().warning } else { cx.theme().muted_foreground }).child("Diff vs now"))
+                      .on_click(cx.listener(|takeover, _, _, cx| takeover.toggle_diff(cx))),
+                  )
+                  .child(
+                    Button::new("history-exit-top")
+                      .text()
+                      .compact()
+                      .child(div().text_xs().child("Exit history"))
+                      .on_click(cx.listener(|takeover, _, _, cx| takeover.exit(cx))),
+                  ),
               ),
           )
           .child(div().flex_1().min_h_0().overflow_hidden().child(self.preview.clone()))

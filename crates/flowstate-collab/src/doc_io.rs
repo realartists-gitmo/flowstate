@@ -87,6 +87,12 @@ pub enum IoRequest {
     title: String,
     reply: Sender<Result<u128>>,
   },
+  /// H-S5: two-frontier diff + blame (None = vs now).
+  FrontierDiff {
+    base_frontier: Vec<u8>,
+    newer_frontier: Option<Vec<u8>>,
+    reply: Sender<Result<crate::crdt_runtime::RuntimeFrontierDiff>>,
+  },
   /// H-S1: rename a revision record (naming pins it as a `named` tier).
   RenameRevision {
     revision_id: u128,
@@ -219,6 +225,7 @@ fn io_request_kind(request: &IoRequest) -> &'static str {
     IoRequest::CheckpointPackage { .. } => "checkpoint-package",
     IoRequest::RestoreFrontier { .. } => "restore-frontier",
     IoRequest::CreateNamedPin { .. } => "create-named-pin",
+    IoRequest::FrontierDiff { .. } => "frontier-diff",
     IoRequest::RenameRevision { .. } => "rename-revision",
     IoRequest::PackageBytes { .. } => "package-bytes",
     IoRequest::SavePackageTo { .. } => "save-package-to",
@@ -344,6 +351,20 @@ impl DocIoHandle {
   pub async fn create_named_pin(&self, title: String) -> Result<u128> {
     self
       .request(|reply| IoRequest::CreateNamedPin { title, reply })
+      .await
+  }
+
+  pub async fn frontier_diff(
+    &self,
+    base_frontier: Vec<u8>,
+    newer_frontier: Option<Vec<u8>>,
+  ) -> Result<crate::crdt_runtime::RuntimeFrontierDiff> {
+    self
+      .request(|reply| IoRequest::FrontierDiff {
+        base_frontier,
+        newer_frontier,
+        reply,
+      })
       .await
   }
 
@@ -719,6 +740,18 @@ fn io_loop(core: &Arc<WriteGate<CrdtRuntime>>, receiver: &Receiver<IoRequest>) {
             let title = title.trim();
             anyhow::ensure!(!title.is_empty(), "A checkpoint name cannot be empty");
             runtime.mint_named_pin_now(title)
+          }),
+        );
+      },
+      IoRequest::FrontierDiff {
+        base_frontier,
+        newer_frontier,
+        reply,
+      } => {
+        send_reply(
+          &reply,
+          gate_call(core, GateHolder::DocumentService, |runtime| {
+            runtime.frontier_diff_vs(&base_frontier, newer_frontier.as_deref())
           }),
         );
       },

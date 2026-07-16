@@ -85,7 +85,8 @@ pub enum RepairEmission {
 use types::UndoSelectionState;
 pub use types::{
   ProjectionFallbackStats, ProjectionInvalidation, ProjectionTextRange, RuntimeAssetMetadata, RuntimeCommentMessage, RuntimeCommentThread,
-  RuntimeEvent, RuntimePresenceCaretRequest, RuntimePresenceCarets, RuntimeRevisionInfo, SemanticCommand, UndoSelectionAffinity,
+  RuntimeDiffSpan, RuntimeEvent, RuntimeFrontierDiff, RuntimePresenceCaretRequest, RuntimePresenceCarets, RuntimeRevisionInfo,
+  SemanticCommand, UndoSelectionAffinity,
   UndoSelectionDirection, UndoSelectionSnapshot,
 };
 
@@ -2070,6 +2071,97 @@ impl CrdtRuntime {
     thread.insert("general", false)?;
     thread.insert("updated_at", unix_time_secs())?;
     self.finish_comment_mutation(from_frontier, from_vv, "comment-reanchor")
+  }
+
+  /// H-S5: two-frontier diff + blame. Removed-since spans land in the BASE
+  /// (historical) projection's coordinates; each span is attributed by the
+  /// op id of its midpoint character (a span may cover several authors — the
+  /// midpoint author wins, which is honest at paint granularity). Authorship
+  /// resolves op peer → `replicas_by_id` → `users_by_id` (the schema's blame
+  /// chain).
+  pub fn frontier_diff_vs(&self, base_frontier: &[u8], newer_frontier: Option<&[u8]>) -> Result<RuntimeFrontierDiff> {
+    let from = Frontiers::decode(base_frontier).context("decoding base frontier for diff")?;
+    let to = match newer_frontier {
+      Some(frontier) => Frontiers::decode(frontier).context("decoding newer frontier for diff")?,
+      None => self.doc.state_frontiers(),
+    };
+    let batch = self
+      .doc
+      .diff(&from, &to)
+      .map_err(|error| anyhow::anyhow!(error.to_string()))
+      .context("computing two-frontier diff")?;
+    let fork = self
+      .doc
+      .fork_at(&from)
+      .context("forking document at the diff base frontier")?;
+    let base_projection = document_from_loro(&fork).context("projecting the diff base")?;
+    let index = ProjectionRuntimeIndex::from_projection(&base_projection);
+    let text = body_text(&fork);
+    let text_id = text.id();
+
+    let mut diff = RuntimeFrontierDiff::default();
+    for (container, container_diff) in batch.iter() {
+      if *container != text_id {
+        continue;
+      }
+      let loro::event::Diff::Text(deltas) = container_diff else {
+        continue;
+      };
+      let mut base_pos = 0usize;
+      for delta in deltas {
+        match delta {
+          loro::TextDelta::Retain { retain, .. } => base_pos += retain,
+          loro::TextDelta::Insert { insert, .. } => diff.inserted_chars += insert.chars().count(),
+          loro::TextDelta::Delete { delete } => {
+            let start_unicode = base_pos;
+            let end_unicode = base_pos + delete;
+            base_pos = end_unicode;
+            diff.removed_chars += delete;
+            let author_peer = text
+              .get_cursor(start_unicode + delete / 2, loro::cursor::Side::Middle)
+              .and_then(|cursor| cursor.id)
+              .map(|id| id.peer);
+            let (author_user_id, author_display_name) = self.resolve_blame_author(author_peer);
+            if let (Some(start), Some(end)) = (
+              index.offset_for_body_unicode(&base_projection, start_unicode),
+              index.offset_for_body_unicode(&base_projection, end_unicode),
+            ) {
+              diff.removed_since.push(RuntimeDiffSpan {
+                start,
+                end,
+                author_user_id,
+                author_display_name,
+              });
+            }
+          },
+        }
+      }
+    }
+    Ok(diff)
+  }
+
+  /// The schema's blame chain: op peer → `replicas_by_id[peer].user_id` →
+  /// `users_by_id[user].display_name`.
+  fn resolve_blame_author(&self, peer: Option<u64>) -> (Option<u128>, Option<String>) {
+    let Some(peer) = peer else { return (None, None) };
+    let root = flowstate_document::loro_schema::root_map(&self.doc);
+    let Some(ValueOrContainer::Container(Container::Map(replicas))) = root.get(flowstate_document::loro_schema::REPLICAS_BY_ID) else {
+      return (None, None);
+    };
+    let Some(ValueOrContainer::Container(Container::Map(replica))) = replicas.get(&peer.to_string()) else {
+      return (None, None);
+    };
+    let Some(user_id) = map_string_opt(&replica, "user_id").and_then(|id| id.parse::<u128>().ok()) else {
+      return (None, None);
+    };
+    let display_name = match root.get(flowstate_document::loro_schema::USERS_BY_ID) {
+      Some(ValueOrContainer::Container(Container::Map(users))) => match users.get(&user_id.to_string()) {
+        Some(ValueOrContainer::Container(Container::Map(user))) => map_string_opt(&user, "display_name"),
+        _ => None,
+      },
+      _ => None,
+    };
+    (Some(user_id), display_name)
   }
 
   /// C-S6 history-jump: the document as the comment author saw it — a
@@ -8216,6 +8308,48 @@ mod tests {
       assert!(tombstoned.deleted);
       assert!(tombstoned.body.is_empty());
     }
+    Ok(())
+  }
+
+  #[test]
+  fn frontier_diff_reports_removed_spans_with_blame_and_insert_counts() -> Result<()> {
+    let mut runtime = CrdtRuntime::new_empty("Diff")?;
+    runtime.set_author_identity(7, Some("Ada".into()))?;
+    runtime.command(SemanticCommand::InsertText {
+      unicode_index: 1,
+      text: "keep DOOMED keep".to_string(),
+      styles: RunStyles::default(),
+    })?;
+    // Identity registration is lazy (rides the first intent-path edit in
+    // production); the semantic-command test path registers it explicitly.
+    runtime.register_pending_author_identity();
+    let base = runtime.doc().state_frontiers().encode();
+    // Delete "DOOMED " (unicode 6..13 in body space) and add a tail.
+    runtime.command(SemanticCommand::DeleteRange {
+      unicode_index: 6,
+      unicode_len: 7,
+    })?;
+    runtime.command(SemanticCommand::InsertText {
+      unicode_index: 10,
+      text: " and new words".to_string(),
+      styles: RunStyles::default(),
+    })?;
+
+    let diff = runtime.frontier_diff_vs(&base, None)?;
+    assert_eq!(diff.removed_chars, 7);
+    assert_eq!(diff.inserted_chars, 14);
+    assert_eq!(diff.removed_since.len(), 1, "one removed span");
+    let span = &diff.removed_since[0];
+    assert_eq!((span.start.paragraph, span.start.byte), (0, 5), "span starts where the deletion began");
+    assert_eq!((span.end.paragraph, span.end.byte), (0, 12));
+    // Blame chain: op peer -> replica -> user -> display name.
+    assert_eq!(span.author_user_id, Some(7));
+    assert_eq!(span.author_display_name.as_deref(), Some("Ada"));
+
+    // Identical frontiers diff empty.
+    let now = runtime.doc().state_frontiers().encode();
+    let empty = runtime.frontier_diff_vs(&now, None)?;
+    assert!(empty.removed_since.is_empty() && empty.inserted_chars == 0 && empty.removed_chars == 0);
     Ok(())
   }
 
