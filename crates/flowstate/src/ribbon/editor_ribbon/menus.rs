@@ -166,7 +166,8 @@ fn modern_condense_menu(
         .on_click({
           let editor = editor.clone();
           move |_, window, cx| {
-            condense_editor_selection(editor.clone(), ' ', window, cx);
+            // CT-S4: the primary verb is the INVERTIBLE one.
+            condense_editor_selection(editor.clone(), CONDENSE_PILCROW_MARKER, window, cx);
           }
         }),
     )
@@ -176,7 +177,9 @@ fn modern_condense_menu(
       let editor_for_uncondense = editor.clone();
       menu
         .min_w(px(190.0))
-        .item(PopupMenuItem::new("Condense").on_click(move |_, window, cx| {
+        .item(PopupMenuItem::new("Condense flat (irreversible)").on_click(move |_, window, cx| {
+          // CT-S4: space-join loses the paragraph boundaries for good — the
+          // label says so now.
           condense_editor_selection(editor_for_plain_condense.clone(), ' ', window, cx);
         }))
         .item(PopupMenuItem::new("Condense with pilcrows").on_click(move |_, window, cx| {

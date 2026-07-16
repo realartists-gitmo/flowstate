@@ -1052,10 +1052,14 @@ impl Workspace {
       let Some(fragment) = editor.fragment_at_selection_or_enclosing_section(flowstate_document::CARD_BOUNDARY_STYLE_SLOTS) else {
         return false;
       };
+      // CT-S4 (CT4-A): pilcrow-join is the DEFAULT — condense is always
+      // invertible (uncondense splits on the marker). Space-join survives
+      // only as the ribbon's explicit "Condense flat (irreversible)".
+      let separator = crate::ribbon::CONDENSE_PILCROW_MARKER;
       let paragraphs = if editor.selection().is_caret() {
-        condense_card_fragment_paragraphs(fragment.paragraphs, ' ')
+        condense_card_fragment_paragraphs(fragment.paragraphs, separator)
       } else {
-        condense_fragment_paragraphs(fragment.paragraphs, ' ')
+        condense_fragment_paragraphs(fragment.paragraphs, separator)
       };
       if paragraphs.is_empty() {
         return false;
