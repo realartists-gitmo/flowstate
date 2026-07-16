@@ -144,6 +144,17 @@ fn hash_table(table: &TableBlock, hasher: &mut impl Hasher) {
             hash_paragraph(&paragraph.paragraph, hasher);
             paragraph.text.hash(hasher);
           },
+          // B-S5: cell objects hash by their identity-bearing payload.
+          TableCellBlock::Image(image) => {
+            4u8.hash(hasher);
+            image.asset_id.0.hash(hasher);
+            image.version.hash(hasher);
+          },
+          TableCellBlock::Equation(equation) => {
+            5u8.hash(hasher);
+            equation.source.as_ref().hash(hasher);
+            equation.version.hash(hasher);
+          },
           TableCellBlock::Table(table) => {
             1u8.hash(hasher);
             hash_table(table, hasher);

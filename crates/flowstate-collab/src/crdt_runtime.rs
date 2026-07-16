@@ -6497,6 +6497,13 @@ fn write_table_cell_map_from_input(
   for (block_ix, cell_block) in cell.blocks.iter().enumerate() {
     match cell_block {
       InputTableCellBlock::Paragraph(paragraph) => append_input_paragraph_text_only(&text, paragraph)?,
+      // B-S5: cell objects — a placeholder char in the flow + a GLOBAL
+      // registry record (shared shape with the import path).
+      InputTableCellBlock::Image(_) | InputTableCellBlock::Equation(_) => {
+        let pos = text.len_unicode();
+        text.insert(pos, &OBJECT_REPLACEMENT.to_string())?;
+        flowstate_document::write_cell_object_record(doc, cell_id, block_ix, &flow_id, &text, pos, cell_block)?;
+      },
       InputTableCellBlock::Table(nested) => {
         let pos = text.len_unicode();
         text.insert(pos, &OBJECT_REPLACEMENT.to_string())?;
@@ -6527,9 +6534,9 @@ fn update_table_cell_map_from_input(
   if cell
     .blocks
     .iter()
-    .any(|block| matches!(block, InputTableCellBlock::Table(_)))
+    .any(|block| matches!(block, InputTableCellBlock::Table(_) | InputTableCellBlock::Image(_) | InputTableCellBlock::Equation(_)))
   {
-    tracing::warn!(cell_id, "using full table-cell rebuild fallback for nested table structure");
+    tracing::warn!(cell_id, "using full table-cell rebuild fallback for nested structure/objects");
     return write_table_cell_map_from_input(doc, cell_map, cell_id, row_id, column_id, cell, true);
   }
   cell_map.insert("id", cell_id)?;
@@ -6549,7 +6556,7 @@ fn update_table_cell_map_from_input(
     .iter()
     .filter_map(|block| match block {
       InputTableCellBlock::Paragraph(paragraph) => Some(paragraph),
-      InputTableCellBlock::Table(_) => None,
+      InputTableCellBlock::Table(_) | InputTableCellBlock::Image(_) | InputTableCellBlock::Equation(_) => None,
     })
     .collect::<Vec<_>>();
   let desired = if paragraphs.is_empty() {

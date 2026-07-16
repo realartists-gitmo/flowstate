@@ -40,7 +40,7 @@ pub(super) fn add_block(
       }
       docx.add_paragraph(docx_paragraph)
     },
-    Block::Table(table) => docx.add_table(export_table(table, theme, context)),
+    Block::Table(table) => docx.add_table(export_table(document, table, theme, context, side)),
     Block::Image(image) => docx.add_paragraph(export_image(document, image, theme, context, side)),
     Block::Equation(equation) => docx.add_paragraph(omml_paragraph_for_equation(equation, theme, side)),
   }
@@ -195,7 +195,13 @@ fn apply_run_style(run: Run, styles: RunStyles, paragraph_style: ParagraphStyle,
 // -- Tables (FS-123 spans, FS-124 grid/header) -------------------------------
 
 #[hotpath::measure]
-fn export_table(table: &TableBlock, theme: &DocumentTheme, context: &SectionContext) -> DocxTable {
+fn export_table(
+  document: &DocumentProjection,
+  table: &TableBlock,
+  theme: &DocumentTheme,
+  context: &SectionContext,
+  side: &mut SideChannel,
+) -> DocxTable {
   // FS-124 fidelity: the `w:tblHeader` marker is emitted only on the first row,
   // so a header-flagged table with no rows loses its repeat-on-page header
   // semantics.
@@ -230,7 +236,7 @@ fn export_table(table: &TableBlock, theme: &DocumentTheme, context: &SectionCont
 
   for (row_ix, row) in table.rows.iter().enumerate() {
     let is_header = table.style.header_row && row_ix == 0;
-    let cells = export_row_cells(row, &grid, column_count, is_header, theme, context, &mut active);
+    let cells = export_row_cells(document, row, &grid, column_count, is_header, theme, context, side, &mut active);
     let mut docx_row = DocxTableRow::new(cells);
     if is_header {
       // The only per-row `trPr` child docx-rs 0.4.20 exposes; the post-process
@@ -257,12 +263,14 @@ struct ActiveMerge {
 
 #[hotpath::measure]
 fn export_row_cells(
+  document: &DocumentProjection,
   row: &flowstate_document::TableRow,
   grid: &[i64],
   column_count: usize,
   is_header: bool,
   theme: &DocumentTheme,
   context: &SectionContext,
+  side: &mut SideChannel,
   active: &mut [Option<ActiveMerge>],
 ) -> Vec<DocxTableCell> {
   let mut cells: Vec<DocxTableCell> = Vec::new();
@@ -289,7 +297,7 @@ fn export_row_cells(
       let col_span = (source_cell.col_span.max(1) as usize).min(column_count - column);
       let row_span = source_cell.row_span.max(1);
       let width = grid_slice_width(grid, column, col_span);
-      let mut cell = export_table_cell(source_cell, theme, context, is_header).width(width, WidthType::Dxa);
+      let mut cell = export_table_cell(document, source_cell, theme, context, is_header, side).width(width, WidthType::Dxa);
       if col_span > 1 {
         cell = cell.grid_span(col_span);
       }
@@ -318,7 +326,7 @@ fn export_row_cells(
   // dropping their content (they lose span alignment but remain visible).
   for source_cell in source {
     let col_span = source_cell.col_span.max(1) as usize;
-    let mut cell = export_table_cell(source_cell, theme, context, is_header);
+    let mut cell = export_table_cell(document, source_cell, theme, context, is_header, side);
     if col_span > 1 {
       cell = cell.grid_span(col_span);
     }
@@ -352,7 +360,14 @@ fn grid_slice_width(grid: &[i64], start: usize, span: usize) -> usize {
 }
 
 #[hotpath::measure]
-fn export_table_cell(cell: &TableCell, theme: &DocumentTheme, context: &SectionContext, is_header: bool) -> DocxTableCell {
+fn export_table_cell(
+  document: &DocumentProjection,
+  cell: &TableCell,
+  theme: &DocumentTheme,
+  context: &SectionContext,
+  is_header: bool,
+  side: &mut SideChannel,
+) -> DocxTableCell {
   let mut out = DocxTableCell::new();
   let mut emitted = false;
   let mut last_was_table = false;
@@ -366,7 +381,19 @@ fn export_table_cell(cell: &TableCell, theme: &DocumentTheme, context: &SectionC
       TableCellBlock::Table(table) => {
         last_was_table = true;
         emitted = true;
-        out.add_table(export_table(table, theme, context))
+        out.add_table(export_table(document, table, theme, context, side))
+      },
+      // B-S5: cell objects export through the SAME paragraph builders the
+      // body uses (image run / OMML with the bracketed fallback).
+      TableCellBlock::Image(image) => {
+        last_was_table = false;
+        emitted = true;
+        out.add_paragraph(export_image(document, image, theme, context, side))
+      },
+      TableCellBlock::Equation(equation) => {
+        last_was_table = false;
+        emitted = true;
+        out.add_paragraph(omml_paragraph_for_equation(equation, theme, side))
       },
     };
   }

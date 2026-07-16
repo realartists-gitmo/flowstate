@@ -10,6 +10,8 @@ use loro::{ContainerTrait as _, LoroDoc, LoroMap, LoroMovableList, LoroResult, L
 use rustc_hash::FxHashMap;
 use uuid::Uuid;
 
+use gpui_flowtext::{InputBlockAlignment, InputEquationDisplay, InputEquationSyntax, InputImageSizing, InputTableCellBlock};
+
 use crate::{
   AssetChunk, BLOCKS_BY_ID, BODY_FLOW_ID, FLOW_ATTRS_KEY, FLOW_ID_KEY, FLOW_KIND_KEY, FLOW_TEXT_KEY, FLOWS_BY_ID, MARK_DIRECT_UNDERLINE,
   MARK_HIGHLIGHT_STYLE, MARK_PARAGRAPH_STYLE, MARK_RUN_SEMANTIC_STYLE, MARK_STRIKETHROUGH, MARK_VERT_ALIGN, OBJECT_REPLACEMENT,
@@ -206,6 +208,7 @@ pub(crate) fn replace_body_from_document(doc: &LoroDoc, document: &DocumentProje
           document,
           image,
           projection_block_id(document, block_ix, "image"),
+          BODY_FLOW_ID,
           &body_text,
           body_text_op_base,
           *anchor_pos,
@@ -241,7 +244,7 @@ pub(crate) fn replace_body_from_document(doc: &LoroDoc, document: &DocumentProje
           body_text_op_base,
           *anchor_pos,
         )?;
-        import_table(&flows, &block, table)?;
+        import_table(&flows, &blocks, document, &block, table)?;
       },
       _ => unreachable!("flow import plan must preserve document block shape"),
     }
@@ -265,6 +268,7 @@ fn import_image_block(
   document: &DocumentProjection,
   image: &ImageBlock,
   durable_block_id: String,
+  flow_id: &str,
   body_text: &LoroText,
   text_op_base: Option<(u64, i32)>,
   anchor_pos: usize,
@@ -273,7 +277,7 @@ fn import_image_block(
     blocks,
     durable_block_id.clone(),
     "image",
-    BODY_FLOW_ID,
+    flow_id,
     body_text,
     text_op_base,
     anchor_pos,
@@ -769,7 +773,13 @@ fn push_rich_text_insert(delta: &mut Vec<TextDelta>, value: &str, attributes: Op
   });
 }
 
-fn import_table(flows: &LoroMap, block: &LoroMap, table: &TableBlock) -> LoroResult<()> {
+fn import_table(
+  flows: &LoroMap,
+  blocks: &LoroMap,
+  document: &DocumentProjection,
+  block: &LoroMap,
+  table: &TableBlock,
+) -> LoroResult<()> {
   let table_map = block.ensure_mergeable_map(TABLE_KEY)?;
   let row_order = table_map.ensure_mergeable_movable_list(TABLE_ROW_ORDER)?;
   let column_order = table_map.ensure_mergeable_movable_list(TABLE_COLUMN_ORDER)?;
@@ -834,14 +844,14 @@ fn import_table(flows: &LoroMap, block: &LoroMap, table: &TableBlock) -> LoroRes
         .iter()
         .map(|block| match block {
           TableCellBlock::Paragraph(paragraph) => paragraph.paragraph.runs.len().saturating_add(1),
-          TableCellBlock::Table(_) => 1,
+          TableCellBlock::Table(_) | TableCellBlock::Image(_) | TableCellBlock::Equation(_) => 1,
         })
         .sum();
       let mut cell_plan = FlowTextImportPlan::new(cell.blocks.len(), cell_delta_capacity);
       for cell_block in &cell.blocks {
         match cell_block {
           TableCellBlock::Paragraph(paragraph) => cell_plan.push_paragraph(&paragraph.paragraph, &paragraph.text),
-          TableCellBlock::Table(_) => cell_plan.push_object(),
+          TableCellBlock::Table(_) | TableCellBlock::Image(_) | TableCellBlock::Equation(_) => cell_plan.push_object(),
         }
       }
       cell_plan.write_to(None, &text)?;
@@ -851,19 +861,43 @@ fn import_table(flows: &LoroMap, block: &LoroMap, table: &TableBlock) -> LoroRes
         .zip(&cell_plan.block_positions)
         .enumerate()
       {
-        let (TableCellBlock::Table(nested), FlowBlockPosition::Object { anchor_pos }) = (cell_block, position) else {
+        let FlowBlockPosition::Object { anchor_pos } = position else {
           continue;
         };
-        let nested_table_id = format!("{cell_id}.nested_table.{block_ix}");
-        nested_table_ids.push(nested_table_id.as_str())?;
-        let nested_map = nested_tables_by_id.ensure_mergeable_map(&nested_table_id)?;
-        nested_map.insert("id", nested_table_id.as_str())?;
-        nested_map.insert("kind", "table")?;
-        if let Some(cursor) = text.get_cursor(*anchor_pos, Side::Left) {
-          nested_map.insert("anchor_cursor", cursor.encode())?;
+        match cell_block {
+          TableCellBlock::Table(nested) => {
+            let nested_table_id = format!("{cell_id}.nested_table.{block_ix}");
+            nested_table_ids.push(nested_table_id.as_str())?;
+            let nested_map = nested_tables_by_id.ensure_mergeable_map(&nested_table_id)?;
+            nested_map.insert("id", nested_table_id.as_str())?;
+            nested_map.insert("kind", "table")?;
+            if let Some(cursor) = text.get_cursor(*anchor_pos, Side::Left) {
+              nested_map.insert("anchor_cursor", cursor.encode())?;
+            }
+            nested_map.ensure_mergeable_map("attrs")?;
+            import_table(flows, blocks, document, &nested_map, nested)?;
+          },
+          // B-S5: cell objects live in the GLOBAL block registry, anchored in
+          // the cell's flow — the same record shape the body uses, so
+          // `object_blocks_for_flow` (flow-filtered) materializes them and the
+          // quarantine/defect law applies unchanged.
+          TableCellBlock::Image(image) => {
+            let durable_block_id = format!("{cell_id}.object.{block_ix}");
+            import_image_block(flows, blocks, document, image, durable_block_id, &flow_id, &text, None, *anchor_pos)?;
+          },
+          TableCellBlock::Equation(equation) => {
+            let durable_block_id = format!("{cell_id}.object.{block_ix}");
+            let block = ensure_block(blocks, durable_block_id.clone(), "equation", &flow_id, &text, None, *anchor_pos)?;
+            let source_flow_id = nested_flow_id("equation_source", &durable_block_id);
+            block.insert("source_flow_id", source_flow_id.as_str())?;
+            let source_flow = ensure_flow(flows, &source_flow_id, "equation_source")?;
+            replace_text(&source_flow.ensure_mergeable_text(FLOW_TEXT_KEY)?, equation.source.as_ref())?;
+            let attrs = block.ensure_mergeable_map("attrs")?;
+            attrs.insert("syntax", equation_syntax_name(equation.syntax))?;
+            attrs.insert("display", equation_display_name(equation.display))?;
+          },
+          TableCellBlock::Paragraph(_) => {},
         }
-        nested_map.ensure_mergeable_map("attrs")?;
-        import_table(flows, &nested_map, nested)?;
       }
     }
   }
@@ -1024,6 +1058,87 @@ fn alignment_name(alignment: BlockAlignment) -> &'static str {
     BlockAlignment::Left => "left",
     BlockAlignment::Center => "center",
     BlockAlignment::Right => "right",
+  }
+}
+
+/// B-S5: one cell-object record (image/equation) into the GLOBAL registry,
+/// anchored in the cell flow. The runtime's whole-cell writer shares the
+/// import path's record shape, so `object_blocks_for_flow` materializes both
+/// origins identically. Returns `false` for non-object blocks.
+pub fn write_cell_object_record(
+  doc: &LoroDoc,
+  cell_id: &str,
+  block_ix: usize,
+  flow_id: &str,
+  text: &LoroText,
+  anchor_pos: usize,
+  object: &InputTableCellBlock,
+) -> LoroResult<bool> {
+  let root = doc.get_map(ROOT);
+  let flows = root.ensure_mergeable_map(FLOWS_BY_ID)?;
+  let blocks = root.ensure_mergeable_map(BLOCKS_BY_ID)?;
+  let durable_block_id = format!("{cell_id}.object.{block_ix}");
+  match object {
+    InputTableCellBlock::Image(image) => {
+      let block = ensure_block(&blocks, durable_block_id.clone(), "image", flow_id, text, None, anchor_pos)?;
+      block.insert("asset_id", image.asset_id.0.to_string())?;
+      match image.external_url.as_deref().filter(|url| !url.is_empty()) {
+        Some(url) => block.insert("external_url", url)?,
+        None => {
+          if block.get("external_url").is_some() {
+            block.delete("external_url")?;
+          }
+        },
+      }
+      let alt_text_flow_id = nested_flow_id("image_alt", &durable_block_id);
+      block.insert("alt_text_flow_id", alt_text_flow_id.as_str())?;
+      let alt_flow = ensure_flow(&flows, &alt_text_flow_id, "alt_text")?;
+      replace_text(&alt_flow.ensure_mergeable_text(FLOW_TEXT_KEY)?, &image.alt_text)?;
+      let attrs = block.ensure_mergeable_map("attrs")?;
+      attrs.insert(
+        "alignment",
+        match image.alignment {
+          InputBlockAlignment::Left => "left",
+          InputBlockAlignment::Center => "center",
+          InputBlockAlignment::Right => "right",
+        },
+      )?;
+      match image.sizing {
+        InputImageSizing::Intrinsic => attrs.insert("sizing", "intrinsic")?,
+        InputImageSizing::FitWidth => attrs.insert("sizing", "fit_width")?,
+        InputImageSizing::Fixed { width_px, height_px } => {
+          attrs.insert("sizing", "fixed")?;
+          attrs.insert("width_px", i64::from(width_px))?;
+          if let Some(height_px) = height_px {
+            attrs.insert("height_px", i64::from(height_px))?;
+          }
+        },
+      };
+      Ok(true)
+    },
+    InputTableCellBlock::Equation(equation) => {
+      let block = ensure_block(&blocks, durable_block_id.clone(), "equation", flow_id, text, None, anchor_pos)?;
+      let source_flow_id = nested_flow_id("equation_source", &durable_block_id);
+      block.insert("source_flow_id", source_flow_id.as_str())?;
+      let source_flow = ensure_flow(&flows, &source_flow_id, "equation_source")?;
+      replace_text(&source_flow.ensure_mergeable_text(FLOW_TEXT_KEY)?, &equation.source)?;
+      let attrs = block.ensure_mergeable_map("attrs")?;
+      attrs.insert(
+        "syntax",
+        match equation.syntax {
+          InputEquationSyntax::Latex => "latex",
+        },
+      )?;
+      attrs.insert(
+        "display",
+        match equation.display {
+          InputEquationDisplay::Display => "display",
+          InputEquationDisplay::InlineLikeParagraph => "inline_like_paragraph",
+        },
+      )?;
+      Ok(true)
+    },
+    InputTableCellBlock::Paragraph(_) | InputTableCellBlock::Table(_) => Ok(false),
   }
 }
 

@@ -36,6 +36,9 @@ fn table_plain_text(table: &InputTableBlock) -> String {
             .map(|block| match block {
               InputTableCellBlock::Paragraph(paragraph) => input_paragraph_text(paragraph),
               InputTableCellBlock::Table(table) => table_plain_text(table),
+              // B-S5: cell objects mirror the body's plain-text stand-ins.
+              InputTableCellBlock::Image(image) => image.alt_text.clone(),
+              InputTableCellBlock::Equation(equation) => equation.source.clone(),
             })
             .collect::<Vec<_>>()
             .join("\n")

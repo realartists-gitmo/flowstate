@@ -137,6 +137,9 @@ fn accumulate_table_stats(table: &TableBlock, stats: &mut DocumentStats, nested:
         match block {
           TableCellBlock::Paragraph(_) => stats.table_cell_paragraphs += 1,
           TableCellBlock::Table(table) => accumulate_table_stats(table, stats, true),
+          // B-S5: cell objects count with their body kin.
+          TableCellBlock::Image(_) => stats.images += 1,
+          TableCellBlock::Equation(_) => stats.equations += 1,
         }
       }
     }
@@ -236,6 +239,8 @@ fn check_table_fidelity(table: &TableBlock, report: &mut FidelityReport, label: 
               format!("{label} cell {row_ix}:{cell_ix} paragraph {block_ix} byte range must match cell text"),
             );
           },
+          // B-S5: objects carry no run/byte invariants to check here.
+          TableCellBlock::Image(_) | TableCellBlock::Equation(_) => {},
           TableCellBlock::Table(table) => check_table_fidelity(table, report, &format!("{label} nested {row_ix}:{cell_ix}:{block_ix}")),
         }
       }

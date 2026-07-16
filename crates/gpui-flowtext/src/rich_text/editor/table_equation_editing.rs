@@ -35,7 +35,7 @@ impl RichTextEditor {
           .iter()
           .filter_map(|block| match block {
             TableCellBlock::Paragraph(paragraph) => Some(paragraph.text.as_str()),
-            TableCellBlock::Table(_) => None,
+            TableCellBlock::Table(_) | TableCellBlock::Image(_) | TableCellBlock::Equation(_) => None,
           })
           .collect();
         let last_paragraph = paragraph_texts.len().saturating_sub(1);
@@ -104,7 +104,7 @@ impl RichTextEditor {
             .iter()
             .filter_map(|block| match block {
               TableCellBlock::Paragraph(paragraph) => Some(paragraph.text.as_str()),
-              TableCellBlock::Table(_) => None,
+              TableCellBlock::Table(_) | TableCellBlock::Image(_) | TableCellBlock::Equation(_) => None,
             })
             .collect::<Vec<_>>()
             .join(" "),
@@ -291,7 +291,7 @@ impl RichTextEditor {
       .iter()
       .filter_map(|block| match block {
         TableCellBlock::Paragraph(paragraph) => Some(paragraph.text.as_str()),
-        TableCellBlock::Table(_) => None,
+        TableCellBlock::Table(_) | TableCellBlock::Image(_) | TableCellBlock::Equation(_) => None,
       })
       .collect();
     let flow = crate::local_intents::table_cell_flow_string(&paragraph_texts);

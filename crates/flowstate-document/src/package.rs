@@ -3843,7 +3843,7 @@ mod tests {
       .iter()
       .map(|cell| match &cell.blocks[0] {
         TableCellBlock::Paragraph(paragraph) => paragraph.text.as_str(),
-        TableCellBlock::Table(_) => "",
+        TableCellBlock::Table(_) | TableCellBlock::Image(_) | TableCellBlock::Equation(_) => "",
       })
       .collect::<Vec<_>>();
     assert_eq!(cell_texts, vec!["right", "left"]);

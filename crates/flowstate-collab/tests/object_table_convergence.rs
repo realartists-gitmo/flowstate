@@ -172,7 +172,7 @@ mod tests {
       .iter()
       .filter_map(|block| match block {
         TableCellBlock::Paragraph(paragraph) => Some(paragraph.text.as_str()),
-        TableCellBlock::Table(_) => None,
+        TableCellBlock::Table(_) | TableCellBlock::Image(_) | TableCellBlock::Equation(_) => None,
       })
       .collect()
   }
@@ -1374,7 +1374,9 @@ mod tests {
       .iter()
       .filter_map(|cell_block| match cell_block {
         gpui_flowtext::TableCellBlock::Paragraph(paragraph) => Some(paragraph.text.clone()),
-        gpui_flowtext::TableCellBlock::Table(_) => None,
+        gpui_flowtext::TableCellBlock::Table(_) | gpui_flowtext::TableCellBlock::Image(_) | gpui_flowtext::TableCellBlock::Equation(_) => {
+          None
+        },
       })
       .collect();
     let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
@@ -1493,5 +1495,164 @@ mod tests {
       matches!(result, Err(gpui_flowtext::WriteRejected::StaleCellText)),
       "stale positional op must reject, got {result:?}"
     );
+  }
+
+  /// B-S5: objects live in cells — a cell carrying an image + an equation
+  /// round-trips through import → projection (the global flow-filtered
+  /// registry walk), survives the runtime's whole-cell writer, and CONVERGES
+  /// across peers alongside concurrent cell-text edits.
+  #[test]
+  fn cell_objects_round_trip_and_converge() {
+    let mut peers: Vec<Peer> = (0..2).map(|_| Peer::new("cell-objects", 2)).collect();
+    sync_all(&mut peers);
+    let projection = peers[0].projection();
+    let paragraph = projection.ids.paragraph_ids[0];
+
+    // A 1×1 table whose cell holds: text ¶, an equation, an image.
+    let row_id = RowId(Uuid::new_v4().as_u128());
+    let column_id = ColumnId(Uuid::new_v4().as_u128());
+    let cell = InputTableCell {
+      id: CellId::from_coordinate(row_id, column_id),
+      row_id,
+      column_id,
+      blocks: vec![
+        InputTableCellBlock::Paragraph(input_paragraph("evidence")),
+        InputTableCellBlock::Equation(InputEquationBlock {
+          source: "e = mc^2".into(),
+          syntax: InputEquationSyntax::Latex,
+          display: InputEquationDisplay::Display,
+        }),
+        InputTableCellBlock::Image(InputImageBlock {
+          asset_id: AssetId(77),
+          alt_text: "cell chart".into(),
+          sizing: InputImageSizing::Intrinsic,
+          alignment: InputBlockAlignment::Left,
+          external_url: None,
+        }),
+      ],
+      row_span: 1,
+      col_span: 1,
+    };
+    let table = InputBlock::Table(InputTableBlock {
+      rows: vec![InputTableRow { id: row_id, cells: vec![cell] }],
+      columns: vec![InputTableColumn {
+        id: column_id,
+        width: InputTableColumnWidth::Auto,
+      }],
+      style: InputTableStyle { header_row: false },
+    });
+    peers[0]
+      .handle
+      .insert_object(InsertObjectIntent {
+        at: TextAnchor::new(paragraph, 0),
+        block: table,
+      })
+      .expect("table with cell objects inserts");
+    sync_all(&mut peers);
+
+    let cell_kinds = |peer: &Peer| -> Vec<&'static str> {
+      let projection = peer.fresh_projection();
+      let Some((_, table)) = first_table(&projection) else {
+        return Vec::new();
+      };
+      table.rows[0].cells[0]
+        .blocks
+        .iter()
+        .map(|block| match block {
+          flowstate_document::TableCellBlock::Paragraph(_) => "paragraph",
+          flowstate_document::TableCellBlock::Table(_) => "table",
+          flowstate_document::TableCellBlock::Image(_) => "image",
+          flowstate_document::TableCellBlock::Equation(_) => "equation",
+        })
+        .collect()
+    };
+    assert_eq!(
+      cell_kinds(&peers[0]),
+      vec!["paragraph", "equation", "image"],
+      "peer A materializes the cell's objects in flow order"
+    );
+    assert_eq!(cell_kinds(&peers[0]), cell_kinds(&peers[1]), "peers agree on the cell's shape");
+
+    // Concurrent: A edits the cell TEXT (whole-cell writer with objects
+    // routes through the full rebuild), B is idle; both converge with the
+    // objects intact.
+    let (table_id, table_block) = first_table(&peers[0].projection()).expect("table");
+    let mut replaced = table_block.rows[0].cells[0].clone();
+    for block in &mut replaced.blocks {
+      if let flowstate_document::TableCellBlock::Paragraph(paragraph) = block {
+        paragraph.text = "revised evidence".into();
+        paragraph.paragraph.runs = vec![flowstate_document::TextRun {
+          len: "revised evidence".len(),
+          styles: flowstate_document::RunStyles::default(),
+        }];
+      }
+    }
+    peers[0]
+      .handle
+      .table_op(gpui_flowtext::TableIntent::ReplaceCell {
+        table: table_id,
+        row: row_id,
+        column: column_id,
+        cell: input_table_cell_from(&replaced),
+      })
+      .expect("whole-cell replace with objects");
+    sync_all(&mut peers);
+    sync_all(&mut peers);
+    assert_eq!(
+      cell_kinds(&peers[1]),
+      vec!["paragraph", "equation", "image"],
+      "objects survive the whole-cell rewrite on the remote peer"
+    );
+    let text_of = |peer: &Peer| -> String {
+      let projection = peer.fresh_projection();
+      let (_, table) = first_table(&projection).expect("table");
+      table.rows[0].cells[0]
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+          flowstate_document::TableCellBlock::Paragraph(paragraph) => Some(paragraph.text.to_string()),
+          _ => None,
+        })
+        .collect()
+    };
+    assert_eq!(text_of(&peers[0]), text_of(&peers[1]), "cell text converges");
+    assert!(text_of(&peers[0]).contains("revised evidence"));
+  }
+
+  /// The projection→input cell converter for the whole-cell test path.
+  fn input_table_cell_from(cell: &flowstate_document::TableCell) -> InputTableCell {
+    InputTableCell {
+      id: cell.id,
+      row_id: cell.row_id,
+      column_id: cell.column_id,
+      blocks: cell
+        .blocks
+        .iter()
+        .map(|block| match block {
+          flowstate_document::TableCellBlock::Paragraph(paragraph) => InputTableCellBlock::Paragraph(InputParagraph {
+            style: paragraph.paragraph.style,
+            runs: vec![InputRun {
+              text: paragraph.text.to_string(),
+              styles: flowstate_document::RunStyles::default(),
+            }],
+          }),
+          flowstate_document::TableCellBlock::Image(image) => InputTableCellBlock::Image(InputImageBlock {
+            asset_id: image.asset_id,
+            alt_text: image.alt_text.to_string(),
+            sizing: InputImageSizing::Intrinsic,
+            alignment: InputBlockAlignment::Left,
+            external_url: None,
+          }),
+          flowstate_document::TableCellBlock::Equation(equation) => InputTableCellBlock::Equation(InputEquationBlock {
+            source: equation.source.to_string(),
+            syntax: InputEquationSyntax::Latex,
+            display: InputEquationDisplay::Display,
+          }),
+          flowstate_document::TableCellBlock::Table(_) => InputTableCellBlock::Paragraph(input_paragraph("")),
+        })
+        .collect(),
+      row_span: cell.row_span,
+      col_span: cell.col_span,
+    }
   }
 }

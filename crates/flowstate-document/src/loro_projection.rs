@@ -1110,17 +1110,27 @@ impl<'a> Projector<'a> {
   fn table_cell_blocks(&self, cell: &LoroMap, defects: &mut Vec<ProjectionDefect>) -> io::Result<Vec<InputTableCellBlock>> {
     let flow_id = map_string(cell, "flow_id")?;
     let flow = self.flow_text(&flow_id)?;
-    let object_blocks = self.cell_nested_tables(cell, &flow)?;
+    // B-S5: the cell walk reads BOTH registries — the per-cell nested-table
+    // registry (legacy home) UNIONED with the global flow-filtered block
+    // registry, which is where cell images/equations live (the same record
+    // shape and quarantine law as the body).
+    let mut object_blocks = self.cell_nested_tables(cell, &flow)?;
+    let (global_objects, _quarantined, _paragraph_block_index) = self.object_blocks_for_flow(&flow, &flow_id, defects)?;
+    for (position, record) in global_objects {
+      object_blocks.entry(position).or_insert(record);
+    }
     let mut projected = Vec::new();
     self.push_flow_blocks(&flow, &object_blocks, &flow_id, None, None, None, &mut projected, defects, false)?;
     let mut blocks = projected
       .into_iter()
-      .filter_map(|block| match block {
-        InputBlock::Paragraph(paragraph) => Some(Ok(InputTableCellBlock::Paragraph(paragraph))),
-        InputBlock::Table(table) => Some(Ok(InputTableCellBlock::Table(table))),
-        InputBlock::Image(_) | InputBlock::Equation(_) => None,
+      .map(|block| match block {
+        InputBlock::Paragraph(paragraph) => InputTableCellBlock::Paragraph(paragraph),
+        InputBlock::Table(table) => InputTableCellBlock::Table(table),
+        // B-S5: cells carry the full block vocabulary.
+        InputBlock::Image(image) => InputTableCellBlock::Image(image),
+        InputBlock::Equation(equation) => InputTableCellBlock::Equation(equation),
       })
-      .collect::<io::Result<Vec<_>>>()?;
+      .collect::<Vec<_>>();
     if blocks.is_empty() {
       blocks.push(InputTableCellBlock::Paragraph(empty_input_paragraph()));
     }

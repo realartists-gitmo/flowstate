@@ -103,7 +103,7 @@ impl RichTextEditor {
       .iter()
       .filter_map(|block| match block {
         TableCellBlock::Paragraph(paragraph) => Some(input_paragraph_from_table_cell_paragraph(paragraph)),
-        TableCellBlock::Table(_) => None,
+        TableCellBlock::Table(_) | TableCellBlock::Image(_) | TableCellBlock::Equation(_) => None,
       })
       .collect::<Vec<_>>();
     (!paragraphs.is_empty()).then_some(RichClipboardFragment {

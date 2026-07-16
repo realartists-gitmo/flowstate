@@ -403,6 +403,10 @@ pub struct InputTableCell {
 pub enum InputTableCellBlock {
   Paragraph(InputParagraph),
   Table(InputTableBlock),
+  /// B-S5: cells are full nested flows — images live in them.
+  Image(InputImageBlock),
+  /// B-S5: equations too.
+  Equation(InputEquationBlock),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

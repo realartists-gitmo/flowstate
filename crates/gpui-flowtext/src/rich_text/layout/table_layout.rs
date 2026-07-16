@@ -140,9 +140,41 @@ fn table_cell_height(document: &DocumentProjection, cell: &TableCell, width: Pix
         let laid_out = layout_table_block(document, 0, table, content_width + document.theme.pageless_inset_x * 2.0, y, window, cx);
         y = laid_out.bottom + px(2.0);
       },
+      // B-S5: objects in cells occupy their intrinsic box, clamped to the
+      // cell's content width.
+      TableCellBlock::Image(image) => {
+        y += cell_object_size(document, &TableCellBlock::Image(image.clone()), content_width).height + px(2.0);
+      },
+      TableCellBlock::Equation(equation) => {
+        y += cell_object_size(document, &TableCellBlock::Equation(equation.clone()), content_width).height + px(2.0);
+      },
     }
   }
   (y + padding).max(px(28.0))
+}
+
+/// B-S5: the intrinsic box for an object living inside a cell — image
+/// dimensions from its asset (or a placeholder), equation from its render —
+/// clamped to the cell's content width.
+fn cell_object_size(document: &DocumentProjection, block: &TableCellBlock, content_width: Pixels) -> Size<Pixels> {
+  let zoom = document.theme.zoom_factor.max(0.01);
+  let (width, height) = match block {
+    TableCellBlock::Image(image) => document
+      .assets
+      .assets
+      .get(&image.asset_id)
+      .and_then(|asset| asset.dimensions)
+      .map_or((160.0, 120.0), |(width, height)| (width as f32, height as f32)),
+    TableCellBlock::Equation(equation) => {
+      crate::rich_text::editor::equation_intrinsic_size(equation).unwrap_or((120.0, 32.0))
+    },
+    TableCellBlock::Paragraph(_) | TableCellBlock::Table(_) => (0.0, 0.0),
+  };
+  let width = width * zoom;
+  let height = height * zoom;
+  let max_width: f32 = content_width.max(px(24.0)).into();
+  let scale = if width > max_width && width > 0.0 { max_width / width } else { 1.0 };
+  size(px((width * scale).max(24.0)), px((height * scale).max(20.0)))
 }
 
 #[hotpath::measure]
@@ -168,6 +200,26 @@ fn layout_table_cell_blocks(
         let laid_out = layout_table_block(document, 0, table, content_width + document.theme.pageless_inset_x * 2.0, y, window, cx);
         y = laid_out.bottom + px(2.0);
         blocks.push(LaidOutBlock::Table(laid_out));
+      },
+      // B-S5: objects in cells — an object box at the flow position.
+      TableCellBlock::Image(_) | TableCellBlock::Equation(_) => {
+        let object_size = cell_object_size(document, block, content_width);
+        let object_bounds = Bounds {
+          origin: point(bounds.origin.x + padding, y),
+          size: object_size,
+        };
+        let laid_out = LaidOutObjectBlock {
+          block_ix: ix,
+          top: y,
+          bottom: y + object_size.height,
+          bounds: object_bounds,
+          render_ready: true,
+        };
+        y = laid_out.bottom + px(2.0);
+        blocks.push(match block {
+          TableCellBlock::Image(_) => LaidOutBlock::Image(laid_out),
+          _ => LaidOutBlock::Equation(laid_out),
+        });
       },
     }
   }

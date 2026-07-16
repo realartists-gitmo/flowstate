@@ -589,7 +589,47 @@ impl TypedWalker<'_> {
     let mut blocks = Vec::new();
     for content in &cell_node.content {
       match content {
-        CellContent::Paragraph(paragraph) => blocks.push(InputTableCellBlock::Paragraph(cell_paragraph_typed(paragraph))),
+        CellContent::Paragraph(paragraph_node) => {
+          // B-S5: cell paragraphs keep their inline objects — the SAME
+          // drawing/VML/oMath extraction the body walk performs, emitted as
+          // cell blocks (bare object wrappers collapse identically).
+          let paragraph = cell_paragraph_typed(paragraph_node);
+          let mut images = Vec::new();
+          for run in &paragraph_node.runs {
+            for content in &run.content {
+              if let RunContent::Drawing(drawing) = content
+                && let Some(image) = self.image_from_drawing(drawing)
+              {
+                images.push(image);
+              }
+            }
+            for chunk in &run.extra_xml {
+              images.extend(self.images.vml_images_from_chunk(chunk));
+            }
+          }
+          for (_, chunk) in &paragraph_node.extra_xml {
+            images.extend(self.images.vml_images_from_chunk(chunk));
+          }
+          let equations: Vec<_> = paragraph_node
+            .extra_xml
+            .iter()
+            .filter(|(_, chunk)| omml::contains_office_math(chunk))
+            .flat_map(|(_, chunk)| omml::equations_from_container_bytes(chunk))
+            .collect();
+          let paragraph_is_text_empty = paragraph.runs.iter().all(|run| run.text.trim().is_empty());
+          let has_objects = !images.is_empty() || !equations.is_empty();
+          if !(has_objects && paragraph_is_text_empty) {
+            blocks.push(InputTableCellBlock::Paragraph(paragraph));
+          }
+          for image in images {
+            blocks.push(InputTableCellBlock::Image(image));
+            self.images_imported += 1;
+          }
+          for equation in equations {
+            blocks.push(InputTableCellBlock::Equation(equation));
+            self.equations_imported += 1;
+          }
+        },
         CellContent::Table(nested) => blocks.push(InputTableCellBlock::Table(self.parse_table(nested))),
       }
     }

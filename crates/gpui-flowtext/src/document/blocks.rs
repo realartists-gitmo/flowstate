@@ -164,6 +164,10 @@ pub struct TableCell {
 pub enum TableCellBlock {
   Paragraph(TableCellParagraph),
   Table(TableBlock),
+  /// B-S5: cells are full nested flows — images live in them.
+  Image(ImageBlock),
+  /// B-S5: equations too.
+  Equation(EquationBlock),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

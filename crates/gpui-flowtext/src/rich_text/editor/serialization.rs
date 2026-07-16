@@ -306,6 +306,16 @@ fn input_table_cell_from_table_cell(cell: &TableCell) -> InputTableCell {
       .map(|block| match block {
         TableCellBlock::Paragraph(paragraph) => InputTableCellBlock::Paragraph(input_paragraph_from_table_cell_paragraph(paragraph)),
         TableCellBlock::Table(table) => InputTableCellBlock::Table(input_table_from_table(table)),
+        // B-S5: objects in cells round-trip through fragments/clipboard,
+        // reusing the body block converters.
+        TableCellBlock::Image(image) => match input_block_from_block(&Block::Image(image.clone())) {
+          InputBlock::Image(input) => InputTableCellBlock::Image(input),
+          _ => unreachable!("image converts to image"),
+        },
+        TableCellBlock::Equation(equation) => match input_block_from_block(&Block::Equation(equation.clone())) {
+          InputBlock::Equation(input) => InputTableCellBlock::Equation(input),
+          _ => unreachable!("equation converts to equation"),
+        },
       })
       .collect(),
     row_span: cell.row_span,
@@ -343,6 +353,15 @@ fn table_from_input_table(table: &InputTableBlock) -> TableBlock {
               .map(|block| match block {
                 InputTableCellBlock::Paragraph(paragraph) => TableCellBlock::Paragraph(table_cell_paragraph_from_input_paragraph(paragraph)),
                 InputTableCellBlock::Table(table) => TableCellBlock::Table(table_from_input_table(table)),
+                // B-S5: objects in cells.
+                InputTableCellBlock::Image(image) => match block_from_input_block(&InputBlock::Image(image.clone())) {
+                  Block::Image(image) => TableCellBlock::Image(image),
+                  _ => unreachable!("image converts to image"),
+                },
+                InputTableCellBlock::Equation(equation) => match block_from_input_block(&InputBlock::Equation(equation.clone())) {
+                  Block::Equation(equation) => TableCellBlock::Equation(equation),
+                  _ => unreachable!("equation converts to equation"),
+                },
               })
               .collect(),
             row_span: cell.row_span,
