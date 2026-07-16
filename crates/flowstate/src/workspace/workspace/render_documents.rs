@@ -23,6 +23,9 @@ impl Workspace {
       .when(!(self.document_panels.is_empty() && self.flow_panels.is_empty()), |this| {
         this.child(self.render_document_tab_bar(active_index, cx))
       })
+      // CO-S4: the live session strip — attached-only chrome (the status-bar
+      // pill defers to this band while it shows).
+      .when_some(self.render_session_strip(cx), |this, strip| this.child(strip))
       .child(
         div()
           .flex_1()
@@ -57,6 +60,77 @@ impl Workspace {
             this.child(self.render_empty_state(cx))
           }),
       )
+  }
+
+  /// CO-S4: peer chips + invite/leave for the active document's ATTACHED
+  /// session. Absent entirely for solo/joining/detached panels.
+  fn render_session_strip(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    let panel_id = self.active_document_id?;
+    let phase = crate::collab::phase_for_panel(panel_id, cx)?;
+    let crate::collab::SessionPhase::Attached(attachment) = &phase else {
+      return None;
+    };
+    let roster = crate::collab::roster_for_panel(panel_id, cx);
+    let connectivity_label = crate::collab::status::phase_label(&phase, cx);
+    Some(
+      h_flex()
+        .h(px(26.0))
+        .flex_none()
+        .w_full()
+        .items_center()
+        .gap_2()
+        .px_2()
+        .border_b_1()
+        .border_color(cx.theme().border)
+        .bg(cx.theme().link.opacity(0.06))
+        .child(
+          div()
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .child(format!("Live · {connectivity_label} — everyone edits")),
+        )
+        .children(roster.into_iter().enumerate().map(|(ix, entry)| {
+          h_flex()
+            .gap_1()
+            .items_center()
+            .px_1()
+            .rounded_sm()
+            .child(div().w(px(8.0)).h(px(8.0)).rounded_full().bg(gpui::Hsla::from(gpui::rgb(entry.color_rgb))))
+            .child(
+              div()
+                .text_xs()
+                .when(entry.is_self, |this| this.text_color(cx.theme().muted_foreground))
+                .child(if entry.is_self { format!("{} (you)", entry.name) } else { entry.name }),
+            )
+            .id(("session-strip-peer", ix))
+            .into_any_element()
+        }))
+        .when(attachment.peers_present == 0, |this| {
+          this.child(div().text_xs().text_color(cx.theme().muted_foreground).child("No one else here yet"))
+        })
+        .child(div().flex_1())
+        .child(
+          Button::new("session-strip-invite")
+            .xsmall()
+            .ghost()
+            .label("Invite")
+            .on_click(cx.listener(|workspace, _, window, cx| {
+              workspace.open_collaboration_dialog(window, cx);
+            })),
+        )
+        .child(
+          Button::new("session-strip-leave")
+            .xsmall()
+            .ghost()
+            .label("Leave")
+            .tooltip("Leave the session — the document stays yours, local")
+            .on_click(cx.listener(move |_, _, _, cx| {
+              crate::collab::leave_session_for_panel(panel_id, cx);
+              cx.notify();
+            })),
+        )
+        .into_any_element(),
+    )
   }
 
   fn render_document_tab_bar(&self, active_index: usize, cx: &mut Context<Self>) -> impl IntoElement {

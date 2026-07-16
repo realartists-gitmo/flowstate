@@ -21,6 +21,8 @@ use crate::workspace::Workspace;
 
 use super::{DetachReason, SessionPhase, status};
 
+#[path = "hub_people.rs"]
+mod hub_people;
 #[path = "share_dialog_view.rs"]
 mod share_dialog_view;
 use share_dialog_view::*;
@@ -31,10 +33,21 @@ pub enum CollabDialogMode {
   Join,
 }
 
+/// CO-S2: the Hub's rooms. Session = share + join (one live-session story);
+/// People = identity card + trust ceremony + squads (migrated from Settings);
+/// Discovery = nearby trusted peers.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum HubRoom {
+  Session,
+  People,
+  Discovery,
+}
+
 pub struct CollabShareDialog {
   workspace: WeakEntity<Workspace>,
   panel_id: Option<Uuid>,
   mode: CollabDialogMode,
+  pub(super) room: HubRoom,
   join_input: Entity<InputState>,
   joining_session: Option<SessionId>,
   ticket_text: Option<SharedString>,
@@ -72,6 +85,7 @@ impl CollabShareDialog {
       workspace,
       panel_id,
       mode,
+      room: HubRoom::Session,
       join_input,
       joining_session: None,
       ticket_text: None,
@@ -612,7 +626,7 @@ impl Focusable for CollabShareDialog {
 
 #[hotpath::measure_all]
 impl Render for CollabShareDialog {
-  fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+  fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     let phase = self
       .panel_id
       .and_then(|panel_id| crate::collab::phase_for_panel(panel_id, cx));
@@ -621,28 +635,57 @@ impl Render for CollabShareDialog {
       .max_h(px(560.0))
       .gap_4()
       .on_key_down(cx.listener(Self::on_key_down))
+      // CO-S2: the Hub's rooms.
       .child(
         h_flex()
           .gap_2()
           .child(
-            tab_button("collab-share-tab", "Share", self.mode == CollabDialogMode::Share).on_click(cx.listener(|dialog, _, _, cx| {
-              dialog.set_mode(CollabDialogMode::Share, cx);
+            tab_button("collab-room-session", "Session", self.room == HubRoom::Session).on_click(cx.listener(|dialog, _, _, cx| {
+              dialog.room = HubRoom::Session;
+              cx.notify();
             })),
           )
           .child(
-            tab_button("collab-join-tab", "Join", self.mode == CollabDialogMode::Join).on_click(cx.listener(|dialog, _, window, cx| {
-              dialog.set_mode(CollabDialogMode::Join, cx);
-              dialog.focus(window, cx);
+            tab_button("collab-room-people", "People", self.room == HubRoom::People).on_click(cx.listener(|dialog, _, _, cx| {
+              dialog.room = HubRoom::People;
+              cx.notify();
             })),
+          )
+          .child(
+            tab_button("collab-room-discovery", "Discovery", self.room == HubRoom::Discovery).on_click(cx.listener(
+              |dialog, _, _, cx| {
+                dialog.room = HubRoom::Discovery;
+                cx.notify();
+              },
+            )),
           ),
       )
+      .when(self.room == HubRoom::Session, |this| {
+        this.child(
+          h_flex()
+            .gap_2()
+            .child(
+              tab_button("collab-share-tab", "Share", self.mode == CollabDialogMode::Share).on_click(cx.listener(|dialog, _, _, cx| {
+                dialog.set_mode(CollabDialogMode::Share, cx);
+              })),
+            )
+            .child(
+              tab_button("collab-join-tab", "Join", self.mode == CollabDialogMode::Join).on_click(cx.listener(|dialog, _, window, cx| {
+                dialog.set_mode(CollabDialogMode::Join, cx);
+                dialog.focus(window, cx);
+              })),
+            ),
+        )
+      })
       .child(
         div()
           .flex_1()
           .overflow_y_scrollbar()
-          .child(match self.mode {
-            CollabDialogMode::Share => self.render_share_pane(phase.as_ref(), cx),
-            CollabDialogMode::Join => self.render_join_pane(cx),
+          .child(match (self.room, self.mode) {
+            (HubRoom::Session, CollabDialogMode::Share) => self.render_share_pane(phase.as_ref(), cx),
+            (HubRoom::Session, CollabDialogMode::Join) => self.render_join_pane(cx),
+            (HubRoom::People, _) => self.render_people_room(window, cx),
+            (HubRoom::Discovery, _) => self.render_discovery_room(window, cx),
           }),
       )
   }

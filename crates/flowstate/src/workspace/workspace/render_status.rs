@@ -326,7 +326,12 @@ impl Workspace {
       .when_some(activity, |this, event| this.child(self.render_activity_slot(&event, cx)))
       .child(div().flex_1())
       .when_some(collab_phase, |this, phase| {
-        if matches!(phase, crate::collab::SessionPhase::Detached(_)) {
+        // CO-S4: while attached, the session STRIP is the collab surface —
+        // the pill only covers the in-between phases (creating/joining).
+        if matches!(
+          phase,
+          crate::collab::SessionPhase::Detached(_) | crate::collab::SessionPhase::Attached(_)
+        ) {
           this
         } else {
           let tooltip = format!("Collaboration: {} — click to manage", crate::collab::status::phase_label(&phase, cx));

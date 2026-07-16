@@ -743,6 +743,15 @@ impl Workspace {
     cx.notify();
   }
 
+  /// CO-S2/CO-S3: the active rich-text document's save path (scope grants
+  /// are minted against it).
+  pub fn active_document_path(&self, cx: &App) -> Option<PathBuf> {
+    self
+      .active_editor
+      .as_ref()
+      .and_then(|editor| editor.read(cx).document_path().cloned())
+  }
+
   /// TB-S2: what the drag area says — the active document's title, with an
   /// honest unsaved marker.
   pub(super) fn active_document_drag_title(&self, cx: &App) -> SharedString {

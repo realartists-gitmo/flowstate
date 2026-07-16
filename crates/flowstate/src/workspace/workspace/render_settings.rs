@@ -637,14 +637,12 @@ impl Workspace {
           workspace.clone(),
           WorkspaceSettingsSection::Collaboration,
         ))
+        // CO-S2: identity, trust, squads, and discovery moved to the Collab
+        // Hub (Collaborate ▸ Share / the status pill) — where the people are.
         .group(
           SettingGroup::new()
-            .title("Identity and discovery")
-            .item(collaboration_profile_item(workspace.clone()))
-            .item(trusted_collaborators_item(workspace.clone()))
-            .item(collaboration_squads_item(workspace.clone()))
-            .item(collaboration_discovery_pause_item(workspace.clone()))
-            .item(collaboration_bluetooth_item(workspace.clone())),
+            .title("People and discovery")
+            .description("Moved to the Collab Hub — open it from the Collaborate menu or the status bar."),
         )
         .group(
           SettingGroup::new()

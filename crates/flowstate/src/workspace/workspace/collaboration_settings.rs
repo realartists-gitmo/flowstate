@@ -21,8 +21,8 @@ struct CollaborationSquadInputState {
   member: Entity<InputState>,
 }
 
-fn collaboration_profile_item(_workspace: WeakEntity<Workspace>) -> SettingItem {
-  SettingItem::render(move |_, window, cx| {
+pub(crate) fn render_collaboration_profile(_workspace: WeakEntity<Workspace>, window: &mut Window, cx: &mut App) -> AnyElement {
+  {
     let profile = crate::app_settings::load_local_user_profile();
     let state = window.use_keyed_state("collaboration-profile-name", cx, {
       let initial = profile.display_name.clone();
@@ -74,11 +74,11 @@ fn collaboration_profile_item(_workspace: WeakEntity<Workspace>) -> SettingItem 
           .child(Input::new(&state.read(cx).input).w_full()),
       )
       .into_any_element()
-  })
+  }
 }
 
-fn collaboration_discovery_pause_item(_workspace: WeakEntity<Workspace>) -> SettingItem {
-  SettingItem::render(move |_, _, _| {
+pub(crate) fn render_collaboration_discovery_pause(_workspace: WeakEntity<Workspace>, _window: &mut Window, _cx: &mut App) -> AnyElement {
+  {
     let settings = crate::app_settings::load_app_settings();
     h_flex()
       .w_full()
@@ -107,11 +107,11 @@ fn collaboration_discovery_pause_item(_workspace: WeakEntity<Workspace>) -> Sett
           }),
       )
       .into_any_element()
-  })
+  }
 }
 
-fn trusted_collaborators_item(workspace: WeakEntity<Workspace>) -> SettingItem {
-  SettingItem::render(move |_, window, cx| {
+pub(crate) fn render_trusted_collaborators(workspace: WeakEntity<Workspace>, window: &mut Window, cx: &mut App) -> AnyElement {
+  {
     let state = window.use_keyed_state("trusted-collaborator-input", cx, {
       let workspace = workspace.clone();
       move |window, cx| {
@@ -299,11 +299,11 @@ fn trusted_collaborators_item(workspace: WeakEntity<Workspace>) -> SettingItem {
         ),
       )
       .into_any_element()
-  })
+  }
 }
 
-fn collaboration_bluetooth_item(_workspace: WeakEntity<Workspace>) -> SettingItem {
-  SettingItem::render(move |_, _, _| {
+pub(crate) fn render_collaboration_bluetooth(_workspace: WeakEntity<Workspace>, _window: &mut Window, _cx: &mut App) -> AnyElement {
+  {
     let settings = crate::app_settings::load_app_settings();
     h_flex()
       .w_full()
@@ -335,11 +335,11 @@ fn collaboration_bluetooth_item(_workspace: WeakEntity<Workspace>) -> SettingIte
           }),
       )
       .into_any_element()
-  })
+  }
 }
 
-fn collaboration_squads_item(workspace: WeakEntity<Workspace>) -> SettingItem {
-  SettingItem::render(move |_, window, cx| {
+pub(crate) fn render_collaboration_squads(workspace: WeakEntity<Workspace>, window: &mut Window, cx: &mut App) -> AnyElement {
+  {
     let state = window.use_keyed_state("collaboration-squad-input", cx, |window, cx| CollaborationSquadInputState {
       name: cx.new(|cx| InputState::new(window, cx).placeholder("Squad name")),
       member: cx.new(|cx| InputState::new(window, cx).placeholder("Verified member identity key")),
@@ -476,7 +476,7 @@ fn collaboration_squads_item(workspace: WeakEntity<Workspace>) -> SettingItem {
         ),
       )
       .into_any_element()
-  })
+  }
 }
 
 fn dropbox_connection_item(_workspace: WeakEntity<Workspace>) -> SettingItem {
