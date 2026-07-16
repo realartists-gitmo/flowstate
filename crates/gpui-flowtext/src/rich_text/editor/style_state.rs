@@ -215,7 +215,24 @@ impl RichTextEditor {
         .background_executor()
         .spawn(async { Err(io::Error::new(io::ErrorKind::InvalidInput, "choose a save location before saving")) });
     };
-    self.save_to_path(path, cx)
+    self.save_to_path(path, NativeSaveKind::Explicit, cx)
+  }
+
+  /// H-S1: the autosave entry — identical persistence, but the host's save
+  /// hook stamps the revision record as autosave grain instead of a session
+  /// save.
+  pub fn save_auto(&mut self, cx: &mut Context<Self>) -> Task<io::Result<()>> {
+    if self.disposed {
+      return cx
+        .background_executor()
+        .spawn(async { Err(io::Error::new(io::ErrorKind::NotFound, "editor is closed")) });
+    }
+    let Some(path) = self.document_path.clone() else {
+      return cx
+        .background_executor()
+        .spawn(async { Err(io::Error::new(io::ErrorKind::InvalidInput, "choose a save location before saving")) });
+    };
+    self.save_to_path(path, NativeSaveKind::Auto, cx)
   }
 
   pub fn save_as(&mut self, path: PathBuf, cx: &mut Context<Self>) -> Task<io::Result<()>> {
@@ -226,10 +243,10 @@ impl RichTextEditor {
     }
     self.document_path = Some(path.clone());
     self.recovery_path = Some(recovery_path_for_document(&path));
-    self.save_to_path(path, cx)
+    self.save_to_path(path, NativeSaveKind::Explicit, cx)
   }
 
-  fn save_to_path(&mut self, path: PathBuf, cx: &mut Context<Self>) -> Task<io::Result<()>> {
+  fn save_to_path(&mut self, path: PathBuf, kind: NativeSaveKind, cx: &mut Context<Self>) -> Task<io::Result<()>> {
     if self.disposed {
       return cx
         .background_executor()
@@ -246,7 +263,7 @@ impl RichTextEditor {
       // or re-install; the projection stays untouched.
       let assets = document.assets.assets.values().cloned().collect();
       return cx.spawn(async move |editor, cx| {
-        let write_result = save_hook(path, assets).await;
+        let write_result = save_hook(path, assets, kind).await;
         if write_result.is_ok()
           && let Some(recovery_path) = recovery_path
         {

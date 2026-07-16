@@ -111,7 +111,7 @@ pub async fn sync_bound_checkpoint(local_path: &Path, title: String, io_handle: 
           .map_err(|error| io::Error::other(format!("merging Dropbox changes failed: {error:#}")))?;
       }
       io_handle
-        .checkpoint_package(title.clone(), Some(local_path.to_path_buf()))
+        .checkpoint_package(title.clone(), Some(local_path.to_path_buf()), flowstate_document::RevisionStamp::session())
         .await
         .map_err(|error| io::Error::other(format!("saving merged Dropbox checkpoint failed: {error:#}")))?;
       let merged = io_handle

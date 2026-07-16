@@ -814,7 +814,7 @@ fn recorded_inverse_survives_inert_checkpoint_commits() {
   {
     let mut guard = gate.lock(GateHolder::Test).expect("gate healthy");
     guard
-      .checkpoint_package("Autosave", Some(path.clone()))
+      .checkpoint_package("Autosave", Some(path.clone()), &flowstate_document::RevisionStamp::auto())
       .expect("checkpoint runs")
   };
 
@@ -827,7 +827,7 @@ fn recorded_inverse_survives_inert_checkpoint_commits() {
   {
     let mut guard = gate.lock(GateHolder::Test).expect("gate healthy");
     guard
-      .checkpoint_package("Autosave", Some(path))
+      .checkpoint_package("Autosave", Some(path), &flowstate_document::RevisionStamp::auto())
       .expect("second checkpoint runs")
   };
   assert!(handle.apply_redo().expect("redo runs").applied);

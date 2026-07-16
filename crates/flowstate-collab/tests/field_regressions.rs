@@ -575,7 +575,7 @@ mod tests {
     let doc = flowstate_document::new_loro_document("Live").expect("doc");
     let mut package = flowstate_document::DocumentPackage::from_loro_snapshot(&doc, "Live").expect("package");
     let revision_id = package
-      .create_named_revision(&doc, "Blank", "Blank document", None, None)
+      .create_named_revision(&doc, "Blank", "Blank document", flowstate_document::RevisionKind::Session, None, None)
       .expect("revision");
     package.write(&path).expect("write");
 

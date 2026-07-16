@@ -196,7 +196,7 @@ mod tests {
       // delta under test here.)
       let snapshots_before = runtime.package().expect("package").loro_snapshots.len();
       let (job, _events) = runtime
-        .begin_checkpoint("Routine save", Some(path.clone()))
+        .begin_checkpoint("Routine save", Some(path.clone()), &flowstate_document::RevisionStamp::session())
         .expect("begin")
         .expect("package present");
       let (package, wrote) = job.run();

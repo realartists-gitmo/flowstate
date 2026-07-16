@@ -461,7 +461,15 @@ pub const JUMP_FLASH_DURATION: Duration = Duration::from_millis(900);
 // Loro-first: hooks carry NO pending edit batches (nothing is ever pending —
 // intents commit synchronously) and return no replacement projection (the
 // canonical doc is always current; there is nothing to replay).
-pub type NativeSaveHook = Rc<dyn Fn(PathBuf, Vec<AssetRecord>) -> Pin<Box<dyn Future<Output = io::Result<()>>>>>;
+/// H-S1: whether a save was user-initiated or autosave grain — the host's
+/// save hook stamps its revision record accordingly.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeSaveKind {
+  Explicit,
+  Auto,
+}
+
+pub type NativeSaveHook = Rc<dyn Fn(PathBuf, Vec<AssetRecord>, NativeSaveKind) -> Pin<Box<dyn Future<Output = io::Result<()>>>>>;
 pub type NativeExportHook = Rc<dyn Fn(PathBuf, DocumentExportFormat, Vec<AssetRecord>) -> Pin<Box<dyn Future<Output = io::Result<()>>>>>;
 pub type NativeRecoveryHook = Rc<dyn Fn(PathBuf) -> Pin<Box<dyn Future<Output = io::Result<()>>>>>;
 

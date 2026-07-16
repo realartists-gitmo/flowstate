@@ -1870,6 +1870,7 @@ impl CrdtRuntime {
               revision_id: revision.revision_id,
               title: revision.title.clone(),
               summary: revision.summary.clone(),
+              kind: revision.kind,
               created_at_unix_secs: revision.created_at_unix_secs,
               author_user_id: revision.author_user_id,
               author_display_name,
@@ -4063,7 +4064,12 @@ impl CrdtRuntime {
   /// While the package is checked out, import-side revision syncs and segment
   /// persistence skip + self-heal on the next pass (their existing behavior
   /// for package-less runtimes).
-  pub fn begin_checkpoint(&mut self, title: &str, path: Option<PathBuf>) -> io::Result<Option<(CheckpointJob, Vec<RuntimeEvent>)>> {
+  pub fn begin_checkpoint(
+    &mut self,
+    title: &str,
+    path: Option<PathBuf>,
+    stamp: &flowstate_document::RevisionStamp,
+  ) -> io::Result<Option<(CheckpointJob, Vec<RuntimeEvent>)>> {
     if self.package.is_none() {
       return Ok(None);
     }
@@ -4081,8 +4087,22 @@ impl CrdtRuntime {
     let begin_probe = *BEGIN_PROBE.get_or_init(|| std::env::var_os("FLOWSTATE_CHECKPOINT_PROBE").is_some());
     let probe_t = std::time::Instant::now();
     flowstate_document::touch_document_metadata(&self.doc).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    flowstate_document::record_revision(&self.doc, revision_id, revision_frontier, title, "Explicit save", self.author_user_id)
-      .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    flowstate_document::record_revision(
+      &self.doc,
+      revision_id,
+      revision_frontier,
+      stamp.display_title(),
+      stamp.kind,
+      self.author_user_id,
+    )
+    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    // H-S1: autosave grain gets thinned as it ages (named/session exempt);
+    // thinning BEFORE the update export below lets it ride this segment.
+    if stamp.kind == flowstate_document::RevisionKind::Auto
+      && let Err(error) = self.thin_auto_revisions()
+    {
+      tracing::warn!(error = %format_args!("{error:#}"), "thinning auto revisions failed");
+    }
     // The metadata/revision commit is undo-inert ("meta" origin): keep the
     // recorded fast-undo timelines alive across it (§act-ten A10.2).
     crate::local_write::recorded_inverse::rearm_recorded_inverse_frontier(self);
@@ -4130,6 +4150,7 @@ impl CrdtRuntime {
       projection,
       package,
       title: title.to_string(),
+      revision_stamp: stamp.clone(),
       revision_id,
       revision_frontiers,
       author_user_id: self.author_user_id,
@@ -4138,6 +4159,73 @@ impl CrdtRuntime {
       record_revision: true,
     };
     Ok(Some((job, events)))
+  }
+
+  /// H-S1 thinning: prune AUTO-grain revision records as they age. Retention:
+  /// every auto < 1h old; one per hour to 24h; one per day beyond. Named pins
+  /// and session saves are exempt. Prunes the doc-side records (convergent —
+  /// peers thinning concurrently delete the same elements) and the manifest
+  /// entries; snapshot chunks stay (compaction owns their lifecycle).
+  pub fn thin_auto_revisions(&mut self) -> Result<usize> {
+    let Some(package) = &self.package else { return Ok(0) };
+    let now = unix_time_secs();
+    let mut claimed_hours: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    let mut claimed_days: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    let mut autos: Vec<(u128, i64)> = package
+      .revisions
+      .iter()
+      .filter(|revision| revision.kind == flowstate_document::RevisionKind::Auto)
+      .map(|revision| (revision.revision_id, revision.created_at_unix_secs))
+      .collect();
+    autos.sort_by_key(|(_, at)| *at);
+    // Newest survivor per bucket: walk newest-first; the first record to claim
+    // an hour/day bucket survives, every older record in it is doomed.
+    let mut doomed: std::collections::HashSet<u128> = std::collections::HashSet::new();
+    for (revision_id, created_at) in autos.iter().rev() {
+      let age = now - created_at;
+      if age < 3_600 {
+        continue;
+      }
+      let already_claimed = if age < 86_400 {
+        !claimed_hours.insert(created_at / 3_600)
+      } else {
+        !claimed_days.insert(created_at / 86_400)
+      };
+      if already_claimed {
+        doomed.insert(*revision_id);
+      }
+    }
+    if doomed.is_empty() {
+      return Ok(0);
+    }
+    flowstate_document::loro_schema::remove_revision_records(&self.doc, &doomed).context("removing thinned revision records")?;
+    let package = self.package.as_mut().expect("checked above");
+    let removed = package.remove_revisions(&doomed);
+    tracing::debug!(removed, "thinned auto-grain revisions");
+    Ok(removed)
+  }
+
+  /// H-S1: rename a revision record — naming a moment PINS it (kind becomes
+  /// `named`, exempting it from thinning). Persists the doc-side rename as a
+  /// journaled segment so it survives without waiting for the next save.
+  pub fn rename_revision(&mut self, revision_id: u128, title: &str) -> Result<()> {
+    let title = title.trim();
+    anyhow::ensure!(!title.is_empty(), "A checkpoint name cannot be empty");
+    let from_frontier = self.doc.state_frontiers();
+    let from_vv = self.doc.state_vv();
+    let renamed =
+      flowstate_document::loro_schema::rename_revision_record(&self.doc, revision_id, title).context("renaming revision record")?;
+    anyhow::ensure!(renamed, "That checkpoint no longer exists");
+    if let Some(package) = &mut self.package {
+      package.rename_revision(revision_id, title);
+    }
+    let update = self.local_update_bytes(&from_vv)?;
+    if !update.is_empty() {
+      self.persist_update_segment(from_frontier, from_vv, update)?;
+    }
+    // Meta-origin commit: keep the recorded fast-undo timelines alive.
+    crate::local_write::recorded_inverse::rearm_recorded_inverse_frontier(self);
+    Ok(())
   }
 
   /// §P3 (act two): a revision-LESS split checkpoint for document close/idle.
@@ -4162,6 +4250,7 @@ impl CrdtRuntime {
       projection: self.projection.clone(),
       package,
       title: String::new(),
+      revision_stamp: flowstate_document::RevisionStamp::default(),
       revision_id: 0,
       revision_frontiers: self.doc.state_frontiers(),
       author_user_id: self.author_user_id,
@@ -4182,15 +4271,32 @@ impl CrdtRuntime {
     }
   }
 
-  pub fn checkpoint_package(&mut self, title: &str, path: Option<PathBuf>) -> io::Result<Vec<RuntimeEvent>> {
+  pub fn checkpoint_package(
+    &mut self,
+    title: &str,
+    path: Option<PathBuf>,
+    stamp: &flowstate_document::RevisionStamp,
+  ) -> io::Result<Vec<RuntimeEvent>> {
     let revision_id = Uuid::new_v4().as_u128();
     let revision_frontiers = self.doc.state_frontiers();
     let revision_frontier = revision_frontiers.encode();
     let from_frontier = self.doc.state_frontiers();
     let from_vv = self.doc.state_vv();
     flowstate_document::touch_document_metadata(&self.doc).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    flowstate_document::record_revision(&self.doc, revision_id, revision_frontier, title, "Explicit save", self.author_user_id)
-      .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    flowstate_document::record_revision(
+      &self.doc,
+      revision_id,
+      revision_frontier,
+      stamp.display_title(),
+      stamp.kind,
+      self.author_user_id,
+    )
+    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    if stamp.kind == flowstate_document::RevisionKind::Auto
+      && let Err(error) = self.thin_auto_revisions()
+    {
+      tracing::warn!(error = %format_args!("{error:#}"), "thinning auto revisions failed");
+    }
     let mut revision_invalidation = ProjectionInvalidation::default();
     self.merge_subscription_invalidation(&mut revision_invalidation);
     let update = self
@@ -4244,8 +4350,9 @@ impl CrdtRuntime {
       &self.doc,
       revision_id,
       &revision_frontiers,
-      title,
-      "Explicit save",
+      stamp.display_title(),
+      "",
+      stamp.kind,
       self.author_user_id,
       Some(self.doc.peer_id() as u128),
     )?;
@@ -7715,6 +7822,9 @@ pub struct CheckpointJob {
   pub projection: DocumentProjection,
   pub package: DocumentPackage,
   pub title: String,
+  /// H-S1: what the minted revision record says (tier + display title) —
+  /// distinct from `title`, which names the PACKAGE.
+  pub revision_stamp: flowstate_document::RevisionStamp,
   pub revision_id: u128,
   pub revision_frontiers: Frontiers,
   pub author_user_id: Option<u128>,
@@ -7794,8 +7904,9 @@ impl CheckpointJob {
           &fork,
           self.revision_id,
           &self.revision_frontiers,
-          &self.title,
-          "Explicit save",
+          self.revision_stamp.display_title(),
+          "",
+          self.revision_stamp.kind,
           self.author_user_id,
           Some(self.peer_id as u128),
         )?;
@@ -8028,6 +8139,88 @@ mod tests {
       assert!(tombstoned.deleted);
       assert!(tombstoned.body.is_empty());
     }
+    Ok(())
+  }
+
+  #[test]
+  fn revision_minting_tiers_rename_pins_and_thinning_spares_named() -> Result<()> {
+    use flowstate_document::{RevisionKind, RevisionStamp};
+    let mut runtime = CrdtRuntime::new_empty("Runtime")?;
+    runtime.command(SemanticCommand::InsertText {
+      unicode_index: 1,
+      text: "history has tiers now".to_string(),
+      styles: RunStyles::default(),
+    })?;
+
+    // First save creates the package; subsequent mints are tiered.
+    runtime.checkpoint_package("Doc", None, &RevisionStamp::session())?;
+    runtime.checkpoint_package("Doc", None, &RevisionStamp::auto())?;
+    runtime.checkpoint_package("Doc", None, &RevisionStamp::named("Before the 1AR"))?;
+
+    let revisions = runtime.revisions();
+    let saved = revisions
+      .iter()
+      .find(|revision| revision.kind == RevisionKind::Session && revision.title == "Saved")
+      .expect("session save carries a real title, not the filename");
+    assert!(revisions.iter().all(|revision| revision.summary != "Explicit save"), "the filler summary is dead");
+    let auto = revisions
+      .iter()
+      .find(|revision| revision.kind == RevisionKind::Auto)
+      .expect("autosave grain is tiered");
+    assert_eq!(auto.title, "Autosave");
+    assert!(
+      revisions
+        .iter()
+        .any(|revision| revision.kind == RevisionKind::Named && revision.title == "Before the 1AR"),
+      "named pins carry the user's title"
+    );
+    let _ = saved;
+
+    // Rename PINS: the auto record becomes a named pin with the new title.
+    runtime.rename_revision(auto.revision_id, "Key cross-ex moment")?;
+    let pinned = runtime
+      .revisions()
+      .into_iter()
+      .find(|revision| revision.revision_id == auto.revision_id)
+      .expect("renamed record survives");
+    assert_eq!(pinned.kind, RevisionKind::Named);
+    assert_eq!(pinned.title, "Key cross-ex moment");
+
+    // Thinning: three stale autos in the same day-bucket collapse to one;
+    // the named pin in the same bucket is exempt.
+    runtime.checkpoint_package("Doc", None, &RevisionStamp::auto())?;
+    runtime.checkpoint_package("Doc", None, &RevisionStamp::auto())?;
+    runtime.checkpoint_package("Doc", None, &RevisionStamp::auto())?;
+    let two_days = 2 * 86_400;
+    {
+      let package = runtime.package.as_mut().expect("package exists");
+      for revision in &mut package.revisions {
+        if revision.kind == RevisionKind::Auto || revision.revision_id == pinned.revision_id {
+          revision.created_at_unix_secs -= two_days;
+        }
+      }
+    }
+    let removed = runtime.thin_auto_revisions()?;
+    assert_eq!(removed, 2, "three same-bucket autos thin to the newest one");
+    let after = runtime.revisions();
+    assert_eq!(
+      after.iter().filter(|revision| revision.kind == RevisionKind::Auto).count(),
+      1,
+      "one auto survives its day bucket"
+    );
+    assert!(
+      after.iter().any(|revision| revision.revision_id == pinned.revision_id),
+      "the backdated NAMED pin is exempt from thinning"
+    );
+    // The doc-side records shrank too (convergent thinning).
+    let doc_count = {
+      let root = flowstate_document::loro_schema::root_map(runtime.doc());
+      match root.get(flowstate_document::loro_schema::REVISIONS) {
+        Some(ValueOrContainer::Container(Container::List(revisions))) => revisions.len(),
+        _ => 0,
+      }
+    };
+    assert_eq!(doc_count, after.len(), "doc records mirror the manifest after thinning");
     Ok(())
   }
 
@@ -8443,10 +8636,10 @@ mod tests {
     let path = dir.path().join("revisions.db8");
     let doc = flowstate_document::new_loro_document("Runtime")?;
     let mut package = DocumentPackage::from_loro_snapshot(&doc, "Runtime")?;
-    let blank_revision = package.create_named_revision(&doc, "Blank", "Blank document", None, None)?;
+    let blank_revision = package.create_named_revision(&doc, "Blank", "Blank document", flowstate_document::RevisionKind::Session, None, None)?;
     body_text(&doc).insert(1, "latest")?;
     doc.commit();
-    package.compact_to_named_snapshot(&doc, "Latest", "Latest document", None, None)?;
+    package.compact_to_named_snapshot(&doc, "Latest", "Latest document", flowstate_document::RevisionKind::Session, None, None)?;
     package.write(&path)?;
 
     let mut runtime = CrdtRuntime::open_package(&path)?;

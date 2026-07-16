@@ -291,7 +291,7 @@ impl Focusable for FlowPromptRenderer {
 pub fn write_demo_document() -> anyhow::Result<()> {
   let document = demo_document();
   let mut runtime = flowstate_collab::crdt_runtime::CrdtRuntime::from_document_projection(&document, "Flowstate Demo")?;
-  let _ = runtime.checkpoint_package("Flowstate Demo", Some("data/demo.db8".into()))?;
+  let _ = runtime.checkpoint_package("Flowstate Demo", Some("data/demo.db8".into()), &flowstate_document::RevisionStamp::session())?;
   Ok(())
 }
 

@@ -436,7 +436,7 @@ pub fn record_revision(
   revision_id: u128,
   frontier: Vec<u8>,
   title: &str,
-  summary: &str,
+  kind: crate::package::RevisionKind,
   author_user_id: Option<u128>,
 ) -> LoroResult<()> {
   let root = root_map(doc);
@@ -447,7 +447,10 @@ pub fn record_revision(
   revision.insert("replica_id", doc.peer_id().to_string())?;
   revision.insert("frontier", frontier)?;
   revision.insert("title", title)?;
-  revision.insert("summary", summary)?;
+  // H-S1: the summary field carried filler ("Explicit save"); the tier now
+  // says what the record is. Kept empty for old readers.
+  revision.insert("summary", "")?;
+  revision.insert("kind", kind.as_str())?;
   if let Some(author_user_id) = author_user_id {
     revision.insert("author_user_id", author_user_id.to_string())?;
   }
@@ -458,6 +461,63 @@ pub fn record_revision(
   // recorded-inverse stacks across this commit for the same reason.
   doc.commit_with(loro::CommitOptions::new().origin("meta"));
   Ok(())
+}
+
+/// H-S1: rename a revision record in place. Naming a moment PINS it — the
+/// record's kind becomes `named`, exempting it from auto-grain thinning.
+/// Returns false when no record with the id exists.
+pub fn rename_revision_record(doc: &LoroDoc, revision_id: u128, title: &str) -> LoroResult<bool> {
+  let root = root_map(doc);
+  let Some(loro::ValueOrContainer::Container(loro::Container::List(revisions))) = root.get(REVISIONS) else {
+    return Ok(false);
+  };
+  let wanted = revision_id.to_string();
+  for index in 0..revisions.len() {
+    let Some(loro::ValueOrContainer::Container(loro::Container::Map(revision))) = revisions.get(index) else {
+      continue;
+    };
+    let matches = matches!(
+      revision.get("id"),
+      Some(loro::ValueOrContainer::Value(loro::LoroValue::String(id))) if id.as_str() == wanted
+    );
+    if !matches {
+      continue;
+    }
+    revision.insert("title", title)?;
+    revision.insert("kind", crate::package::RevisionKind::Named.as_str())?;
+    doc.commit_with(loro::CommitOptions::new().origin("meta"));
+    return Ok(true);
+  }
+  Ok(false)
+}
+
+/// H-S1 thinning: delete the revision records whose ids are in `doomed`.
+/// Positional deletes over the same elements converge (concurrent thinning on
+/// two peers deletes the same records). Returns how many were removed.
+pub fn remove_revision_records<S: std::hash::BuildHasher>(doc: &LoroDoc, doomed: &std::collections::HashSet<u128, S>) -> LoroResult<usize> {
+  let root = root_map(doc);
+  let Some(loro::ValueOrContainer::Container(loro::Container::List(revisions))) = root.get(REVISIONS) else {
+    return Ok(0);
+  };
+  let mut removed = 0usize;
+  // Walk backwards so earlier indexes stay valid across deletes.
+  for index in (0..revisions.len()).rev() {
+    let Some(loro::ValueOrContainer::Container(loro::Container::Map(revision))) = revisions.get(index) else {
+      continue;
+    };
+    let id = match revision.get("id") {
+      Some(loro::ValueOrContainer::Value(loro::LoroValue::String(id))) => id.as_str().parse::<u128>().ok(),
+      _ => None,
+    };
+    if id.is_some_and(|id| doomed.contains(&id)) {
+      revisions.delete(index, 1)?;
+      removed += 1;
+    }
+  }
+  if removed > 0 {
+    doc.commit_with(loro::CommitOptions::new().origin("meta"));
+  }
+  Ok(removed)
 }
 
 pub fn set_document_id(doc: &LoroDoc, document_id: Uuid) -> LoroResult<()> {

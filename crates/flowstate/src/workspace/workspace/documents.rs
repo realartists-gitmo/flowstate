@@ -58,15 +58,21 @@ fn install_editor_write_authority(
     // pending-edit drains, no projection replacement, no undo hook (undo
     // executes through the authority).
     editor.set_write_authority(authority, document, cx);
-    editor.set_native_save_hook(Some(Rc::new(move |path, _assets| {
+    editor.set_native_save_hook(Some(Rc::new(move |path, _assets, kind| {
       let io = save_io.clone();
       Box::pin(async move {
         let title = document_package_title_for_path(&path);
+        // H-S1: the revision record says what it IS (session save / autosave
+        // grain), not the filename — the package keeps the filename title.
+        let stamp = match kind {
+          crate::rich_text_element::NativeSaveKind::Explicit => flowstate_document::RevisionStamp::session(),
+          crate::rich_text_element::NativeSaveKind::Auto => flowstate_document::RevisionStamp::auto(),
+        };
         // The checkpoint's LocalUpdate events are intentionally dropped here:
         // this UI-agnostic save hook future has no GPUI context to reach the
         // collaboration session. The workspace re-syncs collaborators after
         // the save completes via collab::refresh_after_external_checkpoint.
-        io.checkpoint_package(title.clone(), Some(path.clone()))
+        io.checkpoint_package(title.clone(), Some(path.clone()), stamp)
           .await
           .map_err(runtime_io_error)?;
         if crate::app_settings::load_dropbox_document_binding(&path).is_some() {
@@ -1600,7 +1606,7 @@ impl Workspace {
           .autosave_document_generations
           .insert(panel_id, generation);
         workspace.set_save_state(panel_id, PanelSaveState::Saving, cx);
-        Some(editor.update(cx, |editor, cx| editor.save(cx)))
+        Some(editor.update(cx, |editor, cx| editor.save_auto(cx)))
       });
       let Ok(Some(save_task)) = save_task else {
         return;

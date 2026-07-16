@@ -21,6 +21,8 @@ pub struct RuntimeRevisionInfo {
   pub revision_id: u128,
   pub title: String,
   pub summary: String,
+  /// H-S1: the minting tier (named pin / session save / autosave grain).
+  pub kind: flowstate_document::RevisionKind,
   pub created_at_unix_secs: i64,
   pub author_user_id: Option<u128>,
   pub author_display_name: Option<String>,

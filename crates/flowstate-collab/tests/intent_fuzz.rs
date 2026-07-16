@@ -361,7 +361,7 @@ mod tests {
           .lock(GateHolder::DocumentService)
           .expect("gate healthy");
         guard
-          .checkpoint_package("Fuzz autosave", Some(path))
+          .checkpoint_package("Fuzz autosave", Some(path), &flowstate_document::RevisionStamp::auto())
           .expect("fuzz checkpoint must succeed");
         drop(guard);
         Ok(())

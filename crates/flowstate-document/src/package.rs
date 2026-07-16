@@ -228,6 +228,86 @@ pub struct AssetChunk {
   pub metadata: Vec<u8>,
 }
 
+/// H-S1 minting tiers. `Named` = a user-pinned moment (thinning-exempt),
+/// `Session` = an explicit save, `Auto` = autosave grain (thinned over time).
+/// Pre-tier records deserialize as `Session` — they were explicit saves.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RevisionKind {
+  Named,
+  #[default]
+  Session,
+  Auto,
+}
+
+impl RevisionKind {
+  #[must_use]
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::Named => "named",
+      Self::Session => "session",
+      Self::Auto => "auto",
+    }
+  }
+
+  #[must_use]
+  pub fn from_str_or_session(kind: &str) -> Self {
+    match kind {
+      "named" => Self::Named,
+      "auto" => Self::Auto,
+      _ => Self::Session,
+    }
+  }
+
+  /// The display title a record of this kind gets when no explicit title was
+  /// given ("real titles": no more filename-as-title).
+  #[must_use]
+  pub fn default_title(self) -> &'static str {
+    match self {
+      Self::Named => "Named checkpoint",
+      Self::Session => "Saved",
+      Self::Auto => "Autosave",
+    }
+  }
+}
+
+/// H-S1: what a mint stamps onto its revision record — the tier plus an
+/// optional explicit title (named pins carry one; save tiers usually don't).
+#[derive(Clone, Debug, Default)]
+pub struct RevisionStamp {
+  pub kind: RevisionKind,
+  pub title: Option<String>,
+}
+
+impl RevisionStamp {
+  #[must_use]
+  pub fn session() -> Self {
+    Self { kind: RevisionKind::Session, title: None }
+  }
+
+  #[must_use]
+  pub fn auto() -> Self {
+    Self { kind: RevisionKind::Auto, title: None }
+  }
+
+  #[must_use]
+  pub fn named(title: impl Into<String>) -> Self {
+    Self {
+      kind: RevisionKind::Named,
+      title: Some(title.into()),
+    }
+  }
+
+  #[must_use]
+  pub fn display_title(&self) -> &str {
+    self
+      .title
+      .as_deref()
+      .filter(|title| !title.trim().is_empty())
+      .unwrap_or_else(|| self.kind.default_title())
+  }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PackageRevision {
   pub revision_id: u128,
@@ -235,6 +315,8 @@ pub struct PackageRevision {
   pub version_vector: Vec<u8>,
   pub title: String,
   pub summary: String,
+  #[serde(default)]
+  pub kind: RevisionKind,
   pub author_user_id: Option<u128>,
   pub replica_id: Option<u128>,
   pub created_at_unix_secs: i64,
@@ -338,8 +420,15 @@ impl DocumentPackage {
     let revision_id = Uuid::new_v4().as_u128();
     let revision_frontiers = doc.state_frontiers();
     let revision_version_vector = encode_version_vector(&frontiers_version_vector(doc, &revision_frontiers)?);
-    crate::loro_schema::record_revision(doc, revision_id, encode_frontiers(&revision_frontiers), title, "Initial snapshot", None)
-      .map_err(loro_io_error)?;
+    crate::loro_schema::record_revision(
+      doc,
+      revision_id,
+      encode_frontiers(&revision_frontiers),
+      title,
+      RevisionKind::Session,
+      None,
+    )
+    .map_err(loro_io_error)?;
     let snapshot_id = Uuid::new_v4().as_u128();
     let frontier = encode_frontiers(&doc.state_frontiers());
     let version_vector = encode_version_vector(&doc.state_vv());
@@ -398,6 +487,7 @@ impl DocumentPackage {
         version_vector: revision_version_vector,
         title: title.to_string(),
         summary: "Initial snapshot".to_string(),
+        kind: RevisionKind::Session,
         author_user_id: None,
         replica_id: None,
         created_at_unix_secs: now,
@@ -737,24 +827,28 @@ impl DocumentPackage {
     doc: &LoroDoc,
     title: impl Into<String>,
     summary: impl Into<String>,
+    kind: RevisionKind,
     author_user_id: Option<u128>,
     replica_id: Option<u128>,
   ) -> io::Result<u128> {
-    self.create_named_revision_with_id(doc, Uuid::new_v4().as_u128(), title, summary, author_user_id, replica_id)
+    self.create_named_revision_with_id(doc, Uuid::new_v4().as_u128(), title, summary, kind, author_user_id, replica_id)
   }
 
+  #[allow(clippy::too_many_arguments, reason = "thin forwarding wrapper over the at-frontier mint")]
   pub fn create_named_revision_with_id(
     &mut self,
     doc: &LoroDoc,
     revision_id: u128,
     title: impl Into<String>,
     summary: impl Into<String>,
+    kind: RevisionKind,
     author_user_id: Option<u128>,
     replica_id: Option<u128>,
   ) -> io::Result<u128> {
-    self.create_named_revision_at_with_id(doc, revision_id, &doc.state_frontiers(), title, summary, author_user_id, replica_id)
+    self.create_named_revision_at_with_id(doc, revision_id, &doc.state_frontiers(), title, summary, kind, author_user_id, replica_id)
   }
 
+  #[allow(clippy::too_many_arguments, reason = "one call site per mint path; a builder buys nothing")]
   pub fn create_named_revision_at_with_id(
     &mut self,
     doc: &LoroDoc,
@@ -762,6 +856,7 @@ impl DocumentPackage {
     frontiers: &Frontiers,
     title: impl Into<String>,
     summary: impl Into<String>,
+    kind: RevisionKind,
     author_user_id: Option<u128>,
     replica_id: Option<u128>,
   ) -> io::Result<u128> {
@@ -780,7 +875,7 @@ impl DocumentPackage {
     let frontier = encode_frontiers(frontiers);
     let version_vector = encode_version_vector(&frontiers_version_vector(doc, frontiers)?);
     if !loro_revision_exists(doc, revision_id) {
-      crate::loro_schema::record_revision(doc, revision_id, frontier.clone(), &title, &summary, author_user_id).map_err(loro_io_error)?;
+      crate::loro_schema::record_revision(doc, revision_id, frontier.clone(), &title, kind, author_user_id).map_err(loro_io_error)?;
       let update = doc
         .export(ExportMode::updates(&doc_vv_before_revision_record))
         .map_err(loro_io_error)?;
@@ -800,6 +895,7 @@ impl DocumentPackage {
       version_vector,
       title,
       summary,
+      kind,
       author_user_id,
       replica_id,
       created_at_unix_secs: unix_time_secs(),
@@ -839,6 +935,34 @@ impl DocumentPackage {
     Ok(revision_id)
   }
 
+  /// H-S1: rename a manifest revision record. Naming pins it (`kind: Named`).
+  pub fn rename_revision(&mut self, revision_id: u128, title: &str) -> bool {
+    let Some(revision) = self
+      .revisions
+      .iter_mut()
+      .find(|revision| revision.revision_id == revision_id)
+    else {
+      return false;
+    };
+    revision.title = title.to_string();
+    revision.kind = RevisionKind::Named;
+    self.manifest.modified_at_unix_secs = unix_time_secs();
+    true
+  }
+
+  /// H-S1 thinning: drop the doomed revision RECORDS from the manifest. The
+  /// underlying snapshot chunks are deliberately untouched — compaction owns
+  /// their lifecycle, and other consumers key on frontiers.
+  pub fn remove_revisions<S: std::hash::BuildHasher>(&mut self, doomed: &std::collections::HashSet<u128, S>) -> usize {
+    let before = self.revisions.len();
+    self.revisions.retain(|revision| !doomed.contains(&revision.revision_id));
+    let removed = before - self.revisions.len();
+    if removed > 0 {
+      self.manifest.modified_at_unix_secs = unix_time_secs();
+    }
+    removed
+  }
+
   pub fn load_revision_loro_doc(&self, revision_id: u128) -> io::Result<LoroDoc> {
     let revision = self
       .revisions
@@ -865,10 +989,11 @@ impl DocumentPackage {
     doc: &LoroDoc,
     title: impl Into<String>,
     summary: impl Into<String>,
+    kind: RevisionKind,
     author_user_id: Option<u128>,
     replica_id: Option<u128>,
   ) -> io::Result<(u128, u128)> {
-    self.compact_to_named_snapshot_with_id(doc, Uuid::new_v4().as_u128(), title, summary, author_user_id, replica_id)
+    self.compact_to_named_snapshot_with_id(doc, Uuid::new_v4().as_u128(), title, summary, kind, author_user_id, replica_id)
   }
 
   pub fn sync_revisions_from_loro(&mut self, doc: &LoroDoc) -> io::Result<usize> {
@@ -917,6 +1042,9 @@ impl DocumentPackage {
         version_vector,
         title: package_map_string(&revision, "title").unwrap_or_else(|| "Revision".to_string()),
         summary: package_map_string(&revision, "summary").unwrap_or_default(),
+        kind: package_map_string(&revision, "kind")
+          .map(|kind| RevisionKind::from_str_or_session(&kind))
+          .unwrap_or_default(),
         author_user_id: package_map_string(&revision, "author_user_id").and_then(|id| id.parse().ok()),
         replica_id: package_map_string(&revision, "replica_id").and_then(|id| id.parse().ok()),
         created_at_unix_secs: package_map_i64(&revision, "timestamp").unwrap_or_else(unix_time_secs),
@@ -935,17 +1063,19 @@ impl DocumentPackage {
     Ok(added)
   }
 
+  #[allow(clippy::too_many_arguments, reason = "thin forwarding wrapper over the at-frontier mint")]
   pub fn compact_to_named_snapshot_with_id(
     &mut self,
     doc: &LoroDoc,
     revision_id: u128,
     title: impl Into<String>,
     summary: impl Into<String>,
+    kind: RevisionKind,
     author_user_id: Option<u128>,
     replica_id: Option<u128>,
   ) -> io::Result<(u128, u128)> {
     let snapshot_id = self.compact_to_snapshot_any(doc)?;
-    let revision_id = self.create_named_revision_with_id(doc, revision_id, title, summary, author_user_id, replica_id)?;
+    let revision_id = self.create_named_revision_with_id(doc, revision_id, title, summary, kind, author_user_id, replica_id)?;
     Ok((revision_id, snapshot_id))
   }
 
@@ -3415,7 +3545,7 @@ mod tests {
   fn named_revisions_are_restorable_after_compaction() -> io::Result<()> {
     let doc = new_loro_document("Revisions").map_err(loro_test_error)?;
     let mut package = DocumentPackage::from_loro_snapshot(&doc, "Revisions")?;
-    let first_revision = package.create_named_revision(&doc, "Blank", "Before edits", None, None)?;
+    let first_revision = package.create_named_revision(&doc, "Blank", "Before edits", RevisionKind::Session, None, None)?;
 
     let from_frontier = doc.state_frontiers();
     let from_vv = doc.state_vv();
@@ -3427,7 +3557,7 @@ mod tests {
       .map_err(loro_test_error)?;
     package.append_update_segment(&from_frontier, &from_vv, &doc.state_frontiers(), &doc.state_vv(), update)?;
     assert!(package.current_search_units().is_empty());
-    let second_revision = package.create_named_revision(&doc, "After", "After text insert", None, None)?;
+    let second_revision = package.create_named_revision(&doc, "After", "After text insert", RevisionKind::Session, None, None)?;
 
     package.compact_to_snapshot(&doc)?;
 
@@ -3462,7 +3592,7 @@ mod tests {
     package.append_update_segment(&from_frontier, &from_vv, &doc.state_frontiers(), &doc.state_vv(), update)?;
 
     let revision_frontiers = doc.state_frontiers();
-    let revision_id = package.create_named_revision(&doc, "Mid", "After second insert", None, None)?;
+    let revision_id = package.create_named_revision(&doc, "Mid", "After second insert", RevisionKind::Session, None, None)?;
 
     // Advance the live doc past the revision so the chunk genuinely captures
     // an older frontier.
@@ -3524,7 +3654,7 @@ mod tests {
       remote_revision_id,
       encode_frontiers(&remote_frontiers),
       "Remote",
-      "Recorded remotely",
+      RevisionKind::Session,
       None,
     )
     .map_err(loro_test_error)?;
@@ -3563,7 +3693,7 @@ mod tests {
   fn package_compacts_update_segments_after_threshold() -> io::Result<()> {
     let doc = new_loro_document("Auto compact").map_err(loro_test_error)?;
     let mut package = DocumentPackage::from_loro_snapshot(&doc, "Auto compact")?;
-    let initial_revision = package.create_named_revision(&doc, "Blank", "Before edits", None, None)?;
+    let initial_revision = package.create_named_revision(&doc, "Blank", "Before edits", RevisionKind::Session, None, None)?;
 
     for text in ["one", " two"] {
       let from_frontier = doc.state_frontiers();
@@ -4552,7 +4682,7 @@ mod tests {
       .map_err(loro_test_error)?;
     doc.commit();
     let mut package = DocumentPackage::from_loro_snapshot(&doc, "Shallow revision")?;
-    let (ancient_revision, _) = package.compact_to_named_snapshot(&doc, "Ancient", "pre-root", None, None)?;
+    let (ancient_revision, _) = package.compact_to_named_snapshot(&doc, "Ancient", "pre-root", RevisionKind::Session, None, None)?;
 
     text
       .insert(text.len_unicode(), " | later work")

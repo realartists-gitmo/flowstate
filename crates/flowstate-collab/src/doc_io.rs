@@ -73,7 +73,14 @@ pub enum IoRequest {
   CheckpointPackage {
     title: String,
     path: Option<PathBuf>,
+    stamp: flowstate_document::RevisionStamp,
     reply: Sender<Result<Vec<RuntimeEvent>>>,
+  },
+  /// H-S1: rename a revision record (naming pins it as a `named` tier).
+  RenameRevision {
+    revision_id: u128,
+    title: String,
+    reply: Sender<Result<()>>,
   },
   PackageBytes {
     title: String,
@@ -199,6 +206,7 @@ fn io_request_kind(request: &IoRequest) -> &'static str {
     IoRequest::ExportUpdatesFor { .. } => "export-updates-for",
     IoRequest::SnapshotBytes { .. } => "snapshot-bytes",
     IoRequest::CheckpointPackage { .. } => "checkpoint-package",
+    IoRequest::RenameRevision { .. } => "rename-revision",
     IoRequest::PackageBytes { .. } => "package-bytes",
     IoRequest::SavePackageTo { .. } => "save-package-to",
     IoRequest::FlushPackageCaches { .. } => "flush-package-caches",
@@ -303,9 +311,20 @@ impl DocIoHandle {
       .await
   }
 
-  pub async fn checkpoint_package(&self, title: String, path: Option<PathBuf>) -> Result<Vec<RuntimeEvent>> {
+  pub async fn checkpoint_package(
+    &self,
+    title: String,
+    path: Option<PathBuf>,
+    stamp: flowstate_document::RevisionStamp,
+  ) -> Result<Vec<RuntimeEvent>> {
     self
-      .request(|reply| IoRequest::CheckpointPackage { title, path, reply })
+      .request(|reply| IoRequest::CheckpointPackage { title, path, stamp, reply })
+      .await
+  }
+
+  pub async fn rename_revision(&self, revision_id: u128, title: String) -> Result<()> {
+    self
+      .request(|reply| IoRequest::RenameRevision { revision_id, title, reply })
       .await
   }
 
@@ -662,14 +681,22 @@ fn io_loop(core: &Arc<WriteGate<CrdtRuntime>>, receiver: &Receiver<IoRequest>) {
         });
         send_reply(&reply, result);
       },
-      IoRequest::CheckpointPackage { title, path, reply } => {
+      IoRequest::RenameRevision { revision_id, title, reply } => {
+        send_reply(
+          &reply,
+          gate_call(core, GateHolder::DocumentService, |runtime| {
+            runtime.rename_revision(revision_id, &title)
+          }),
+        );
+      },
+      IoRequest::CheckpointPackage { title, path, stamp, reply } => {
         // Field fix 2026-07-07: split checkpoint — live-doc phase under a
         // short gate hold, heavy assembly + disk write on a detached worker,
         // package restored under the gate afterwards. First-save (no package
         // yet) falls back to the in-place path.
         let begun = gate_call(core, GateHolder::DocumentService, |runtime| {
           runtime
-            .begin_checkpoint(&title, path.clone())
+            .begin_checkpoint(&title, path.clone(), &stamp)
             .map_err(anyhow::Error::from)
         });
         match begun {
@@ -706,7 +733,7 @@ fn io_loop(core: &Arc<WriteGate<CrdtRuntime>>, receiver: &Receiver<IoRequest>) {
               &reply,
               gate_call(core, GateHolder::DocumentService, |runtime| {
                 runtime
-                  .checkpoint_package(&title, path)
+                  .checkpoint_package(&title, path, &stamp)
                   .map_err(anyhow::Error::from)
               }),
             );
@@ -739,7 +766,7 @@ fn io_loop(core: &Arc<WriteGate<CrdtRuntime>>, receiver: &Receiver<IoRequest>) {
         // in-place fallback covers package-less first saves.
         let begun = gate_call(core, GateHolder::DocumentService, |runtime| {
           runtime
-            .begin_checkpoint("Save", Some(path.clone()))
+            .begin_checkpoint("Save", Some(path.clone()), &flowstate_document::RevisionStamp::session())
             .map_err(anyhow::Error::from)
         });
         match begun {
