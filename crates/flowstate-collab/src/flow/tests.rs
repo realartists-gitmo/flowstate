@@ -738,14 +738,14 @@ fn history_scrubber_replays_the_lamport_prefix() {
   assert_eq!(live.sheets[0].cells.len(), 6);
 
   // Full replay equals the live board's structure.
-  let (full, shown, total) = handle.history_board_at(1.0).unwrap();
+  let (full, shown, total, full_frontier) = handle.history_board_at(1.0).unwrap();
   assert_eq!(shown, total);
   assert_eq!(full.sheets.len(), 1);
   assert_eq!(full.sheets[0].cells.len(), 6, "fraction 1.0 replays everything");
 
   // A mid-timeline replay shows a strict prefix of the cells — and the LIVE
   // board is untouched by the checkout (it ran on a fork).
-  let (half, shown_half, _) = handle.history_board_at(0.5).unwrap();
+  let (half, shown_half, _, half_frontier) = handle.history_board_at(0.5).unwrap();
   let half_cells = half.sheets.first().map_or(0, |sheet| sheet.cells.len());
   assert!(half_cells < 6, "fraction 0.5 must replay a strict prefix (saw {half_cells} cells)");
   assert!(shown_half < total);
@@ -754,6 +754,16 @@ fn history_scrubber_replays_the_lamport_prefix() {
     6,
     "the live board is untouched by history checkouts"
   );
+  // H-S6 tape: the scrub reports the checked-out position's frontier, and the
+  // timeline positions of those frontiers land in order.
+  assert_ne!(half_frontier, full_frontier, "different scrub positions report different frontiers");
+  let positions = handle
+    .history_timeline_positions(&[half_frontier, full_frontier])
+    .unwrap();
+  let half_pos = positions[0].expect("half frontier positions");
+  let full_pos = positions[1].expect("full frontier positions");
+  assert!(half_pos < full_pos, "timeline positions respect the replay order ({half_pos} < {full_pos})");
+  assert!((full_pos - 1.0).abs() < 1e-4, "the full replay sits at the tape's end");
 }
 
 // ---- H-S6/H-S7: flow checkpoints converge; restore obeys the .db8 law -----

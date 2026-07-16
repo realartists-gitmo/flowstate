@@ -181,8 +181,9 @@ impl FlowRuntime {
   /// lamport-ordered change timeline. Works on a fork — the live doc, its
   /// undo stacks, and its subscriptions are untouched. Returns the board plus
   /// (ops shown, total ops) for the slider annotation.
-  pub fn history_board_at(&self, fraction: f32) -> anyhow::Result<(FlowBoardProjection, usize, usize)> {
-    let fork = self.doc.fork();
+  /// The lamport-ordered change list the replay timeline scrubs over — one
+  /// canonical ordering shared by fraction checkout and mark positioning.
+  fn history_timeline_changes(fork: &LoroDoc) -> anyhow::Result<Vec<(u32, loro::ID, usize)>> {
     let heads = fork.oplog_frontiers();
     let mut changes: Vec<(u32, loro::ID, usize)> = Vec::new();
     let head_ids: Vec<loro::ID> = heads.iter().collect();
@@ -194,6 +195,44 @@ impl FlowRuntime {
       .map_err(|error| anyhow::anyhow!("traversing flow history failed: {error}"))?;
     // Lamport order respects causality: any prefix is causally closed.
     changes.sort_by_key(|(lamport, id, _)| (*lamport, id.peer));
+    Ok(changes)
+  }
+
+  /// H-S6 tape marks: each frontier's position (0.0..=1.0) along the SAME
+  /// lamport-ordered op timeline the replay scrubs — where a checkpoint's
+  /// mark sits on the tape. `None` for frontiers that fail to decode.
+  pub fn history_timeline_positions(&self, frontiers: &[Vec<u8>]) -> anyhow::Result<Vec<Option<f32>>> {
+    let fork = self.doc.fork();
+    let changes = Self::history_timeline_changes(&fork)?;
+    let total_ops: usize = changes.iter().map(|(_, _, len)| *len).sum();
+    if total_ops == 0 {
+      return Ok(frontiers.iter().map(|_| Some(0.0)).collect());
+    }
+    Ok(
+      frontiers
+        .iter()
+        .map(|encoded| {
+          let decoded = Frontiers::decode(encoded).ok()?;
+          let vv = fork.frontiers_to_vv(&decoded)?;
+          let included: usize = changes
+            .iter()
+            .map(|(_, id, len)| {
+              let end = vv.get(&id.peer).copied().unwrap_or(0);
+              usize::try_from((end - id.counter).max(0)).unwrap_or(0).min(*len)
+            })
+            .sum();
+          Some((included as f64 / total_ops as f64) as f32)
+        })
+        .collect(),
+    )
+  }
+
+  /// Returns (board, shown ops, total ops, encoded frontier of the checked-out
+  /// position) — the frontier is what Restore consumes, so a restore works
+  /// from ANY thumb position, not just at a checkpoint mark.
+  pub fn history_board_at(&self, fraction: f32) -> anyhow::Result<(FlowBoardProjection, usize, usize, Vec<u8>)> {
+    let fork = self.doc.fork();
+    let changes = Self::history_timeline_changes(&fork)?;
     let total_ops: usize = changes.iter().map(|(_, _, len)| *len).sum();
     let target_ops = (f64::from(fraction.clamp(0.0, 1.0)) * total_ops as f64).round() as usize;
     let mut vv = VersionVector::default();
@@ -218,7 +257,7 @@ impl FlowRuntime {
       .checkout(&frontiers)
       .map_err(|error| anyhow::anyhow!("checking out flow history failed: {error}"))?;
     let board = flowstate_flow::board_from_loro(&fork)?;
-    Ok((board.board, included.min(total_ops), total_ops))
+    Ok((board.board, included.min(total_ops), total_ops, frontiers.encode()))
   }
 
   pub fn cell_projection(&self, cell_id: CellId) -> anyhow::Result<flowstate_document::DocumentProjection> {

@@ -67,6 +67,8 @@ pub struct HistoryTakeover {
   collapsed_groups: HashSet<usize>,
   checkout_generation: u64,
   refresh_pending: bool,
+  /// Painted bounds of the tape track (drag math reads it back).
+  tape_bounds: std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<gpui::Pixels>>>>,
   _editor_observation: Subscription,
   _rename_subscription: Subscription,
 }
@@ -110,6 +112,7 @@ impl HistoryTakeover {
       collapsed_groups: HashSet::new(),
       checkout_generation: 0,
       refresh_pending: false,
+      tape_bounds: std::rc::Rc::default(),
       _editor_observation,
       _rename_subscription,
     };
@@ -413,6 +416,35 @@ impl HistoryTakeover {
     }
   }
 
+  /// The tape's marks: revisions at their TIME positions along the track
+  /// (normalized creation stamps; a single record sits at the end).
+  fn tape_marks(&self) -> Vec<crate::history_tape::TapeMark> {
+    if self.revisions.is_empty() {
+      return Vec::new();
+    }
+    let (min, max) = self
+      .revisions
+      .iter()
+      .fold((i64::MAX, i64::MIN), |(min, max), revision| {
+        (min.min(revision.created_at_unix_secs), max.max(revision.created_at_unix_secs))
+      });
+    let span = (max - min).max(1) as f32;
+    self
+      .revisions
+      .iter()
+      .map(|revision| crate::history_tape::TapeMark {
+        id: revision.revision_id,
+        position: if self.revisions.len() <= 1 {
+          1.0
+        } else {
+          (revision.created_at_unix_secs - min) as f32 / span
+        },
+        kind: revision.kind,
+        title: format!("{} · {}", revision.title, format_time(revision.created_at_unix_secs)).into(),
+      })
+      .collect()
+  }
+
   fn kind_color(&self, kind: RevisionKind, cx: &App) -> gpui::Hsla {
     match kind {
       RevisionKind::Named => cx.theme().warning,
@@ -591,52 +623,43 @@ impl Render for HistoryTakeover {
               ),
           )
           .child(div().flex_1().min_h_0().overflow_hidden().child(self.preview.clone()))
-          // ---- the tape ----
+          // ---- the tape: the timeline instrument (marks at their TIME
+          // positions, a draggable toggle, scroll under density). Scrubbing
+          // snaps to the nearest mark — .db8 checkouts are record-exact until
+          // arbitrary-frontier scrub lands.
           .child(
             h_flex()
               .h(px(44.0))
               .flex_none()
-              .items_end()
-              .gap_0p5()
+              .items_center()
               .px_3()
-              .pb_1()
               .border_t_1()
               .border_color(cx.theme().border)
-              .children(self.revisions.iter().map(|revision| {
-                let is_selected = selected == Some(revision.revision_id);
-                let (height, width) = match revision.kind {
-                  RevisionKind::Named => (px(26.0), px(5.0)),
-                  RevisionKind::Session => (px(18.0), px(3.0)),
-                  RevisionKind::Auto => (px(10.0), px(3.0)),
-                };
-                let color = self.kind_color(revision.kind, cx);
-                let revision_id = revision.revision_id;
-                let tooltip: SharedString = format!("{} · {}", revision.title, format_time(revision.created_at_unix_secs)).into();
-                div()
-                  .id(("history-tick", revision_id as u64))
-                  .flex_1()
-                  .min_w(px(3.0))
-                  .max_w(px(14.0))
-                  .h(px(30.0))
-                  .flex()
-                  .items_end()
-                  .justify_center()
-                  .cursor_pointer()
-                  .tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx))
-                  .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |takeover, _, _, cx| takeover.select(revision_id, cx)),
-                  )
-                  .child(
-                    div()
-                      .w(width)
-                      .h(height)
-                      .rounded_sm()
-                      .bg(if is_selected { cx.theme().danger } else { color })
-                      .when(revision.kind == RevisionKind::Auto && !is_selected, |this| this.opacity(0.45)),
-                  )
-                  .into_any_element()
-              })),
+              .child({
+                let marks = self.tape_marks();
+                let thumb = selected
+                  .and_then(|id| marks.iter().find(|mark| mark.id == id))
+                  .map_or(1.0, |mark| mark.position);
+                let scrub_marks = marks.clone();
+                let takeover = cx.entity().downgrade();
+                let takeover_for_mark = takeover.clone();
+                crate::history_tape::history_tape(
+                  "db8-history-tape",
+                  thumb,
+                  marks,
+                  selected,
+                  self.tape_bounds.clone(),
+                  std::rc::Rc::new(move |fraction, _window, cx| {
+                    if let Some(mark_id) = crate::history_tape::nearest_mark(&scrub_marks, fraction) {
+                      let _ = takeover.update(cx, |takeover, cx| takeover.select(mark_id, cx));
+                    }
+                  }),
+                  std::rc::Rc::new(move |mark_id, _window, cx| {
+                    let _ = takeover_for_mark.update(cx, |takeover, cx| takeover.select(mark_id, cx));
+                  }),
+                  cx,
+                )
+              }),
           )
           // ---- action bar ----
           .child(

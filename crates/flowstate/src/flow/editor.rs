@@ -63,6 +63,13 @@ struct FlowScrubber {
   board: FlowBoardProjection,
   shown_ops: usize,
   total_ops: usize,
+  /// The checked-out position's frontier — Restore's input (any thumb
+  /// position restores, not just marks).
+  frontier: Vec<u8>,
+  /// Tape marks: the checkpoint records at their timeline positions.
+  marks: Vec<crate::history_tape::TapeMark>,
+  mark_frontiers: std::collections::HashMap<u128, Vec<u8>>,
+  selected_mark: Option<u128>,
 }
 
 /// This replica's own board focus (spec S11) as published into presence.
@@ -152,7 +159,8 @@ pub struct FlowEditor {
   external_presences: Vec<FlowExternalPresence>,
   /// R6 scrubber: a read-only historical board under the replay slider.
   scrubber: Option<FlowScrubber>,
-  scrub_bar_bounds: Option<Bounds<gpui::Pixels>>,
+  /// Painted bounds of the history tape's track (drag math reads it back).
+  tape_bounds: std::rc::Rc<std::cell::Cell<Option<Bounds<gpui::Pixels>>>>,
   drag_autoscroll: Option<gpui::Point<gpui::Pixels>>,
   drag_autoscroll_scheduled: bool,
   drag_log: Option<telemetry::DragLogSession>,
@@ -219,7 +227,7 @@ impl FlowEditor {
       recovery_write_pending: false,
       external_presences: Vec::new(),
       scrubber: None,
-      scrub_bar_bounds: None,
+      tape_bounds: std::rc::Rc::default(),
       drag_autoscroll: None,
       drag_autoscroll_scheduled: false,
       drag_log: None,
@@ -428,12 +436,20 @@ impl FlowEditor {
 
   fn set_scrubber_fraction(&mut self, fraction: f32, cx: &mut Context<Self>) {
     match self.handle.history_board_at(fraction) {
-      Ok((board, shown_ops, total_ops)) => {
+      Ok((board, shown_ops, total_ops, frontier)) => {
+        let (marks, mark_frontiers) = self
+          .scrubber
+          .take()
+          .map_or_else(|| self.load_tape_marks(), |scrubber| (scrubber.marks, scrubber.mark_frontiers));
         self.scrubber = Some(FlowScrubber {
           fraction: fraction.clamp(0.0, 1.0),
           board,
           shown_ops,
           total_ops,
+          frontier,
+          marks,
+          mark_frontiers,
+          selected_mark: None,
         });
         cx.notify();
       },
@@ -444,15 +460,112 @@ impl FlowEditor {
     }
   }
 
-  fn scrub_to_position(&mut self, x: gpui::Pixels, cx: &mut Context<Self>) {
-    let Some(bounds) = self.scrub_bar_bounds else {
+  /// H-S6: the checkpoint records positioned on the replay timeline.
+  fn load_tape_marks(&self) -> (Vec<crate::history_tape::TapeMark>, std::collections::HashMap<u128, Vec<u8>>) {
+    let Ok(checkpoints) = self.handle.flow_checkpoints() else {
+      return (Vec::new(), std::collections::HashMap::new());
+    };
+    let frontiers: Vec<Vec<u8>> = checkpoints.iter().map(|checkpoint| checkpoint.frontier.clone()).collect();
+    let positions = self
+      .handle
+      .history_timeline_positions(&frontiers)
+      .unwrap_or_else(|_| vec![None; checkpoints.len()]);
+    let mut marks = Vec::new();
+    let mut mark_frontiers = std::collections::HashMap::new();
+    for (checkpoint, position) in checkpoints.into_iter().zip(positions) {
+      let Some(position) = position else { continue };
+      mark_frontiers.insert(checkpoint.checkpoint_id, checkpoint.frontier.clone());
+      marks.push(crate::history_tape::TapeMark {
+        id: checkpoint.checkpoint_id,
+        position,
+        kind: checkpoint.kind,
+        title: checkpoint.title.into(),
+      });
+    }
+    (marks, mark_frontiers)
+  }
+
+  /// H-S6: a mark is a landmark — clicking one checks out its EXACT frontier.
+  fn checkout_tape_mark(&mut self, mark_id: u128, cx: &mut Context<Self>) {
+    let Some(scrubber) = &self.scrubber else { return };
+    let Some(frontier) = scrubber.mark_frontiers.get(&mark_id).cloned() else {
       return;
     };
-    if bounds.size.width <= px(1.0) {
-      return;
+    let position = scrubber
+      .marks
+      .iter()
+      .find(|mark| mark.id == mark_id)
+      .map_or(1.0, |mark| mark.position);
+    match self.handle.board_at_frontier(&frontier) {
+      Ok(board) => {
+        if let Some(scrubber) = self.scrubber.as_mut() {
+          scrubber.board = board;
+          scrubber.fraction = position;
+          scrubber.frontier = frontier;
+          scrubber.selected_mark = Some(mark_id);
+        }
+        cx.notify();
+      },
+      Err(error) => {
+        tracing::warn!(%error, "flow checkpoint checkout failed");
+        self.refuse(format!("checkpoint checkout failed: {error}"), None, cx);
+      },
     }
-    let fraction = ((x - bounds.left()).as_f32() / bounds.size.width.as_f32()).clamp(0.0, 1.0);
-    self.set_scrubber_fraction(fraction, cx);
+  }
+
+  /// H-S6 restore, from wherever the tape sits (the .db8 law rides below).
+  fn restore_scrubber_position(&mut self, cx: &mut Context<Self>) {
+    let Some(frontier) = self.scrubber.as_ref().map(|scrubber| scrubber.frontier.clone()) else {
+      return;
+    };
+    match self.handle.restore_flow_frontier(&frontier) {
+      Ok(()) => {
+        self.scrubber = None;
+        self.resync_from_runtime(cx);
+        cx.notify();
+      },
+      Err(error) => {
+        tracing::warn!(%error, "flow restore failed");
+        self.refuse(format!("restore failed: {error}"), None, cx);
+      },
+    }
+  }
+
+  /// H-S6: pin the present as a named moment (tape marks refresh).
+  fn pin_present_moment(&mut self, cx: &mut Context<Self>) {
+    match self.handle.create_flow_checkpoint(None) {
+      Ok(_) => {
+        if self.scrubber.is_some() {
+          let (marks, mark_frontiers) = self.load_tape_marks();
+          if let Some(scrubber) = self.scrubber.as_mut() {
+            scrubber.marks = marks;
+            scrubber.mark_frontiers = mark_frontiers;
+          }
+        }
+        cx.notify();
+      },
+      Err(error) => {
+        tracing::warn!(%error, "flow checkpoint failed");
+        self.refuse(format!("checkpoint failed: {error}"), None, cx);
+      },
+    }
+  }
+
+  /// Tape scrub with landmark magnetism: a position within snapping distance
+  /// of a mark checks the MARK out exactly (marks are landmarks).
+  fn scrub_tape_to(&mut self, fraction: f32, cx: &mut Context<Self>) {
+    const SNAP: f32 = 0.015;
+    let snapped = self.scrubber.as_ref().and_then(|scrubber| {
+      scrubber
+        .marks
+        .iter()
+        .find(|mark| (mark.position - fraction).abs() <= SNAP)
+        .map(|mark| mark.id)
+    });
+    match snapped {
+      Some(mark_id) => self.checkout_tape_mark(mark_id, cx),
+      None => self.set_scrubber_fraction(fraction, cx),
+    }
   }
 
   /// The read-only replay view: the historical board's summaries in column
@@ -473,6 +586,8 @@ impl FlowEditor {
       })
       .or_else(|| scrubber.board.sheets.first());
     let fraction = scrubber.fraction;
+    let tape_marks = scrubber.marks.clone();
+    let selected_mark = scrubber.selected_mark;
     let label: SharedString = format!("history · {} / {} ops", scrubber.shown_ops, scrubber.total_ops).into();
     let weak = cx.entity().downgrade();
     let columns: Vec<AnyElement> = sheet
@@ -541,7 +656,9 @@ impl FlowEditor {
         ),
       )
       .child(
-        // The scrub bar: click/drag anywhere along it to replay.
+        // H-S6: the tape — one continuous timeline with a draggable toggle
+        // and checkpoint marks at their true positions (the same instrument
+        // the .db8 takeover plays). Restore works from ANY thumb position.
         div()
           .flex_none()
           .h(px(44.0))
@@ -559,49 +676,46 @@ impl FlowEditor {
               .whitespace_nowrap()
               .child(label),
           )
+          .child(crate::history_tape::history_tape(
+            "flow-history-tape",
+            fraction,
+            tape_marks,
+            selected_mark,
+            self.tape_bounds.clone(),
+            {
+              let weak = weak.clone();
+              std::rc::Rc::new(move |fraction, _window, cx| {
+                let _ = weak.update(cx, |editor, cx| editor.scrub_tape_to(fraction, cx));
+              })
+            },
+            {
+              let weak = weak.clone();
+              std::rc::Rc::new(move |mark_id, _window, cx| {
+                let _ = weak.update(cx, |editor, cx| editor.checkout_tape_mark(mark_id, cx));
+              })
+            },
+            cx,
+          ))
           .child(
-            div()
-              .id("flow-scrub-bar")
-              .flex_1()
-              .h(px(10.0))
-              .rounded_full()
-              .bg(cx.theme().border.opacity(0.6))
-              .relative()
-              .child(
-                div()
-                  .absolute()
-                  .left_0()
-                  .top_0()
-                  .bottom_0()
-                  .w(gpui::relative(fraction))
-                  .rounded_full()
-                  .bg(cx.theme().primary),
-              )
-              .child(
-                canvas(
-                  {
-                    let weak = weak.clone();
-                    move |bounds, _, cx| {
-                      let _ = weak.update(cx, |editor, _| editor.scrub_bar_bounds = Some(bounds));
-                    }
-                  },
-                  |_, _, _, _| {},
-                )
-                .absolute()
-                .size_full(),
-              )
-              .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|editor, event: &MouseDownEvent, _, cx| {
-                  editor.scrub_to_position(event.position.x, cx);
-                  cx.stop_propagation();
-                }),
-              )
-              .on_mouse_move(cx.listener(|editor, event: &MouseMoveEvent, _, cx| {
-                if event.pressed_button == Some(MouseButton::Left) && editor.scrubber.is_some() {
-                  editor.scrub_to_position(event.position.x, cx);
-                }
-              })),
+            gpui_component::button::Button::new("flow-history-restore")
+              .primary()
+              .xsmall()
+              .label("Restore")
+              .tooltip("Bring this moment back as a new edit — the present is pinned first, and the restore is undoable")
+              .on_click(cx.listener(|editor, _, _, cx| editor.restore_scrubber_position(cx))),
+          )
+          .child(
+            gpui_component::button::Button::new("flow-history-pin")
+              .xsmall()
+              .label("Pin now")
+              .tooltip("Pin the present as a named checkpoint mark")
+              .on_click(cx.listener(|editor, _, _, cx| editor.pin_present_moment(cx))),
+          )
+          .child(
+            gpui_component::button::Button::new("flow-history-exit")
+              .xsmall()
+              .label("Exit")
+              .on_click(cx.listener(|editor, _, _, cx| editor.toggle_history_scrubber(cx))),
           ),
       )
       .into_any_element()

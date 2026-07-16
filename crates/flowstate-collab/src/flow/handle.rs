@@ -164,13 +164,68 @@ impl FlowDocHandle {
 
   /// R6 scrubber: a read-only historical board at `fraction` of the change
   /// timeline (fork under the gate; checkout + materialize on the fork).
-  pub fn history_board_at(&self, fraction: f32) -> Result<(FlowBoardProjection, usize, usize), FlowWriteRejected> {
+  /// Also returns the checked-out position's encoded frontier — Restore's
+  /// input, so a restore works from any thumb position.
+  pub fn history_board_at(&self, fraction: f32) -> Result<(FlowBoardProjection, usize, usize, Vec<u8>), FlowWriteRejected> {
     let guard = self
       .core
       .lock(GateHolder::LocalIntent)
       .map_err(|_| FlowWriteRejected::GatePoisoned)?;
     guard
       .history_board_at(fraction)
+      .map_err(|error| FlowWriteRejected::Invalid(error.to_string()))
+  }
+
+  /// H-S6: the flow checkpoint records (tape marks).
+  pub fn flow_checkpoints(&self) -> Result<Vec<super::runtime::FlowCheckpoint>, FlowWriteRejected> {
+    let guard = self
+      .core
+      .lock(GateHolder::LocalIntent)
+      .map_err(|_| FlowWriteRejected::GatePoisoned)?;
+    Ok(guard.flow_checkpoints())
+  }
+
+  /// H-S6: where each frontier sits on the replay timeline (mark positions).
+  pub fn history_timeline_positions(&self, frontiers: &[Vec<u8>]) -> Result<Vec<Option<f32>>, FlowWriteRejected> {
+    let guard = self
+      .core
+      .lock(GateHolder::LocalIntent)
+      .map_err(|_| FlowWriteRejected::GatePoisoned)?;
+    guard
+      .history_timeline_positions(frontiers)
+      .map_err(|error| FlowWriteRejected::Invalid(error.to_string()))
+  }
+
+  /// H-S6: a read-only board at an exact frontier (mark checkout).
+  pub fn board_at_frontier(&self, frontier: &[u8]) -> Result<FlowBoardProjection, FlowWriteRejected> {
+    let guard = self
+      .core
+      .lock(GateHolder::LocalIntent)
+      .map_err(|_| FlowWriteRejected::GatePoisoned)?;
+    guard
+      .board_at_frontier(frontier)
+      .map_err(|error| FlowWriteRejected::Invalid(error.to_string()))
+  }
+
+  /// H-S6 restore, under the .db8 law (safety pin, forward op, undoable).
+  pub fn restore_flow_frontier(&self, frontier: &[u8]) -> Result<(), FlowWriteRejected> {
+    let mut guard = self
+      .core
+      .lock(GateHolder::LocalIntent)
+      .map_err(|_| FlowWriteRejected::GatePoisoned)?;
+    guard
+      .restore_flow_frontier(frontier)
+      .map_err(|error| FlowWriteRejected::Invalid(error.to_string()))
+  }
+
+  /// H-S3 flow twin: pin the present as a named moment.
+  pub fn create_flow_checkpoint(&self, title: Option<&str>) -> Result<u128, FlowWriteRejected> {
+    let mut guard = self
+      .core
+      .lock(GateHolder::LocalIntent)
+      .map_err(|_| FlowWriteRejected::GatePoisoned)?;
+    guard
+      .create_flow_checkpoint(title, flowstate_document::RevisionKind::Named)
       .map_err(|error| FlowWriteRejected::Invalid(error.to_string()))
   }
 
