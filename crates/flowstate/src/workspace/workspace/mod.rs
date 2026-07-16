@@ -114,6 +114,9 @@ pub struct Workspace {
   pub(crate) pane_tree: PaneTree,
   /// Per-pane tab-strip scroll handles (lazily minted per `PaneId`).
   pane_tab_scrolls: HashMap<u64, ScrollHandle>,
+  /// P3: true while a tab drag is in flight — arms the pane drop zones
+  /// (scoped so editor-internal drags keep their own drop targets).
+  pane_tab_dragging: bool,
   speech_document_id: Option<Uuid>,
   /// CT-S2: transient sent-count shown beside the speech tab's badge after a
   /// send (success feedback WITHOUT an activity-log line, per Adam's CT2
@@ -393,7 +396,7 @@ impl DocumentStyleSection {
 }
 
 mod pane;
-pub(crate) use pane::{PaneId, PaneLeaf, PaneNode, PaneTree, SplitAxis};
+pub(crate) use pane::{PaneId, PaneLayoutEntry, PaneLeaf, PaneNode, PaneTree, SplitAxis};
 
 include!("documents.rs");
 include!("palette_actions.rs");

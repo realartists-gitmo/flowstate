@@ -322,6 +322,7 @@ impl Workspace {
       pinned_document_ids: Vec::new(),
       pane_tree: PaneTree::default(),
       pane_tab_scrolls: HashMap::new(),
+      pane_tab_dragging: false,
       speech_document_id: None,
       speech_sent_recent: 0,
       speech_sent_clear_generation: 0,
@@ -1289,9 +1290,11 @@ impl Workspace {
       .speech_document_id
       .and_then(|id| panel_id_to_entry_index.get(&id).copied());
 
+    let pane_layout = self.pane_tree.to_layout(&panel_id_to_entry_index);
     self.temporary_workspace_session_pending = Some(TemporaryWorkspaceSession {
       entries,
       active_index,
+      pane_layout,
       ribbon_collapsed: self.ribbon_collapsed,
       outline_collapsed: self.outline_collapsed,
       pinned_entry_indices,
@@ -1354,6 +1357,8 @@ impl Workspace {
     let speech_index = session.speech_entry_index;
     let mut pinned_ids = Vec::new();
     let mut speech_id = None;
+    let pane_layout = session.pane_layout.clone();
+    let mut entry_to_panel: Vec<Option<Uuid>> = vec![None; session.entries.len()];
     for (entry_index, entry) in session.entries.into_iter().enumerate() {
       if !entry.path.exists() {
         continue;
@@ -1422,6 +1427,7 @@ impl Workspace {
       if Some(entry_index) == active_index {
         active_id = Some(id);
       }
+      entry_to_panel[entry_index] = Some(id);
       if pinned_indices.contains(&entry_index) {
         pinned_ids.push(id);
       }
@@ -1432,6 +1438,20 @@ impl Workspace {
       }
     }
 
+    // W-S4 P4: rebuild the pane layout, then activate (activation focuses
+    // the owning pane). Entries that failed to open dropped out above;
+    // panels the layout somehow missed land in the focused pane.
+    if let Some(layout) = pane_layout
+      && let Some(tree) = PaneTree::from_layout(&layout, &entry_to_panel)
+    {
+      self.pane_tree = tree;
+      for id in entry_to_panel.iter().copied().flatten() {
+        if self.pane_tree.pane_of(id).is_none() {
+          self.pane_tree.insert_tab(id);
+        }
+      }
+      self.sync_active_from_tree(cx);
+    }
     if let Some(active_id) = active_id {
       self.activate_document_id(active_id, cx);
     }
@@ -2536,6 +2556,10 @@ struct TemporaryWorkspaceSession {
   /// so unread dots survive restarts.
   #[serde(default)]
   comment_last_seen: Vec<(String, i64)>,
+  /// W-S4 P4: the pane layout by ENTRY INDEX (the `pinned_entry_indices`
+  /// trick). `None` = one pane — old session files keep their shape.
+  #[serde(default)]
+  pane_layout: Option<PaneLayoutEntry>,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]

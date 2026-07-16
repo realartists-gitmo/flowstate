@@ -296,6 +296,208 @@ impl PaneTree {
   }
 }
 
+impl PaneTree {
+  /// P3: set a split's ratio by its DFS index (the render walk numbers
+  /// splits in the same order).
+  pub fn set_split_ratio(&mut self, split_ix: usize, ratio: f32) {
+    fn walk(node: &mut PaneNode, counter: &mut usize, target: usize, ratio: f32) -> bool {
+      if let PaneNode::Split { ratio: node_ratio, children, .. } = node {
+        let this = *counter;
+        *counter += 1;
+        if this == target {
+          *node_ratio = ratio.clamp(0.15, 0.85);
+          return true;
+        }
+        let [left, right] = children;
+        return walk(left, counter, target, ratio) || walk(right, counter, target, ratio);
+      }
+      false
+    }
+    let mut counter = 0;
+    walk(&mut self.root, &mut counter, split_ix, ratio);
+  }
+
+  /// P3: move a tab into `target` (append; becomes its active; target takes
+  /// focus). The source pane collapses if it empties.
+  pub fn move_tab_to_pane(&mut self, panel_id: Uuid, target: PaneId) {
+    if self.pane_of(panel_id) == Some(target) || self.leaf(target).is_none() {
+      self.focused = target;
+      return;
+    }
+    self.remove_tab(panel_id);
+    self.focused = target;
+    if let Some(leaf) = self.leaf_mut(target) {
+      leaf.tab_order.push(panel_id);
+      leaf.active = Some(panel_id);
+    }
+  }
+
+  /// P3: the edge-drop gesture — split `target` on `axis` and land
+  /// `panel_id` in the NEW pane, which takes focus.
+  pub fn split_pane_with_tab(&mut self, target: PaneId, axis: SplitAxis, panel_id: Uuid) {
+    if self.leaf(target).is_none() {
+      return;
+    }
+    // A pane splitting around its own only tab would collapse mid-flight;
+    // that gesture is just "no-op" (the tab already fills the pane).
+    if self.pane_of(panel_id) == Some(target) && self.leaf(target).is_some_and(|leaf| leaf.tab_order.len() == 1) {
+      self.focused = target;
+      return;
+    }
+    self.remove_tab(panel_id);
+    // The removal may have collapsed a DIFFERENT pane; target still exists
+    // (it wasn't the one emptied unless it held only this tab — handled).
+    let Some(new_pane) = self.split_target_empty(target, axis) else {
+      // Split failed (target vanished) — fall back to the focused pane.
+      let focused = self.focused;
+      self.move_tab_to_pane(panel_id, focused);
+      return;
+    };
+    if let Some(leaf) = self.leaf_mut(new_pane) {
+      leaf.tab_order.push(panel_id);
+      leaf.active = Some(panel_id);
+    }
+    self.focused = new_pane;
+  }
+
+  /// Split WITHOUT moving the target's active tab (the edge-drop brings its
+  /// own cargo).
+  fn split_target_empty(&mut self, pane: PaneId, axis: SplitAxis) -> Option<PaneId> {
+    let new_id = self.mint();
+    fn split_node(node: &mut PaneNode, pane: PaneId, axis: SplitAxis, new_leaf: PaneLeaf) -> bool {
+      match node {
+        PaneNode::Pane(leaf) if leaf.id == pane => {
+          let existing = PaneNode::Pane(leaf.clone());
+          *node = PaneNode::Split {
+            axis,
+            ratio: 0.5,
+            children: [Box::new(existing), Box::new(PaneNode::Pane(new_leaf))],
+          };
+          true
+        },
+        PaneNode::Pane(_) => false,
+        PaneNode::Split { children, .. } => {
+          let [left, right] = children;
+          split_node(left, pane, axis, new_leaf.clone()) || split_node(right, pane, axis, new_leaf)
+        },
+      }
+    }
+    let new_leaf = PaneLeaf {
+      id: new_id,
+      tab_order: Vec::new(),
+      active: None,
+    };
+    split_node(&mut self.root, pane, axis, new_leaf).then_some(new_id)
+  }
+}
+
+/// W-S4 P4: the persisted pane layout — the tree with panel ids swapped for
+/// session ENTRY INDICES (the `pinned_entry_indices` trick). Pathless tabs
+/// drop at persist; entries that fail to restore drop at load.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) enum PaneLayoutEntry {
+  Split {
+    axis: PaneLayoutAxis,
+    ratio: f32,
+    children: Vec<PaneLayoutEntry>,
+  },
+  Pane { tabs: Vec<usize>, active: Option<usize> },
+}
+
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) enum PaneLayoutAxis {
+  Horizontal,
+  Vertical,
+}
+
+impl PaneTree {
+  /// `None` for a single pane, so plain sessions keep their old shape.
+  pub fn to_layout(&self, entry_index_of: &std::collections::HashMap<Uuid, usize>) -> Option<PaneLayoutEntry> {
+    if self.pane_count() <= 1 {
+      return None;
+    }
+    fn walk(node: &PaneNode, entry_index_of: &std::collections::HashMap<Uuid, usize>) -> PaneLayoutEntry {
+      match node {
+        PaneNode::Pane(leaf) => PaneLayoutEntry::Pane {
+          tabs: leaf
+            .tab_order
+            .iter()
+            .filter_map(|id| entry_index_of.get(id).copied())
+            .collect(),
+          active: leaf.active.and_then(|id| entry_index_of.get(&id).copied()),
+        },
+        PaneNode::Split { axis, ratio, children } => PaneLayoutEntry::Split {
+          axis: match axis {
+            SplitAxis::Horizontal => PaneLayoutAxis::Horizontal,
+            SplitAxis::Vertical => PaneLayoutAxis::Vertical,
+          },
+          ratio: *ratio,
+          children: vec![walk(&children[0], entry_index_of), walk(&children[1], entry_index_of)],
+        },
+      }
+    }
+    Some(walk(&self.root, entry_index_of))
+  }
+
+  /// Rebuild from a persisted layout plus the per-entry restored panel ids
+  /// (`restored[i]` = the panel entry `i` became, `None` = failed to open).
+  /// Empty panes drop, single-child splits collapse, and a tree with
+  /// nothing left returns `None` (the caller keeps the default single pane).
+  pub fn from_layout(layout: &PaneLayoutEntry, restored: &[Option<Uuid>]) -> Option<Self> {
+    let mut next_pane = 0u64;
+    fn build(layout: &PaneLayoutEntry, restored: &[Option<Uuid>], next_pane: &mut u64) -> Option<PaneNode> {
+      match layout {
+        PaneLayoutEntry::Pane { tabs, active } => {
+          let tab_order: Vec<Uuid> = tabs
+            .iter()
+            .filter_map(|entry_ix| restored.get(*entry_ix).copied().flatten())
+            .collect();
+          if tab_order.is_empty() {
+            return None;
+          }
+          let active = active
+            .and_then(|entry_ix| restored.get(entry_ix).copied().flatten())
+            .filter(|id| tab_order.contains(id))
+            .or_else(|| tab_order.last().copied());
+          let id = PaneId(*next_pane);
+          *next_pane += 1;
+          Some(PaneNode::Pane(PaneLeaf { id, tab_order, active }))
+        },
+        PaneLayoutEntry::Split { axis, ratio, children } => {
+          let mut built: Vec<PaneNode> = children
+            .iter()
+            .filter_map(|child| build(child, restored, next_pane))
+            .collect();
+          match built.len() {
+            0 => None,
+            1 => Some(built.remove(0)),
+            _ => {
+              let second = built.remove(1);
+              let first = built.remove(0);
+              Some(PaneNode::Split {
+                axis: match axis {
+                  PaneLayoutAxis::Horizontal => SplitAxis::Horizontal,
+                  PaneLayoutAxis::Vertical => SplitAxis::Vertical,
+                },
+                ratio: ratio.clamp(0.15, 0.85),
+                children: [Box::new(first), Box::new(second)],
+              })
+            },
+          }
+        },
+      }
+    }
+    let root = build(layout, restored, &mut next_pane)?;
+    let mut tree = Self {
+      root,
+      focused: PaneId(0),
+      next_pane,
+    };
+    tree.focused = tree.leaves().first().map(|leaf| leaf.id)?;
+    Some(tree)
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -363,6 +565,73 @@ mod tests {
     let survivor = tree.leaf(tree.focused).unwrap();
     assert!(survivor.tab_order.contains(&id(2)) && survivor.tab_order.contains(&id(3)));
     assert!(!tree.close_pane(tree.focused), "the last pane refuses to close");
+  }
+
+  #[test]
+  fn tab_drops_move_or_split_and_ratios_address_splits_in_dfs_order() {
+    let mut tree = PaneTree::default();
+    tree.insert_tab(id(1));
+    tree.insert_tab(id(2));
+    let left = tree.focused;
+    let right = tree.split(left, SplitAxis::Horizontal).expect("split");
+
+    // Center drop: the tab moves panes, the emptied source collapses, and
+    // the target keeps focus.
+    tree.move_tab_to_pane(id(1), right);
+    assert_eq!(tree.pane_of(id(1)), Some(right));
+    assert_eq!(tree.focused, right);
+    assert_eq!(tree.pane_count(), 1, "the emptied source collapsed away");
+
+    // Edge drop: split the pane around the dragged tab; the NEW pane gets it.
+    let target = tree.pane_of(id(2)).expect("pane");
+    tree.split_pane_with_tab(target, SplitAxis::Vertical, id(1));
+    assert_eq!(tree.pane_count(), 2);
+    let new_pane = tree.pane_of(id(1)).expect("new pane");
+    assert_ne!(new_pane, target);
+    assert_eq!(tree.focused, new_pane);
+
+    // Ratio addressing follows DFS order (one split here → index 0).
+    tree.set_split_ratio(0, 0.7);
+    let PaneNode::Split { ratio, .. } = tree.root() else {
+      panic!("expected a split root");
+    };
+    assert!((ratio - 0.7).abs() < f32::EPSILON);
+  }
+
+  #[test]
+  fn layout_round_trips_through_entry_indices() {
+    let mut tree = PaneTree::default();
+    tree.insert_tab(id(1));
+    tree.insert_tab(id(2));
+    tree.split(tree.focused, SplitAxis::Horizontal);
+    tree.insert_tab(id(3));
+
+    let mut index_of = std::collections::HashMap::new();
+    index_of.insert(id(1), 0usize);
+    index_of.insert(id(2), 1usize);
+    index_of.insert(id(3), 2usize);
+    let layout = tree.to_layout(&index_of).expect("multi-pane layouts persist");
+
+    // Full restore: same shape, same actives.
+    let restored = vec![Some(id(1)), Some(id(2)), Some(id(3))];
+    let rebuilt = PaneTree::from_layout(&layout, &restored).expect("rebuilds");
+    assert_eq!(rebuilt.pane_count(), 2);
+    assert_eq!(rebuilt.pane_of(id(1)), rebuilt.leaves().first().map(|leaf| leaf.id));
+    assert_eq!(rebuilt.pane_of(id(2)), rebuilt.pane_of(id(3)), "the split pane kept both tabs");
+
+    // Entry 2 fails to open → its tab drops but the pane survives on id(2).
+    let partial = vec![Some(id(1)), Some(id(2)), None];
+    let rebuilt = PaneTree::from_layout(&layout, &partial).expect("tolerant rebuild");
+    assert_eq!(rebuilt.pane_count(), 2);
+    assert_eq!(rebuilt.pane_of(id(3)), None);
+
+    // The whole second pane fails → the split collapses to a single pane.
+    let collapsed = vec![Some(id(1)), None, None];
+    let rebuilt = PaneTree::from_layout(&layout, &collapsed).expect("collapses to one pane");
+    assert_eq!(rebuilt.pane_count(), 1);
+
+    // Nothing restored → None; the caller keeps the default tree.
+    assert!(PaneTree::from_layout(&layout, &[None, None, None]).is_none());
   }
 
   #[test]

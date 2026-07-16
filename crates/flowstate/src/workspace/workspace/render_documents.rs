@@ -1,3 +1,44 @@
+/// P3: the splitter drag payload (addressed by DFS split index).
+#[derive(Clone, Copy)]
+struct SplitterDrag {
+  split_ix: usize,
+  axis: SplitAxis,
+}
+
+/// P3: a dragged tab — pane drop zones move it or split around it.
+#[derive(Clone)]
+struct PaneTabDrag {
+  panel_id: Uuid,
+  label: SharedString,
+}
+
+struct EmptyDragGhost;
+
+impl gpui::Render for EmptyDragGhost {
+  fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    div()
+  }
+}
+
+struct PaneTabDragGhost {
+  label: SharedString,
+}
+
+impl gpui::Render for PaneTabDragGhost {
+  fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    div()
+      .px_2()
+      .py_0p5()
+      .rounded(px(4.0))
+      .bg(cx.theme().secondary)
+      .border_1()
+      .border_color(cx.theme().border)
+      .text_xs()
+      .text_color(cx.theme().foreground)
+      .child(self.label.clone())
+  }
+}
+
 #[hotpath::measure_all]
 impl Workspace {
   /// W-S4 P1: the viewing surface is the pane TREE — recursive splits whose
@@ -5,6 +46,7 @@ impl Workspace {
   /// historical window body.
   fn render_document_pane(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
     let root = self.pane_tree.root().clone();
+    let mut split_counter = 0usize;
     div()
       .flex_1()
       .w_full()
@@ -12,17 +54,35 @@ impl Workspace {
       .h_full()
       .overflow_hidden()
       .bg(cx.theme().background)
-      .child(self.render_pane_node(&root, cx))
+      .child(self.render_pane_node(&root, &mut split_counter, cx))
   }
 
-  fn render_pane_node(&mut self, node: &PaneNode, cx: &mut Context<Self>) -> gpui::AnyElement {
+  fn render_pane_node(&mut self, node: &PaneNode, split_counter: &mut usize, cx: &mut Context<Self>) -> gpui::AnyElement {
     match node {
       PaneNode::Pane(leaf) => self.render_pane_leaf(leaf, cx),
       PaneNode::Split { axis, ratio, children } => {
-        let first = self.render_pane_node(&children[0], cx);
-        let second = self.render_pane_node(&children[1], cx);
+        // P3: splits are numbered in DFS order — the splitter drag addresses
+        // its split through this index (`set_split_ratio` walks identically).
+        let split_ix = *split_counter;
+        *split_counter += 1;
+        let first = self.render_pane_node(&children[0], split_counter, cx);
+        let second = self.render_pane_node(&children[1], split_counter, cx);
         let ratio = ratio.clamp(0.15, 0.85);
-        match axis {
+        let axis = *axis;
+        let splitter = div()
+          .id(("pane-splitter", split_ix))
+          .flex_none()
+          .bg(cx.theme().border)
+          .hover(|style| style.bg(cx.theme().primary))
+          .on_drag(SplitterDrag { split_ix, axis }, |_, _, _, cx| cx.new(|_| EmptyDragGhost))
+          .on_click(cx.listener(move |workspace, event: &gpui::ClickEvent, _, cx| {
+            // Double-click re-balances 50/50.
+            if event.click_count() >= 2 {
+              workspace.pane_tree.set_split_ratio(split_ix, 0.5);
+              cx.notify();
+            }
+          }));
+        let container = match axis {
           SplitAxis::Horizontal => h_flex()
             .size_full()
             .min_w_0()
@@ -35,9 +95,8 @@ impl Workspace {
                 .overflow_hidden()
                 .child(first),
             )
-            .child(div().w(px(1.0)).h_full().flex_none().bg(cx.theme().border))
-            .child(div().flex_1().h_full().min_w_0().overflow_hidden().child(second))
-            .into_any_element(),
+            .child(splitter.w(px(5.0)).h_full().cursor_col_resize())
+            .child(div().flex_1().h_full().min_w_0().overflow_hidden().child(second)),
           SplitAxis::Vertical => v_flex()
             .size_full()
             .min_w_0()
@@ -50,10 +109,25 @@ impl Workspace {
                 .overflow_hidden()
                 .child(first),
             )
-            .child(div().h(px(1.0)).w_full().flex_none().bg(cx.theme().border))
-            .child(div().flex_1().w_full().min_h_0().overflow_hidden().child(second))
-            .into_any_element(),
-        }
+            .child(splitter.h(px(5.0)).w_full().cursor_row_resize())
+            .child(div().flex_1().w_full().min_h_0().overflow_hidden().child(second)),
+        };
+        container
+          .id(("pane-split", split_ix))
+          .on_drag_move(cx.listener(move |workspace, event: &gpui::DragMoveEvent<SplitterDrag>, _, cx| {
+            let drag = event.drag(cx);
+            if drag.split_ix != split_ix {
+              return;
+            }
+            let bounds = event.bounds;
+            let ratio = match drag.axis {
+              SplitAxis::Horizontal => f32::from(event.event.position.x - bounds.left()) / f32::from(bounds.size.width).max(1.0),
+              SplitAxis::Vertical => f32::from(event.event.position.y - bounds.top()) / f32::from(bounds.size.height).max(1.0),
+            };
+            workspace.pane_tree.set_split_ratio(split_ix, ratio);
+            cx.notify();
+          }))
+          .into_any_element()
       },
     }
   }
@@ -87,18 +161,72 @@ impl Workspace {
       // Q3-A: an empty pane hosts the home surface.
       None => self.render_empty_state(cx).into_any_element(),
     };
+    let tab_drop_zones_armed = self.pane_tab_dragging && cx.has_active_drag();
     v_flex()
       .size_full()
       .min_w_0()
       .min_h_0()
       .overflow_hidden()
+      .relative()
       .capture_any_mouse_down(cx.listener(move |workspace, _, _, cx| {
+        workspace.pane_tab_dragging = false;
         workspace.focus_pane(pane_id, cx);
       }))
       .when(!leaf.tab_order.is_empty(), |this| {
         this.child(self.render_pane_tab_bar(leaf, focused, cx))
       })
       .child(div().flex_1().w_full().min_h_0().overflow_hidden().child(body))
+      // P3: while a TAB drag is live, the pane grows drop zones — center
+      // adopts the tab, the right/bottom fifths split around it (the
+      // half-pane ghost is the tinted zone itself).
+      .when(tab_drop_zones_armed, |this| {
+        this
+          .child(
+            div()
+              .id(("pane-drop-center", pane_id.0))
+              .absolute()
+              .inset_0()
+              .drag_over::<PaneTabDrag>(|style, _, _, cx| style.bg(cx.theme().primary.opacity(0.08)))
+              .on_drop(cx.listener(move |workspace, drag: &PaneTabDrag, _, cx| {
+                workspace.pane_tab_dragging = false;
+                workspace.pane_tree.move_tab_to_pane(drag.panel_id, pane_id);
+                workspace.sync_active_from_tree(cx);
+                workspace.persist_temporary_workspace_session(cx);
+              })),
+          )
+          .child(
+            div()
+              .id(("pane-drop-right", pane_id.0))
+              .absolute()
+              .top_0()
+              .bottom_0()
+              .right_0()
+              .w(gpui::relative(0.2))
+              .drag_over::<PaneTabDrag>(|style, _, _, cx| style.bg(cx.theme().primary.opacity(0.18)))
+              .on_drop(cx.listener(move |workspace, drag: &PaneTabDrag, _, cx| {
+                workspace.pane_tab_dragging = false;
+                workspace.pane_tree.split_pane_with_tab(pane_id, SplitAxis::Horizontal, drag.panel_id);
+                workspace.sync_active_from_tree(cx);
+                workspace.persist_temporary_workspace_session(cx);
+              })),
+          )
+          .child(
+            div()
+              .id(("pane-drop-bottom", pane_id.0))
+              .absolute()
+              .left_0()
+              .right_0()
+              .bottom_0()
+              .h(gpui::relative(0.2))
+              .drag_over::<PaneTabDrag>(|style, _, _, cx| style.bg(cx.theme().primary.opacity(0.18)))
+              .on_drop(cx.listener(move |workspace, drag: &PaneTabDrag, _, cx| {
+                workspace.pane_tab_dragging = false;
+                workspace.pane_tree.split_pane_with_tab(pane_id, SplitAxis::Vertical, drag.panel_id);
+                workspace.sync_active_from_tree(cx);
+                workspace.persist_temporary_workspace_session(cx);
+              })),
+          )
+      })
       .into_any_element()
   }
 
@@ -304,12 +432,20 @@ impl Workspace {
     cx: &mut Context<Self>,
   ) -> impl IntoElement {
     let active_is_speech = tabs.get(active_index).is_some_and(|tab| tab.speech);
-    let active_tab_bg = if active_is_speech {
+    // W-S4 P2: the lit strip IS the focus cue — unfocused strips drop to
+    // muted (theme slots only; no borders-around-panes, Living Grid law).
+    let active_tab_bg = if !focused {
+      cx.theme().secondary
+    } else if active_is_speech {
       cx.theme().success.opacity(0.18)
     } else {
       cx.theme().background
     };
-    let active_tab_fg = cx.theme().foreground;
+    let active_tab_fg = if focused {
+      cx.theme().foreground
+    } else {
+      cx.theme().muted_foreground
+    };
     let workspace = cx.entity().downgrade();
     TabBar::new(("document-tab-bar", pane.0))
       .small()
@@ -439,8 +575,28 @@ impl Workspace {
         Tab::new()
           // GPUI-component tabs size to their labels. Keep tab labels bounded
           // before rendering so long filenames cannot break the tab strip.
-          .label(tab.label)
+          .label(tab.label.clone())
           .selected(tab.active)
+          // W-S4 P3: tabs drag — pane centers adopt them, pane edges split
+          // around them (the arming flag scopes the drop overlays to THIS
+          // drag type, so editor-internal drags keep their own targets).
+          .on_drag(
+            PaneTabDrag {
+              panel_id,
+              label: tab.label.clone(),
+            },
+            {
+              let workspace = workspace.clone();
+              move |drag, _, _, cx| {
+                let _ = workspace.update(cx, |workspace, cx| {
+                  workspace.pane_tab_dragging = true;
+                  cx.notify();
+                });
+                let label = drag.label.clone();
+                cx.new(|_| PaneTabDragGhost { label })
+              }
+            },
+          )
           .on_mouse_down(
             MouseButton::Middle,
             cx.listener(move |workspace, _, window, cx| {
