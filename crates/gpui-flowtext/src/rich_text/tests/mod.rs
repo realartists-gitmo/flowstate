@@ -17,3 +17,4 @@ include!("positions_formatting.rs");
 include!("decorations_drag_search.rs");
 include!("layout_scaling.rs");
 include!("prep_equivalence.rs");
+include!("edge_objects.rs");

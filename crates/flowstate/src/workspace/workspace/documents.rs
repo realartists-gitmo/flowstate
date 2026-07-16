@@ -42,6 +42,16 @@ pub(crate) fn attach_local_write(core: flowstate_collab::crdt_runtime::CrdtRunti
 /// becomes editable and authoritative here.
 /// M2: the editor resolves what was right-clicked; the workspace builds the
 /// menu (its verbs reach workspace surfaces — comments, speech, dispatch).
+/// B-S1 (silent-refusal law): editor refusals land in the activity zone.
+fn install_editor_refusal_reporting(editor: &Entity<RichTextEditor>, cx: &mut Context<Workspace>) {
+  cx.subscribe(editor, |workspace, _, event: &crate::rich_text_element::EditorEvent, cx| {
+    if let crate::rich_text_element::EditorEvent::Refused { message } = event {
+      workspace.report_failure(message.to_string(), None, cx);
+    }
+  })
+  .detach();
+}
+
 fn install_editor_context_menu(editor: &Entity<RichTextEditor>, cx: &mut Context<Workspace>) {
   let workspace = cx.entity().downgrade();
   editor.update(cx, |editor, _| {
@@ -402,6 +412,7 @@ impl Workspace {
 
     let editor = cx.new(|cx| RichTextEditor::new_with_path(document.clone(), path.clone(), cx));
     install_editor_context_menu(&editor, cx);
+    install_editor_refusal_reporting(&editor, cx);
     install_editor_write_authority(&editor, &attachment, document, cx);
     let workspace = cx.entity().downgrade();
     let title = title
@@ -1389,6 +1400,7 @@ impl Workspace {
     document.theme = load_document_theme();
     let editor = cx.new(|cx| RichTextEditor::new_with_path(document, path.clone(), cx));
     install_editor_context_menu(&editor, cx);
+    install_editor_refusal_reporting(&editor, cx);
     let smart_word_selection = load_smart_word_selection();
     editor.update(cx, |editor, cx| {
       editor.set_smart_word_selection(smart_word_selection, cx);

@@ -744,11 +744,11 @@ impl Workspace {
           .item(command_menu_item(workspace.clone(), "Insert Column After", None, false, with_editor(|editor, cx| {
             editor.insert_column_after_selected_table(cx);
           })))
-          .item(command_menu_item(workspace.clone(), "Delete Last Row", None, false, with_editor(|editor, cx| {
-            editor.delete_last_row_from_selected_table(cx);
+          .item(command_menu_item(workspace.clone(), "Delete Row", None, false, with_editor(|editor, cx| {
+            editor.delete_row_from_selected_table(cx);
           })))
-          .item(command_menu_item(workspace.clone(), "Delete Last Column", None, false, with_editor(|editor, cx| {
-            editor.delete_last_column_from_selected_table(cx);
+          .item(command_menu_item(workspace.clone(), "Delete Column", None, false, with_editor(|editor, cx| {
+            editor.delete_column_from_selected_table(cx);
           })))
           .separator()
           .item(command_menu_item(workspace.clone(), "Widen Column", None, false, with_editor(|editor, cx| {
@@ -762,7 +762,10 @@ impl Workspace {
           "Copy Equation Source",
           None,
           false,
-          with_editor(|editor, cx| editor.copy(cx)),
+          with_editor(|editor, cx| {
+            // B-S1: copies the LaTeX itself, not a rich block fragment.
+            editor.copy_equation_source(cx);
+          }),
         )),
       }
       .separator()

@@ -110,6 +110,8 @@ pub(super) struct LaidOutTable {
   pub(super) bottom: Pixels,
   pub(super) bounds: Bounds<Pixels>,
   pub(super) rows: Vec<LaidOutTableRow>,
+  /// B-S1: header rows finally RENDER (the model bit existed only for DOCX).
+  pub(super) header_row: bool,
 }
 
 #[derive(Clone)]

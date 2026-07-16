@@ -56,6 +56,7 @@ fn layout_table_block(
     bottom: row_top,
     bounds: Bounds::new(point(table_left, y), size(table_width, (row_top - y).max(px(1.0)))),
     rows,
+    header_row: table.style.header_row,
   }
 }
 

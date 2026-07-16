@@ -70,20 +70,27 @@ fn image_asset_intrinsic_size(asset: &AssetRecord) -> Option<(Pixels, Pixels)> {
 }
 
 #[hotpath::measure]
-fn image_asset_from_path(path: &Path) -> Option<(AssetRecord, SharedString)> {
+fn image_asset_from_path(path: &Path) -> Result<(AssetRecord, SharedString), String> {
+  // B-S1: refusals carry a REASON — oversized and unsupported files used to
+  // vanish silently on insert (picker and drag-drop both).
   const MAX_IMAGE_BYTES: u64 = 25 * 1024 * 1024;
-  let metadata = fs::metadata(path).ok()?;
+  let name = path.file_name().map(|name| name.to_string_lossy().to_string()).unwrap_or_default();
+  let metadata = fs::metadata(path).map_err(|error| format!("Couldn't read {name}: {error}"))?;
   if metadata.len() > MAX_IMAGE_BYTES {
-    return None;
+    return Err(format!(
+      "{name} is {} MB — images over 25 MB can't be inserted (they also exceed the collaboration transfer limit).",
+      metadata.len() / (1024 * 1024)
+    ));
   }
-  let bytes = fs::read(path).ok()?;
-  let format = image_format_for_path(path)?;
+  let bytes = fs::read(path).map_err(|error| format!("Couldn't read {name}: {error}"))?;
+  let format = image_format_for_path(path)
+    .ok_or_else(|| format!("{name} isn't a supported image format (png, jpeg, webp, gif, svg, bmp, tiff)."))?;
   let original_name = path
     .file_name()
     .map(|name| name.to_string_lossy().to_string());
   let alt_text: SharedString = original_name.clone().unwrap_or_default().into();
   let content_hash = AssetRecord::stable_content_hash(&bytes);
-  Some((
+  Ok((
     AssetRecord {
       id: AssetId(uuid::Uuid::new_v4().as_u128()),
       mime_type: format.mime_type().into(),
@@ -107,7 +114,10 @@ fn image_asset_from_image(image: Image) -> (AssetRecord, SharedString) {
       content_hash,
       bytes: Arc::new(image.bytes),
     },
-    "Pasted image".into(),
+    // B-S1: pasted images used to ship the literal string "Pasted image" as
+    // their exported accessibility description. Empty means "no description"
+    // — the DOCX exporter skips empty descr.
+    SharedString::default(),
   )
 }
 

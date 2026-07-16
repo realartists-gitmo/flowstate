@@ -226,6 +226,18 @@ impl RichTextEditor {
     );
   }
 
+  /// B-S1: "Copy Equation Source" copies EXACTLY the LaTeX source as plain
+  /// text. The old menu item fell through to the whole-block rich fragment,
+  /// so cross-Flowstate paste gave you a second equation block instead of
+  /// editable source.
+  pub fn copy_equation_source(&mut self, cx: &mut Context<Self>) -> bool {
+    let Some(source) = self.selected_equation_source() else {
+      return false;
+    };
+    cx.write_to_clipboard(ClipboardItem::new_string(source));
+    true
+  }
+
   /// Paint a transient highlight over `selection`, replacing any in-flight
   /// flash, and clear it after [`JUMP_FLASH_DURATION`].
   pub fn flash_range(&mut self, selection: EditorSelection, color_rgb: u32, cx: &mut Context<Self>) {

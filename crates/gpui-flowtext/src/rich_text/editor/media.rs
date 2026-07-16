@@ -281,13 +281,16 @@ impl RichTextEditor {
         .background_executor()
         .spawn(async move { image_asset_from_path(&path) })
         .await;
-      let Some((asset, alt_text)) = image_asset else {
-        return;
-      };
       editor
         .update(cx, |editor, cx| {
-          if !editor.disposed {
-            editor.insert_image_block(asset, alt_text, cx);
+          if editor.disposed {
+            return;
+          }
+          match image_asset {
+            Ok((asset, alt_text)) => editor.insert_image_block(asset, alt_text, cx),
+            // B-S1: the refusal reaches the host (activity zone) instead of
+            // vanishing.
+            Err(message) => cx.emit(EditorEvent::Refused { message: message.into() }),
           }
         })
         .ok();
@@ -304,21 +307,28 @@ impl RichTextEditor {
     let position = window.mouse_position();
     let window_handle = window.window_handle();
     cx.spawn(async move |editor, cx| {
-      let image_assets = cx
+      let results = cx
         .background_executor()
-        .spawn(async move {
-          paths
-            .iter()
-            .filter_map(|path| image_asset_from_path(path))
-            .collect::<Vec<_>>()
-        })
+        .spawn(async move { paths.iter().map(|path| image_asset_from_path(path)).collect::<Vec<_>>() })
         .await;
-      if image_assets.is_empty() {
-        return;
+      let mut image_assets = Vec::new();
+      let mut refusals = Vec::new();
+      for result in results {
+        match result {
+          Ok(asset) => image_assets.push(asset),
+          Err(message) => refusals.push(message),
+        }
       }
       let _ = window_handle.update(cx, |_, window, cx| {
         let _ = editor.update(cx, |editor, cx| {
           if editor.disposed {
+            return;
+          }
+          for message in refusals {
+            // B-S1: every dropped file that can't insert says why.
+            cx.emit(EditorEvent::Refused { message: message.into() });
+          }
+          if image_assets.is_empty() {
             return;
           }
           editor.place_block_insertion_from_point(position, window, cx);

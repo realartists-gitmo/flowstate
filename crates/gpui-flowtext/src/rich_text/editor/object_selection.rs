@@ -354,17 +354,33 @@ impl RichTextEditor {
     }
     let start_block = self.block_ix_for_paragraph(range.start.paragraph)?;
     let end_block = self.block_ix_for_paragraph(range.end.paragraph)?;
+    // B-S1: a document-edge selection includes the edge OBJECTS. Text
+    // selections live in paragraph space, so a leading image (before the
+    // first paragraph) or a trailing one could never satisfy the old
+    // strictly-between test — select-all + copy/cut silently dropped them.
+    // Blocks outside the first/last paragraph's block are objects by
+    // construction (an earlier paragraph would BE the first paragraph).
+    let doc_start_selected = range.start.paragraph == 0 && range.start.byte == 0;
+    let last_paragraph_ix = self.document.paragraphs.len().saturating_sub(1);
+    let doc_end_selected = range.end.paragraph == last_paragraph_ix
+      && range.end.byte == paragraph_text_len(&self.document.paragraphs[last_paragraph_ix]);
+    let scan_start = if doc_start_selected { 0 } else { start_block };
+    let scan_end = if doc_end_selected {
+      self.document.blocks.len().saturating_sub(1)
+    } else {
+      end_block
+    };
     let has_object = self
       .document
       .blocks
-      .range(start_block.min(end_block)..start_block.max(end_block) + 1)
+      .range(scan_start.min(scan_end)..scan_start.max(scan_end) + 1)
       .any(|block| !matches!(block, Block::Paragraph(_)));
     if !has_object {
       return None;
     }
     let mut blocks = Vec::new();
     let mut assets = Vec::new();
-    for block_ix in start_block..=end_block {
+    for block_ix in scan_start..=scan_end {
       match self.document.blocks.get(block_ix)? {
         Block::Paragraph(_) => {
           let Some(paragraph_ix) = self.paragraph_ix_for_block(block_ix) else {
@@ -388,7 +404,10 @@ impl RichTextEditor {
           }
         },
         block @ (Block::Image(_) | Block::Equation(_) | Block::Table(_)) => {
-          if block_ix > start_block && block_ix < end_block {
+          let interior = block_ix > start_block && block_ix < end_block;
+          let leading_edge = doc_start_selected && block_ix < start_block;
+          let trailing_edge = doc_end_selected && block_ix > end_block;
+          if interior || leading_edge || trailing_edge {
             collect_block_assets(block, &self.document.assets, &mut assets);
             blocks.push(input_block_from_block(block));
           }

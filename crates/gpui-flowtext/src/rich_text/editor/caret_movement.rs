@@ -4,29 +4,43 @@ impl RichTextEditor {
     if matches!(self.selected_block, Some(BlockSelection::Equation(_))) {
       let source = self.selected_equation_source().unwrap_or_default();
       let caret = self.equation_source_caret.min(source.len());
-      let next = match dir {
-        HDir::Left if caret > 0 => source[..caret]
-          .char_indices()
-          .next_back()
-          .map(|(byte, _)| byte)
-          .unwrap_or(0),
-        HDir::Left => 0,
-        HDir::Right if caret < source.len() => source[caret..]
-          .char_indices()
-          .nth(1)
-          .map(|(byte, _)| caret + byte)
-          .unwrap_or(source.len()),
-        HDir::Right => source.len(),
+      // B-S1: THE CARET TRAP dies. Arrowing past the source's edge used to
+      // clamp in place — keyboard users could enter an equation but never
+      // leave it. At the boundary the arrow now exits the block like every
+      // other object (collapse to the adjacent body position).
+      let at_boundary = match dir {
+        HDir::Left => caret == 0,
+        HDir::Right => caret >= source.len(),
       };
-      if extend {
-        self.equation_source_caret = next;
+      if at_boundary && !extend {
+        if self.collapse_object_selection(dir, cx) {
+          return;
+        }
       } else {
-        self.equation_source_caret = next;
-        self.equation_source_anchor = next;
+        let next = match dir {
+          HDir::Left if caret > 0 => source[..caret]
+            .char_indices()
+            .next_back()
+            .map(|(byte, _)| byte)
+            .unwrap_or(0),
+          HDir::Left => 0,
+          HDir::Right if caret < source.len() => source[caret..]
+            .char_indices()
+            .nth(1)
+            .map(|(byte, _)| caret + byte)
+            .unwrap_or(source.len()),
+          HDir::Right => source.len(),
+        };
+        if extend {
+          self.equation_source_caret = next;
+        } else {
+          self.equation_source_caret = next;
+          self.equation_source_anchor = next;
+        }
+        self.reset_caret_blink(cx);
+        cx.notify();
+        return;
       }
-      self.reset_caret_blink(cx);
-      cx.notify();
-      return;
     }
     if !extend && matches!(self.selected_block, Some(BlockSelection::TableCell { .. })) {
       let text = self.selected_table_cell_text().unwrap_or_default();
@@ -164,6 +178,19 @@ impl RichTextEditor {
 
   fn move_vertical(&mut self, dir: VDir, extend: bool, window: &mut Window, cx: &mut Context<Self>) {
     self.pending_snap_to_paragraph = None;
+    // B-S1: vertical movement learns objects exist. A selected block exits
+    // vertically like it does horizontally (Up = leave upward, Down =
+    // downward) — before this, Up/Down over a selected image was undefined
+    // and objects were unreachable except by Left/Right or the mouse.
+    if !extend && self.selected_block.is_some() {
+      let horizontal = match dir {
+        VDir::Up => HDir::Left,
+        VDir::Down => HDir::Right,
+      };
+      if self.collapse_object_selection(horizontal, cx) {
+        return;
+      }
+    }
     let head = self.selection.head;
     let width = self.current_layout_width();
     self.ensure_vertical_navigation_chunks(head, dir, width, window, cx);
@@ -195,6 +222,19 @@ impl RichTextEditor {
       let Some((np, nl)) = next else {
         return self.move_to_adjacent_unmounted_paragraph(dir, extend, cur_x, window, cx);
       };
+      // B-S1: an arrow that would cross into ANOTHER paragraph stops on the
+      // object sitting between them — Up/Down now land on images/equations/
+      // tables the way Left/Right always did.
+      if !extend && layout.paragraphs[np].index != head.paragraph {
+        let object = match dir {
+          VDir::Up => self.immediate_object_before_paragraph(head.paragraph),
+          VDir::Down => self.immediate_object_after_paragraph(head.paragraph),
+        };
+        if let Some(object) = object {
+          self.select_block(object, cx);
+          return;
+        }
+      }
       let target_line = &layout.paragraphs[np].lines[nl];
       let new_byte = target_line.hit_test_x(cur_x);
       let new_head = self.doc_offset_from_display(DocumentOffset {
@@ -225,6 +265,17 @@ impl RichTextEditor {
 
   fn move_to_adjacent_unmounted_paragraph(&mut self, dir: VDir, extend: bool, goal_x: Pixels, window: &mut Window, cx: &mut Context<Self>) {
     let head = self.selection.head;
+    // B-S1: same object stop as the mounted path.
+    if !extend {
+      let object = match dir {
+        VDir::Up => self.immediate_object_before_paragraph(head.paragraph),
+        VDir::Down => self.immediate_object_after_paragraph(head.paragraph),
+      };
+      if let Some(object) = object {
+        self.select_block(object, cx);
+        return;
+      }
+    }
     let Some(target_paragraph) = self.adjacent_document_paragraph(head.paragraph, dir) else {
       return;
     };

@@ -119,6 +119,12 @@ pub enum EditorEvent {
   Exported {
     format: DocumentExportFormat,
   },
+  /// B-S1 (silent-refusal law): the editor declined a user action and the
+  /// host must say so — e.g. an image that is too large or an unsupported
+  /// format on insert. The message is user-facing.
+  Refused {
+    message: gpui::SharedString,
+  },
   /// The editor could not reconcile optimistic local state with the canonical
   /// projection and recovered by discarding or rebuilding. Hosts must surface
   /// this (telemetry at minimum); it indicates replay/projection divergence.

@@ -3,6 +3,7 @@ use std::ops::Range;
 use gpui::{App, Background, Bounds, Hsla, Pixels, Point, ScrollHandle, Window, black, fill, hsla, point, px, rgb, size};
 
 use flowstate_fidelity::{self as fidelity, FidelityClass};
+use gpui_component::ActiveTheme as _;
 
 use super::*;
 
@@ -273,8 +274,8 @@ pub(super) fn paint_structural_block(
   let content_mask = window.content_mask().bounds;
   match block {
     LaidOutBlock::Paragraph(paragraph) => paint_table_paragraph(paragraph, origin, content_mask, window, cx),
-    LaidOutBlock::Image(object) => paint_object_block(object, "Image", selected_block, origin, content_mask, window),
-    LaidOutBlock::Equation(object) => paint_object_block(object, "Equation", selected_block, origin, content_mask, window),
+    LaidOutBlock::Image(object) => paint_object_block(object, "Image", selected_block, origin, content_mask, window, cx),
+    LaidOutBlock::Equation(object) => paint_object_block(object, "Equation", selected_block, origin, content_mask, window, cx),
     LaidOutBlock::Table(table) => paint_table_block(table, selected_block, table_cell_caret, text_selected, origin, content_mask, window, cx),
   }
 }
@@ -287,6 +288,7 @@ fn paint_object_block(
   origin: Point<Pixels>,
   content_mask: Bounds<Pixels>,
   window: &mut Window,
+  cx: &App,
 ) {
   let bounds = object.bounds.shift(origin);
   if !bounds.intersects(&content_mask) {
@@ -296,10 +298,13 @@ fn paint_object_block(
     selected_block,
     Some(BlockSelection::Image(ix) | BlockSelection::Equation(ix)) if ix == object.block_ix
   );
-  window.paint_quad(fill(bounds, Background::from(rgb(0xffffff))));
+  // B-S1 theme-is-law: object frames draw from theme slots — the hardcoded
+  // white fill was a light-theme assumption baked into every dark theme.
+  let frame_rule = if selected { cx.theme().primary } else { cx.theme().border };
+  window.paint_quad(fill(bounds, Background::from(cx.theme().background)));
   window.paint_quad(fill(
     snap_rule_bounds(Bounds::new(bounds.origin, size(bounds.size.width, px(1.0))), RuleSnap::Horizontal, window),
-    Background::from(if selected { rgb(0x0969da) } else { rgb(0xb7b7b7) }),
+    Background::from(frame_rule),
   ));
   window.paint_quad(fill(
     snap_rule_bounds(
@@ -307,7 +312,7 @@ fn paint_object_block(
       RuleSnap::Horizontal,
       window,
     ),
-    Background::from(if selected { rgb(0x0969da) } else { rgb(0xb7b7b7) }),
+    Background::from(frame_rule),
   ));
 }
 
@@ -341,10 +346,16 @@ fn paint_table_block(
         Some(BlockSelection::TableCell { block_ix, row_ix: selected_row, cell_ix: selected_cell, .. })
           if block_ix == table.block_ix && selected_row == row_ix && selected_cell == cell_ix
       );
-      window.paint_quad(fill(
-        cell_bounds,
-        Background::from(if cell_selected { rgb(0xeaf4ff) } else { rgb(0xffffff) }),
-      ));
+      // B-S1 theme-is-law + the header row finally renders: row 0 of a
+      // header table gets a muted band instead of being indistinguishable.
+      let cell_fill = if cell_selected {
+        cx.theme().primary.opacity(0.14)
+      } else if table.header_row && row_ix == 0 {
+        cx.theme().muted
+      } else {
+        cx.theme().background
+      };
+      window.paint_quad(fill(cell_bounds, Background::from(cell_fill)));
       for block in &cell.blocks {
         match block {
           LaidOutBlock::Paragraph(paragraph) => {
@@ -399,13 +410,13 @@ fn paint_table_block(
             }
           },
           LaidOutBlock::Table(table) => paint_table_block(table, None, None, text_selected, origin, content_mask, window, cx),
-          LaidOutBlock::Image(object) => paint_object_block(object, "Image", None, origin, content_mask, window),
-          LaidOutBlock::Equation(object) => paint_object_block(object, "Equation", None, origin, content_mask, window),
+          LaidOutBlock::Image(object) => paint_object_block(object, "Image", None, origin, content_mask, window, cx),
+          LaidOutBlock::Equation(object) => paint_object_block(object, "Equation", None, origin, content_mask, window, cx),
         }
       }
     }
   }
-  paint_table_grid_rules(table, table_selected, origin, window);
+  paint_table_grid_rules(table, table_selected, origin, window, cx);
 }
 
 #[hotpath::measure]
@@ -429,8 +440,9 @@ fn paint_table_paragraph_backgrounds(paragraph: &LaidOutParagraph, origin: Point
 }
 
 #[hotpath::measure]
-fn paint_table_grid_rules(table: &LaidOutTable, selected: bool, origin: Point<Pixels>, window: &mut Window) {
-  let color = if selected { rgb(0x0969da) } else { rgb(0x808080) };
+fn paint_table_grid_rules(table: &LaidOutTable, selected: bool, origin: Point<Pixels>, window: &mut Window, cx: &App) {
+  // B-S1 theme-is-law: grid hairlines from theme slots.
+  let color = if selected { cx.theme().primary } else { cx.theme().border };
   let background = Background::from(color);
   let mut horizontal = Vec::new();
   let mut vertical = Vec::new();

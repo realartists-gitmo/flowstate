@@ -59,7 +59,10 @@ impl RichTextEditor {
     );
   }
 
-  pub fn delete_last_row_from_selected_table(&mut self, cx: &mut Context<Self>) {
+  /// B-S1: deletes the SELECTED cell's row (falling back to the last row when
+  /// only the table is selected) — the old name and menu label said "last"
+  /// while doing exactly this, a user-facing lie.
+  pub fn delete_row_from_selected_table(&mut self, cx: &mut Context<Self>) {
     let target_row = match self.selected_block {
       Some(BlockSelection::TableCell { row_ix, .. }) => Some(row_ix),
       _ => None,
@@ -112,7 +115,8 @@ impl RichTextEditor {
     );
   }
 
-  pub fn delete_last_column_from_selected_table(&mut self, cx: &mut Context<Self>) {
+  /// B-S1: deletes the SELECTED cell's column (falling back to the last).
+  pub fn delete_column_from_selected_table(&mut self, cx: &mut Context<Self>) {
     let target_column = match self.selected_block {
       Some(BlockSelection::TableCell { cell_ix, .. }) => Some(cell_ix),
       _ => None,
