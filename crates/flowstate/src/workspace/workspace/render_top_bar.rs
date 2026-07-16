@@ -26,7 +26,19 @@ impl Workspace {
             !self.outline_collapsed,
             !self.ribbon_collapsed,
           ))
-          .child(div().flex_1())
+          // TB-S2: the active document's name lives in the drag area — the
+          // window says what it is without stealing a band.
+          .child(
+            div().flex_1().h_full().flex().items_center().justify_center().child(
+              div()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .overflow_hidden()
+                .text_ellipsis()
+                .max_w(px(360.0))
+                .child(self.active_document_drag_title(cx)),
+            ),
+          )
           .child(share_top_bar_button(cx, self.active_editor.is_some() || self.active_flow.is_some(), active_collaborating))
           .child(settings_top_bar_button(cx)),
       )

@@ -189,6 +189,8 @@ struct DocumentTab {
   pinned: bool,
   pin_index: Option<usize>,
   speech: bool,
+  /// TB-S4: unsaved changes — rendered as a dot mark, not a `*` in the label.
+  dirty: bool,
 }
 
 type FontFamilySelectDelegate = SearchableVec<SharedString>;

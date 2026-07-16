@@ -743,6 +743,92 @@ impl Workspace {
     cx.notify();
   }
 
+  /// TB-S2: what the drag area says — the active document's title, with an
+  /// honest unsaved marker.
+  pub(super) fn active_document_drag_title(&self, cx: &App) -> SharedString {
+    let Some(active_id) = self.active_document_id else {
+      return SharedString::default();
+    };
+    let title = self
+      .document_panels
+      .iter()
+      .map(|panel| panel.read(cx))
+      .find(|panel| panel.id() == active_id)
+      .map(|panel| (panel.title_text(), panel.is_dirty(cx)))
+      .or_else(|| {
+        self
+          .flow_panels
+          .iter()
+          .map(|panel| panel.read(cx))
+          .find(|panel| panel.id() == active_id)
+          .map(|panel| (panel.title_text(), panel.is_dirty(cx)))
+      });
+    match title {
+      Some((title, true)) => format!("{title} — unsaved").into(),
+      Some((title, false)) => title,
+      None => SharedString::default(),
+    }
+  }
+
+  /// TB-S3: move a tab left/right within its zone (pinned tabs reorder
+  /// inside the pin list; unpinned tabs reorder in panel order). The pinned
+  /// zone stays a zone — moves never cross the boundary.
+  pub(super) fn move_document_tab(&mut self, panel_id: Uuid, delta: isize, cx: &mut Context<Self>) {
+    if let Some(pin_ix) = self.pinned_document_ids.iter().position(|id| *id == panel_id) {
+      let target = pin_ix.saturating_add_signed(delta).min(self.pinned_document_ids.len() - 1);
+      if target != pin_ix {
+        self.pinned_document_ids.swap(pin_ix, target);
+        self.persist_temporary_workspace_session(cx);
+        cx.notify();
+      }
+      return;
+    }
+    // Unpinned: reorder the underlying panel lists (documents then flows —
+    // the tab strip shows them in that concatenated order).
+    let doc_count = self.document_panels.len();
+    let doc_ix = self.document_panels.iter().position(|panel| panel.read(cx).id() == panel_id);
+    let flow_ix = self.flow_panels.iter().position(|panel| panel.read(cx).id() == panel_id);
+    match (doc_ix, flow_ix) {
+      (Some(ix), _) => {
+        let target = ix.saturating_add_signed(delta).min(doc_count.saturating_sub(1));
+        if target != ix {
+          self.document_panels.swap(ix, target);
+          self.persist_temporary_workspace_session(cx);
+          cx.notify();
+        }
+      },
+      (_, Some(ix)) => {
+        let target = ix.saturating_add_signed(delta).min(self.flow_panels.len().saturating_sub(1));
+        if target != ix {
+          self.flow_panels.swap(ix, target);
+          self.persist_temporary_workspace_session(cx);
+          cx.notify();
+        }
+      },
+      _ => {},
+    }
+  }
+
+  /// TB-S3 tear-off: reopen a path-backed document in its own window, then
+  /// close the tab here. Dirty/untitled tabs refuse honestly at the menu.
+  pub(super) fn tear_off_document_tab(&mut self, panel_id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+    let path = self
+      .document_panels
+      .iter()
+      .find(|panel| panel.read(cx).id() == panel_id)
+      .and_then(|panel| panel.read(cx).editor().read(cx).document_path().cloned())
+      .or_else(|| {
+        self
+          .flow_panels
+          .iter()
+          .find(|panel| panel.read(cx).id() == panel_id)
+          .and_then(|panel| panel.read(cx).editor().read(cx).document_path().cloned())
+      });
+    let Some(path) = path else { return };
+    let _ = crate::workspace::open_workspace_window(Some(path), cx);
+    self.close_document_panel(panel_id, window, cx);
+  }
+
   fn document_tabs(&self, cx: &App) -> Vec<DocumentTab> {
     let mut tabs = self
       .document_panels
@@ -752,15 +838,15 @@ impl Workspace {
         let title = panel.title_text();
         let dirty = panel.is_dirty(cx);
         let title = truncate_tab_title(&title, 32);
-        let label = if dirty { format!("*{title}").into() } else { title.into() };
         let id = panel.id();
         DocumentTab {
           id,
-          label,
+          label: title.into(),
           active: Some(id) == self.active_document_id,
           pinned: false,
           pin_index: None,
           speech: self.speech_document_id == Some(id),
+          dirty,
         }
       })
       .collect::<Vec<_>>();
@@ -769,15 +855,15 @@ impl Workspace {
       let title = panel.title_text();
       let dirty = panel.is_dirty(cx);
       let title = truncate_tab_title(&title, 32);
-      let label = if dirty { format!("*{title}").into() } else { title.into() };
       let id = panel.id();
       DocumentTab {
         id,
-        label,
+        label: title.into(),
         active: Some(id) == self.active_document_id,
         pinned: false,
         pin_index: None,
         speech: self.speech_document_id == Some(id),
+        dirty,
       }
     }));
     ordered_document_tabs(tabs, &self.pinned_document_ids)

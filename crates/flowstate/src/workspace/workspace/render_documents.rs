@@ -89,17 +89,52 @@ impl Workspace {
         let panel_id = tab.id;
         let workspace = workspace.clone();
         let collab_phase = crate::collab::phase_for_panel(panel_id, cx);
+        // TB-S4 cleaned badges: pin chips are kept; every other mark (dirty,
+        // speech, collab) shows at most TWO, the rest fold into a tooltip.
+        let mut marks: Vec<(&'static str, gpui::AnyElement)> = Vec::new();
+        if tab.dirty {
+          marks.push((
+            "Unsaved changes",
+            div()
+              .w(px(6.0))
+              .h(px(6.0))
+              .rounded_full()
+              .bg(cx.theme().warning)
+              .into_any_element(),
+          ));
+        }
+        if tab.speech {
+          marks.push((
+            "Speech document",
+            div()
+              .text_xs()
+              .font_weight(gpui::FontWeight::SEMIBOLD)
+              .text_color(cx.theme().success)
+              .child("S")
+              .into_any_element(),
+          ));
+        }
+        if let Some(badge) = collab_phase.as_ref().and_then(|phase| crate::collab::status::tab_badge(phase, cx)) {
+          marks.push(("Collaboration", badge.into_any_element()));
+        }
+        let overflow: Vec<&'static str> = marks.iter().skip(2).map(|(name, _)| *name).collect();
+        let overflow_tooltip: SharedString = overflow.join(" · ").into();
+        let overflow_count = overflow.len();
+        let visible_marks: Vec<gpui::AnyElement> = marks.into_iter().take(2).map(|(_, mark)| mark).collect();
         let tab_prefix = h_flex()
           .ml(px(5.0))
           .mr(px(-3.0))
           .gap(px(2.0))
-          .when(tab.speech, |this| {
+          .items_center()
+          .children(visible_marks)
+          .when(overflow_count > 0, |this| {
             this.child(
               div()
-                .text_xs()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(cx.theme().success)
-                .child("S"),
+                .id(("tab-mark-overflow", panel_id.as_u128() as u64))
+                .text_size(px(9.0))
+                .text_color(cx.theme().muted_foreground)
+                .tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(overflow_tooltip.clone()).build(window, cx))
+                .child(format!("+{overflow_count}")),
             )
           })
           .when_some(tab.pin_index.and_then(pin_shortcut_label), |this, pin_label| {
@@ -123,9 +158,7 @@ impl Workspace {
                 .child(pin_label),
             )
           })
-          .when_some(collab_phase.as_ref().and_then(|phase| crate::collab::status::tab_badge(phase, cx)), |this, badge| {
-            this.child(badge)
-          });
+          ;
         let close_button = icon_button(("close-tab", panel_id.as_u128() as u64), AppIcon::Close)
           .tooltip("Close document")
           .when(tab.active, |this| {
@@ -156,10 +189,25 @@ impl Workspace {
           .prefix(tab_prefix)
           .suffix(close_button)
           .context_menu(move |menu, _, _| {
-            let workspace = workspace.clone();
-            menu.item(PopupMenuItem::new(if tab.pinned { "Unpin tab" } else { "Pin tab" }).on_click(move |_, _, cx| {
-              let _ = workspace.update(cx, |workspace, cx| workspace.toggle_tab_pin(panel_id, cx));
-            }))
+            let pin_workspace = workspace.clone();
+            let left_workspace = workspace.clone();
+            let right_workspace = workspace.clone();
+            let tear_workspace = workspace.clone();
+            menu
+              .item(PopupMenuItem::new(if tab.pinned { "Unpin tab" } else { "Pin tab" }).on_click(move |_, _, cx| {
+                let _ = pin_workspace.update(cx, |workspace, cx| workspace.toggle_tab_pin(panel_id, cx));
+              }))
+              // TB-S3: reorder within the tab's zone (pins stay a zone).
+              .item(PopupMenuItem::new("Move tab left").on_click(move |_, _, cx| {
+                let _ = left_workspace.update(cx, |workspace, cx| workspace.move_document_tab(panel_id, -1, cx));
+              }))
+              .item(PopupMenuItem::new("Move tab right").on_click(move |_, _, cx| {
+                let _ = right_workspace.update(cx, |workspace, cx| workspace.move_document_tab(panel_id, 1, cx));
+              }))
+              // TB-S3 tear-off rides the New Window machinery.
+              .item(PopupMenuItem::new("Move to new window").on_click(move |_, window, cx| {
+                let _ = tear_workspace.update(cx, |workspace, cx| workspace.tear_off_document_tab(panel_id, window, cx));
+              }))
           })
       }))
       .last_empty_space(div().flex_1().h_full())
