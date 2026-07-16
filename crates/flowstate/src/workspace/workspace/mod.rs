@@ -100,7 +100,10 @@ pub struct Workspace {
   pinned_document_ids: Vec<Uuid>,
   speech_document_id: Option<Uuid>,
   // §perf: Uuid keys are locally generated and trusted; use FxHash to avoid SipHash overhead.
-  speech_word_count_cache: FxHashMap<Uuid, (u64, usize)>,
+  /// (edit generation, speech words, total words) per document (SB-S4).
+  speech_word_count_cache: FxHashMap<Uuid, (u64, usize, usize)>,
+  /// SB-S4: the counter slot's per-document mode memory (click-to-cycle).
+  status_counter_modes: FxHashMap<Uuid, u8>,
   speech_word_count_pending: FxHashSet<Uuid>,
   body_resizable_state: Entity<ResizableState>,
   content_resizable_state: Entity<ResizableState>,

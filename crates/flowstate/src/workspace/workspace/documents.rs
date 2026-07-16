@@ -214,7 +214,8 @@ impl Workspace {
       tab_bar_scroll_handle: ScrollHandle::new(),
       pinned_document_ids: Vec::new(),
       speech_document_id: None,
-      speech_word_count_cache: FxHashMap::default(),   // §perf: FxHash for trusted Uuid keys
+      speech_word_count_cache: FxHashMap::default(),
+      status_counter_modes: FxHashMap::default(),   // §perf: FxHash for trusted Uuid keys
       speech_word_count_pending: FxHashSet::default(), // §perf: FxHash for trusted Uuid keys
       body_resizable_state: cx.new(|_| ResizableState::default()),
       content_resizable_state: cx.new(|_| ResizableState::default()),

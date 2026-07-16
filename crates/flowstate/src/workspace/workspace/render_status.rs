@@ -229,12 +229,12 @@ impl Workspace {
     let speech_word_count = if let (Some(document_id), Some(editor)) = (self.active_document_id, self.active_editor.as_ref()) {
       let editor = editor.read(cx);
       let generation = editor.edit_generation();
-      if let Some((_, count)) = self
+      if let Some((_, speech, total)) = self
         .speech_word_count_cache
         .get(&document_id)
-        .filter(|(cached_generation, _)| *cached_generation == generation)
+        .filter(|(cached_generation, _, _)| *cached_generation == generation)
       {
-        Some(*count)
+        Some((*speech, *total))
       } else if self.speech_word_count_pending.contains(&document_id) {
         None
       } else {
@@ -251,18 +251,18 @@ impl Workspace {
           .remove(&document_id)
           .unwrap_or_default();
         cx.spawn(async move |this, cx| {
-          let (count, paragraph_cache) = cx
+          let (speech, total, paragraph_cache) = cx
             .background_executor()
             .spawn(async move {
               let mut paragraph_cache = paragraph_cache;
-              let (count, _recounted) = speech_word_count_incremental(&document, &mut paragraph_cache);
-              (count, paragraph_cache)
+              let (speech, total, _recounted) = speech_word_count_incremental(&document, &mut paragraph_cache);
+              (speech, total, paragraph_cache)
             })
             .await;
           let _ = this.update(cx, |this, cx| {
             let is_open = this.document_panels.iter().any(|panel| panel.read(cx).id() == document_id);
             if is_open {
-              this.speech_word_count_cache.insert(document_id, (generation, count));
+              this.speech_word_count_cache.insert(document_id, (generation, speech, total));
             }
             this.speech_word_count_pending.remove(&document_id);
             // Return the memo for the next recount, and prune memos of
@@ -341,20 +341,63 @@ impl Workspace {
         }
       })
       .when_some(zoom, |this, percent| this.child(self.render_zoom_slider(percent, cx)))
-      .when_some(speech_word_count, |this, count| {
-        this.child(
+      // SB-S4: the click-to-cycle counter slot with per-document mode memory.
+      .when_some(self.status_counter_slot(speech_word_count, cx), |this, slot| this.child(slot))
+  }
+
+  /// SB-S4: what the counter slot shows for the active panel, cycling on
+  /// click. Documents: speech words → total words → paragraphs. Flows:
+  /// cells → sheets (cheap sync reads off the board).
+  fn status_counter_slot(&self, doc_counts: Option<(usize, usize)>, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    let panel_id = self.active_document_id?;
+    let mode = self.status_counter_modes.get(&panel_id).copied().unwrap_or(0);
+    let (label, tooltip): (String, &'static str) = if let Some(flow) = self.active_flow.as_ref() {
+      let board = flow.read(cx).board();
+      match mode % 2 {
+        0 => {
+          let cells: usize = board.sheets.iter().map(|sheet| sheet.cells.len()).sum();
+          (format!("{cells} cells"), "Cells on this board — click to cycle")
+        },
+        _ => (
+          format!("{} sheets", board.sheets.len()),
+          "Sheets on this board — click to cycle",
+        ),
+      }
+    } else {
+      let (speech, total) = doc_counts?;
+      match mode % 3 {
+        0 => (
+          format!("Speech: {speech} words"),
+          "Words in tags, cites, and highlighted text — what gets spoken. Click to cycle",
+        ),
+        1 => (format!("{total} words"), "Every word in the document — click to cycle"),
+        _ => {
+          let paragraphs = self
+            .active_editor
+            .as_ref()
+            .map_or(0, |editor| editor.read(cx).document().paragraphs.len());
+          (format!("{paragraphs} paragraphs"), "Paragraph count — click to cycle")
+        },
+      }
+    };
+    Some(
+      Button::new("status-counter-slot")
+        .text()
+        .compact()
+        .tooltip(tooltip)
+        .child(
           div()
-            .flex_none()
-            .pl_2()
-            .id("speech-word-count")
-            .tooltip(|window, cx| {
-              gpui_component::tooltip::Tooltip::new("Words in tags, cites, and highlighted text — what gets spoken").build(window, cx)
-            })
             .text_size(px(10.0))
             .text_color(cx.theme().muted_foreground.opacity(0.82))
-            .child(format!("Speech: {count} words")),
+            .child(label),
         )
-      })
+        .on_click(cx.listener(move |workspace, _, _, cx| {
+          let entry = workspace.status_counter_modes.entry(panel_id).or_insert(0);
+          *entry = entry.wrapping_add(1);
+          cx.notify();
+        }))
+        .into_any_element(),
+    )
   }
 
   /// The identity zone's inputs: format badge, title, and save state for the
@@ -563,6 +606,8 @@ struct SpeechWordCountEntry {
   version: u64,
   shape: u64,
   words: usize,
+  /// SB-S4: total words in the paragraph (same walk, second accumulator).
+  total_words: usize,
 }
 
 type SpeechWordCountParagraphCache = FxHashMap<flowstate_document::ParagraphId, SpeechWordCountEntry>;
@@ -585,10 +630,11 @@ fn paragraph_shape_stamp(paragraph: &flowstate_document::Paragraph) -> u64 {
 /// ids, so entries of deleted paragraphs are evicted. Returns
 /// `(total, recounted_paragraphs)`; the second element backs the
 /// incrementality tripwire in tests.
-fn speech_word_count_incremental(document: &DocumentProjection, cache: &mut SpeechWordCountParagraphCache) -> (usize, usize) {
+fn speech_word_count_incremental(document: &DocumentProjection, cache: &mut SpeechWordCountParagraphCache) -> (usize, usize, usize) {
   let mut fresh: SpeechWordCountParagraphCache =
     FxHashMap::with_capacity_and_hasher(document.paragraphs.len(), rustc_hash::FxBuildHasher);
   let mut total = 0usize;
+  let mut total_words = 0usize;
   let mut recounted = 0usize;
   for (paragraph_ix, paragraph) in document.paragraphs.iter().enumerate() {
     let paragraph_id = document.ids.paragraph_ids.get(paragraph_ix).copied();
@@ -601,16 +647,18 @@ fn speech_word_count_incremental(document: &DocumentProjection, cache: &mut Spee
           version: paragraph.version,
           shape,
           words: paragraph_speech_word_count(document, paragraph_ix, paragraph),
+          total_words: count_words_in_document_range(document, flowstate_document::paragraph_byte_range(document, paragraph_ix)),
         }
       },
     };
     total += entry.words;
+    total_words += entry.total_words;
     if let Some(paragraph_id) = paragraph_id {
       fresh.insert(paragraph_id, entry);
     }
   }
   *cache = fresh;
-  (total, recounted)
+  (total, total_words, recounted)
 }
 
 /// One paragraph's word count, with EXACTLY the original full walk's
