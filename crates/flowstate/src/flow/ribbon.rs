@@ -66,6 +66,7 @@ impl Render for FlowRibbon {
     let eraser_editor = self.editor.clone();
     let visibility_editor = self.editor.clone();
     let clear_editor = self.editor.clone();
+    let clear_all_editor = self.editor.clone();
     let has_active_sheet = self.editor.read(cx).active_sheet().is_some();
     let has_active_cell = self.editor.read(cx).active_cell().is_some();
     #[allow(
@@ -98,10 +99,20 @@ impl Render for FlowRibbon {
             .default_value(sheet_name)
             .placeholder("Sheet name")
         });
-        let subscription = cx.subscribe_in(&input, window, move |_: &mut SheetNameInputState, input, event: &InputEvent, _, cx| {
-          if matches!(event, InputEvent::Change) {
-            let name = input.read(cx).value().to_string();
-            editor.update(cx, |editor, cx| editor.rename_active_sheet(name, cx));
+        // I-S1: rename commits on Enter/blur, once — per-keystroke commits
+        // spammed the op log and undo stack, and an empty field wrote a
+        // nameless sheet. An emptied field restores the current name.
+        let subscription = cx.subscribe_in(&input, window, move |_: &mut SheetNameInputState, input, event: &InputEvent, window, cx| {
+          if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+            let name = input.read(cx).value().trim().to_string();
+            if name.is_empty() {
+              let current = editor.read(cx).active_sheet_name().unwrap_or_default();
+              input.update(cx, |input, cx| input.set_value(current, window, cx));
+              return;
+            }
+            if editor.read(cx).active_sheet_name().as_deref() != Some(name.as_str()) {
+              editor.update(cx, |editor, cx| editor.rename_active_sheet(name, cx));
+            }
           }
         });
         SheetNameInputState {
@@ -210,7 +221,7 @@ impl Render for FlowRibbon {
                 .danger(true)
                 .disabled(!has_active_sheet),
             )
-            .on_click(move |_, _, cx| delete_sheet_editor.update(cx, |editor, cx| editor.delete_active_sheet(cx))),
+            .on_click(move |_, window, cx| delete_sheet_editor.update(cx, |editor, cx| editor.confirm_delete_active_sheet(window, cx))),
           ),
       )
       // ---- Argument ----
@@ -334,6 +345,31 @@ impl Render for FlowRibbon {
                 .disabled(!has_active_sheet),
             )
             .on_click(move |_, _, cx| clear_editor.update(cx, |editor, cx| editor.clear_annotations(cx))),
+          )
+          .child(
+            chip(
+              RibbonChip::new("flow-clear-all-annotations", "Clear all", "Delete your strokes on EVERY sheet (asks first)")
+                .command_shortcut(CommandId::FlowClearAllAnnotations)
+                .danger(true),
+            )
+            .on_click(move |_, window, cx| {
+              // I-S1: the every-sheet clear confirms — it was the silent
+              // behavior hiding behind the "this sheet" label.
+              let answer = window.prompt(
+                gpui::PromptLevel::Warning,
+                "Clear your ink on every sheet?",
+                Some("Every stroke you drew, on all sheets. Undo can bring them back."),
+                &[gpui::PromptButton::ok("Clear everywhere"), gpui::PromptButton::cancel("Cancel")],
+                cx,
+              );
+              let editor = clear_all_editor.clone();
+              cx.spawn(async move |cx| {
+                if matches!(answer.await, Ok(0)) {
+                  let _ = editor.update(cx, |editor, cx| editor.clear_all_annotations(cx));
+                }
+              })
+              .detach();
+            }),
           ),
       )
       // ---- History ----

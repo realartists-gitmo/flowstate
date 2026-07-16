@@ -72,6 +72,7 @@ pub fn flowstate_command_to_rich_text(command: CommandId) -> Option<RichTextEdit
     | CommandId::FlowToggleEraser
     | CommandId::FlowToggleAnnotations
     | CommandId::FlowClearAnnotations
+    | CommandId::FlowClearAllAnnotations
     | CommandId::FlowNewSheet
     | CommandId::FlowDeleteSheet
     | CommandId::FlowMoveSheetLeft

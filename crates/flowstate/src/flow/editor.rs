@@ -210,7 +210,9 @@ impl FlowEditor {
       annotation_tool: AnnotationTool::None,
       hidden_annotation_sheets: HashSet::new(),
       hidden_annotation_originators: HashSet::new(),
-      local_annotation_originator: AnnotationOriginator("local".into()),
+      // I-S1: strokes author under the durable user identity. The literal
+      // "local" was every peer's stamp before this — ownership was fiction.
+      local_annotation_originator: AnnotationOriginator(crate::app_settings::load_local_user_identity().0.to_string()),
       drawing_points: Vec::new(),
       cell_editors: std::collections::HashMap::new(),
       cell_editor_themes: std::collections::HashMap::new(),
@@ -983,6 +985,78 @@ impl FlowEditor {
       cx.emit(FlowEditorEvent::ActiveSheetChanged(Some(sheet_id)));
       cx.notify();
     }
+  }
+
+  /// I-S1: the keyboard new-sheet verb creates the ACTIVE sheet's type (it
+  /// hardcoded type 0 regardless of what you were flowing).
+  pub fn create_sheet_matching_active(&mut self, cx: &mut Context<Self>) {
+    let type_index = self
+      .active_sheet
+      .and_then(|sheet_id| self.board.sheets.iter().find(|sheet| sheet.id == sheet_id))
+      .and_then(|sheet| {
+        self
+          .board
+          .format
+          .sheet_types
+          .iter()
+          .position(|sheet_type| sheet_type.id == sheet.sheet_type_id)
+      })
+      .unwrap_or(0);
+    self.create_sheet_of_type(type_index, cx);
+  }
+
+  /// I-S1: sheet deletion is destructive (cells + ink go with it) — confirm
+  /// before executing. Undo remains the recovery for a confirmed mistake.
+  pub fn confirm_delete_active_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    let Some(name) = self
+      .active_sheet
+      .and_then(|sheet_id| self.board.sheets.iter().find(|sheet| sheet.id == sheet_id))
+      .map(|sheet| sheet.name.clone())
+    else {
+      return;
+    };
+    let detail = format!("\"{name}\" and everything on it — cells and ink — will be deleted. Undo can bring it back.");
+    let answer = window.prompt(
+      gpui::PromptLevel::Warning,
+      "Delete this sheet?",
+      Some(&detail),
+      &[gpui::PromptButton::ok("Delete"), gpui::PromptButton::cancel("Cancel")],
+      cx,
+    );
+    cx.spawn(async move |editor, cx| {
+      if matches!(answer.await, Ok(0)) {
+        let _ = editor.update(cx, |editor, cx| editor.delete_active_sheet(cx));
+      }
+    })
+    .detach();
+  }
+
+  /// I-S1: session restore — reopen on the sheet you were flowing, with your
+  /// ink-visibility choices intact.
+  pub fn restore_ui_state(&mut self, active_sheet: Option<uuid::Uuid>, hidden_ink_sheets: &[uuid::Uuid], cx: &mut Context<Self>) {
+    if let Some(sheet_id) = active_sheet
+      && self.board.sheets.iter().any(|sheet| sheet.id == sheet_id)
+    {
+      self.active_sheet = Some(sheet_id);
+      cx.emit(FlowEditorEvent::ActiveSheetChanged(Some(sheet_id)));
+    }
+    for sheet_id in hidden_ink_sheets {
+      if self.board.sheets.iter().any(|sheet| sheet.id == *sheet_id) {
+        self.hidden_annotation_sheets.insert(*sheet_id);
+      }
+    }
+    cx.notify();
+  }
+
+  pub fn hidden_ink_sheets(&self) -> Vec<uuid::Uuid> {
+    self.hidden_annotation_sheets.iter().copied().collect()
+  }
+
+  pub fn active_sheet_name(&self) -> Option<String> {
+    self
+      .active_sheet
+      .and_then(|sheet_id| self.board.sheets.iter().find(|sheet| sheet.id == sheet_id))
+      .map(|sheet| sheet.name.clone())
   }
 
   pub fn rename_active_sheet(&mut self, name: impl Into<String>, cx: &mut Context<Self>) {
@@ -2063,6 +2137,14 @@ impl Render for FlowEditor {
       .size_full()
       .track_focus(&self.focus_handle)
       .on_key_down(cx.listener(|editor, event: &KeyDownEvent, window, cx| {
+        // I-S1: Escape disarms the ink tool — the sticky marker/eraser had no
+        // keyboard exit (mid-round you either remembered the chip or drew on
+        // your next click).
+        if event.keystroke.key == "escape" && editor.annotation_tool != AnnotationTool::None {
+          editor.set_annotation_tool(AnnotationTool::None, cx);
+          cx.stop_propagation();
+          return;
+        }
         // Only arm panning when the board itself holds focus. Otherwise a space typed inside a focused
         // cell editor would silently arm a pan (and a later click would pan instead of act).
         if event.keystroke.key == "space" && editor.focus_handle.is_focused(window) {
@@ -2155,7 +2237,11 @@ impl Render for FlowEditor {
           .size_full()
           .overflow_scroll()
           .track_scroll(&self.board_scroll)
-          .cursor(if self.pan_drag.is_some() {
+          // I-S1: the armed ink tool gets an on-canvas affordance — before
+          // this the ribbon chip's tint was the only signal you were armed.
+          .cursor(if self.annotation_tool != AnnotationTool::None {
+            gpui::CursorStyle::Crosshair
+          } else if self.pan_drag.is_some() {
             gpui::CursorStyle::ClosedHand
           } else {
             gpui::CursorStyle::OpenHand

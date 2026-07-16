@@ -938,6 +938,8 @@ impl Workspace {
         outline_scrolled_paragraph,
         viewport_paragraph,
         invisibility: panel.editor().read(cx).invisibility_mode(),
+        flow_active_sheet: None,
+        flow_hidden_ink_sheets: Vec::new(),
       });
     }
 
@@ -951,6 +953,7 @@ impl Workspace {
       if Some(panel.id()) == self.active_document_id {
         active_index = Some(entry_index);
       }
+      let flow_editor = panel.editor();
       entries.push(TemporaryWorkspaceSessionEntry {
         kind: TemporaryWorkspaceSessionEntryKind::Flow,
         path,
@@ -958,6 +961,13 @@ impl Workspace {
         outline_scrolled_paragraph: None,
         viewport_paragraph: None,
         invisibility: false,
+        flow_active_sheet: flow_editor.read(cx).active_sheet().map(|sheet| sheet.to_string()),
+        flow_hidden_ink_sheets: flow_editor
+          .read(cx)
+          .hidden_ink_sheets()
+          .into_iter()
+          .map(|sheet| sheet.to_string())
+          .collect(),
       });
     }
 
@@ -1084,6 +1094,19 @@ impl Workspace {
         LoadedWorkspaceDocument::Flow { document, path } => {
           let panel = self.create_flow_panel(FlowRuntimeSource::FromDocument(Box::new(document)), Some(path), window, cx);
           is_flow_panel = true;
+          // I-S1: land on the sheet (and ink-visibility state) you left.
+          let active_sheet = entry.flow_active_sheet.as_deref().and_then(|id| id.parse::<Uuid>().ok());
+          let hidden: Vec<Uuid> = entry
+            .flow_hidden_ink_sheets
+            .iter()
+            .filter_map(|id| id.parse::<Uuid>().ok())
+            .collect();
+          if active_sheet.is_some() || !hidden.is_empty() {
+            panel
+              .read(cx)
+              .editor()
+              .update(cx, |editor, cx| editor.restore_ui_state(active_sheet, &hidden, cx));
+          }
           panel.read(cx).id()
         },
       };
@@ -2217,6 +2240,12 @@ struct TemporaryWorkspaceSessionEntry {
   /// re-opening mid-round gets their read view back.
   #[serde(default)]
   invisibility: bool,
+  /// I-S1: reopen a flow on the sheet you were flowing.
+  #[serde(default)]
+  flow_active_sheet: Option<String>,
+  /// I-S1: per-sheet ink-visibility choices survive a restart.
+  #[serde(default)]
+  flow_hidden_ink_sheets: Vec<String>,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]

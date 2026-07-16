@@ -497,3 +497,139 @@ fn seeded_two_peer_determinism() {
       .unwrap_or_else(|error| panic!("round {round}: {error}"));
   }
 }
+
+// ---------------------------------------------------------- I-S1 coverage --
+//
+// Concurrent sheet ops and concurrent ink ops had ZERO convergence tests —
+// the fuzz above exercises cell ops only. These pin the paths the sheet strip
+// and the pen rely on.
+
+fn test_stroke(sheet: SheetId, originator: &str, x: f32) -> AnnotationStroke {
+  AnnotationStroke {
+    id: Uuid::new_v4(),
+    sheet_id: sheet,
+    originator: AnnotationOriginator(originator.into()),
+    points: vec![BoardPoint { x, y: 1.0 }, BoardPoint { x: x + 5.0, y: 6.0 }],
+    style: StrokeStyle {
+      color_rgba: 0xff00_00ff,
+      width: 2.0,
+      opacity: 1.0,
+    },
+    bbox: BoardRect::default(),
+  }
+}
+
+#[test]
+fn concurrent_sheet_creates_and_renames_converge() {
+  let (mut a, seed_sheet) = document_with_sheet();
+  let sheet_type = a.projection().format.sheet_types[0].id;
+  let mut b = FlowDocument::from_snapshot(&a.snapshot().unwrap()).unwrap();
+
+  // Concurrent creates both survive; concurrent renames of the SAME sheet
+  // resolve LWW to one winner on both peers.
+  let from_a = a.create_sheet("1NC", sheet_type).unwrap();
+  let from_b = b.create_sheet("2AC", sheet_type).unwrap();
+  a.rename_sheet(seed_sheet, "A's name").unwrap();
+  b.rename_sheet(seed_sheet, "B's name").unwrap();
+  sync(&mut a, &mut b);
+  assert_converged(&a, &b);
+  let sheets: Vec<_> = a.projection().sheets.iter().map(|sheet| sheet.id).collect();
+  assert!(sheets.contains(&from_a) && sheets.contains(&from_b), "both concurrent creates survive");
+  let name = a.projection().sheet(seed_sheet).unwrap().name.clone();
+  assert!(name == "A's name" || name == "B's name", "one rename wins on both peers, got {name}");
+}
+
+#[test]
+fn concurrent_sheet_delete_vs_rename_converges() {
+  let (mut a, seed_sheet) = document_with_sheet();
+  let sheet_type = a.projection().format.sheet_types[0].id;
+  let doomed = a.create_sheet("Doomed", sheet_type).unwrap();
+  let mut b = FlowDocument::from_snapshot(&a.snapshot().unwrap()).unwrap();
+
+  a.delete_sheet(doomed).unwrap();
+  b.rename_sheet(doomed, "Renamed while dying").unwrap();
+  sync(&mut a, &mut b);
+  assert_converged(&a, &b);
+  let _ = seed_sheet;
+}
+
+#[test]
+fn concurrent_sheet_moves_converge() {
+  let (mut a, first) = document_with_sheet();
+  let sheet_type = a.projection().format.sheet_types[0].id;
+  let second = a.create_sheet("Second", sheet_type).unwrap();
+  let third = a.create_sheet("Third", sheet_type).unwrap();
+  let mut b = FlowDocument::from_snapshot(&a.snapshot().unwrap()).unwrap();
+
+  a.move_sheet(third, 0).unwrap();
+  b.move_sheet(first, 2).unwrap();
+  sync(&mut a, &mut b);
+  assert_converged(&a, &b);
+  assert_eq!(a.projection().sheets.len(), 3);
+  let _ = second;
+}
+
+#[test]
+fn delete_sheet_sweeps_its_ink() {
+  let (mut document, doomed) = document_with_sheet();
+  let sheet_type = document.projection().format.sheet_types[0].id;
+  let survivor = document.create_sheet("Survivor", sheet_type).unwrap();
+  document.add_annotation(doomed, test_stroke(doomed, "me", 1.0)).unwrap();
+  let kept = test_stroke(survivor, "me", 50.0);
+  document.add_annotation(survivor, kept.clone()).unwrap();
+
+  document.delete_sheet(doomed).unwrap();
+
+  // The dead sheet's strokes are GONE from the annotations map, not lingering
+  // unrendered: a reload sees exactly the survivor's stroke.
+  let reloaded = FlowDocument::from_snapshot(&document.snapshot().unwrap()).unwrap();
+  let survivor_strokes = reloaded.projection().sheet(survivor).unwrap().annotations.len();
+  assert_eq!(survivor_strokes, 1);
+  let total: usize = reloaded
+    .projection()
+    .sheets
+    .iter()
+    .map(|sheet| sheet.annotations.len())
+    .sum();
+  assert_eq!(total, 1, "the deleted sheet's ink must be swept, not orphaned");
+}
+
+#[test]
+fn concurrent_ink_add_vs_clear_converges() {
+  let (mut a, sheet) = document_with_sheet();
+  let me = AnnotationOriginator("me".into());
+  a.add_annotation(sheet, test_stroke(sheet, "me", 1.0)).unwrap();
+  let mut b = FlowDocument::from_snapshot(&a.snapshot().unwrap()).unwrap();
+
+  // A clears while B concurrently draws: the clear deletes only keys it has
+  // seen, so the concurrent stroke survives on both peers.
+  a.clear_annotations(sheet, &me).unwrap();
+  let concurrent = test_stroke(sheet, "me", 100.0);
+  b.add_annotation(sheet, concurrent.clone()).unwrap();
+  sync(&mut a, &mut b);
+  assert_converged(&a, &b);
+  let strokes: Vec<_> = a
+    .projection()
+    .sheet(sheet)
+    .unwrap()
+    .annotations
+    .iter()
+    .map(|stroke| stroke.id)
+    .collect();
+  assert_eq!(strokes, vec![concurrent.id], "the concurrent stroke survives the clear");
+}
+
+#[test]
+fn concurrent_ink_delete_vs_delete_converges() {
+  let (mut a, sheet) = document_with_sheet();
+  let me = AnnotationOriginator("me".into());
+  let stroke = test_stroke(sheet, "me", 1.0);
+  a.add_annotation(sheet, stroke.clone()).unwrap();
+  let mut b = FlowDocument::from_snapshot(&a.snapshot().unwrap()).unwrap();
+
+  assert!(a.delete_annotation(sheet, stroke.id, &me).unwrap());
+  assert!(b.delete_annotation(sheet, stroke.id, &me).unwrap());
+  sync(&mut a, &mut b);
+  assert_converged(&a, &b);
+  assert!(a.projection().sheet(sheet).unwrap().annotations.is_empty());
+}

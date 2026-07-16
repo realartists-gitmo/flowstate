@@ -38,14 +38,50 @@ impl FlowEditor {
     self.local_annotation_originator = originator;
   }
 
+  /// I-S1: the ribbon's "Clear ink" clears THIS SHEET — exactly what its label
+  /// always claimed (the old implementation wiped every sheet). Clears both
+  /// the local identity's strokes and legacy pre-identity "local" strokes.
   pub fn clear_annotations(&mut self, cx: &mut Context<Self>) {
-    let intent = flowstate_flow::FlowIntent::ClearAnnotations {
-      scope: flowstate_flow::AnnotationScope::AllSheets,
-      originator: self.local_annotation_originator.clone(),
+    let Some(sheet) = self.active_sheet else {
+      return;
     };
-    if self.apply_intent(&intent, cx).is_ok() {
+    self.clear_annotations_in_scope(flowstate_flow::AnnotationScope::Sheet(sheet), cx);
+  }
+
+  /// I-S1: the explicit every-sheet clear — a separate, confirmed verb.
+  pub fn clear_all_annotations(&mut self, cx: &mut Context<Self>) {
+    self.clear_annotations_in_scope(flowstate_flow::AnnotationScope::AllSheets, cx);
+  }
+
+  fn clear_annotations_in_scope(&mut self, scope: flowstate_flow::AnnotationScope, cx: &mut Context<Self>) {
+    let mut cleared = false;
+    for originator in self.erasable_originators() {
+      let intent = flowstate_flow::FlowIntent::ClearAnnotations {
+        scope: scope.clone(),
+        originator,
+      };
+      cleared |= self.apply_intent(&intent, cx).is_ok();
+    }
+    if cleared {
       self.changed(self.active_cell, cx);
     }
+  }
+
+  /// I-S1 ownership rule: you erase YOUR strokes — plus legacy `"local"`
+  /// strokes, which carry zero identity information (every pre-identity peer
+  /// stamped that literal; write-once blobs can't be adopted, and freezing
+  /// them would make legacy ink immortal).
+  fn erasable_originators(&self) -> Vec<AnnotationOriginator> {
+    let legacy = AnnotationOriginator("local".into());
+    if self.local_annotation_originator == legacy {
+      vec![legacy]
+    } else {
+      vec![self.local_annotation_originator.clone(), legacy]
+    }
+  }
+
+  fn originator_erasable(&self, originator: &AnnotationOriginator) -> bool {
+    originator == &self.local_annotation_originator || originator.0 == "local"
   }
 
   fn annotation_point(&self, position: Point<Pixels>) -> BoardPoint {
@@ -137,7 +173,7 @@ impl FlowEditor {
       .annotations
       .iter()
       .find(|stroke| {
-        stroke.originator == self.local_annotation_originator
+        self.originator_erasable(&stroke.originator)
           && point.x >= stroke.bbox.min.x - radius
           && point.x <= stroke.bbox.max.x + radius
           && point.y >= stroke.bbox.min.y - radius
@@ -147,15 +183,17 @@ impl FlowEditor {
             .windows(2)
             .any(|segment| segment_distance(point, segment[0], segment[1]) <= radius)
       })
-      .map(|stroke| stroke.id);
+      // I-S1: the delete intent carries the STROKE's originator so the
+      // executor's ownership check passes for legacy "local" strokes too.
+      .map(|stroke| (stroke.id, stroke.originator.clone()));
     let sheet_id = sheet.id;
-    if let Some(stroke_id) = touched
+    if let Some((stroke_id, originator)) = touched
       && self
         .apply_intent(
           &flowstate_flow::FlowIntent::DeleteAnnotation {
             sheet_id,
             stroke_id,
-            originator: self.local_annotation_originator.clone(),
+            originator,
           },
           cx,
         )

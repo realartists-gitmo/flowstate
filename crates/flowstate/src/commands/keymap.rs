@@ -131,6 +131,7 @@ pub(crate) fn action_for_command(command: CommandId) -> Option<Box<dyn Action>> 
     | CommandId::FlowToggleEraser
     | CommandId::FlowToggleAnnotations
     | CommandId::FlowClearAnnotations
+    | CommandId::FlowClearAllAnnotations
     | CommandId::FlowNewSheet
     | CommandId::FlowDeleteSheet
     | CommandId::FlowMoveSheetLeft

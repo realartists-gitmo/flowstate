@@ -107,12 +107,31 @@ impl Workspace {
           flow.update(cx, |editor, cx| editor.clear_annotations(cx));
           true
         },
+        // I-S1: the every-sheet clear is a separate, CONFIRMED verb — the old
+        // "Clear Ink" said "this sheet" and silently wiped the whole board.
+        CommandId::FlowClearAllAnnotations => {
+          let answer = window.prompt(
+            gpui::PromptLevel::Warning,
+            "Clear your ink on every sheet?",
+            Some("Every stroke you drew, on all sheets. Undo can bring them back."),
+            &[gpui::PromptButton::ok("Clear everywhere"), gpui::PromptButton::cancel("Cancel")],
+            cx,
+          );
+          let flow = flow.clone();
+          cx.spawn(async move |_, cx| {
+            if matches!(answer.await, Ok(0)) {
+              let _ = flow.update(cx, |editor, cx| editor.clear_all_annotations(cx));
+            }
+          })
+          .detach();
+          true
+        },
         CommandId::FlowNewSheet => {
-          flow.update(cx, |editor, cx| editor.create_sheet_of_type(0, cx));
+          flow.update(cx, |editor, cx| editor.create_sheet_matching_active(cx));
           true
         },
         CommandId::FlowDeleteSheet => {
-          flow.update(cx, |editor, cx| editor.delete_active_sheet(cx));
+          flow.update(cx, |editor, cx| editor.confirm_delete_active_sheet(window, cx));
           true
         },
         CommandId::FlowMoveSheetLeft => {

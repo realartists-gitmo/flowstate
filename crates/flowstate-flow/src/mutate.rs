@@ -61,6 +61,19 @@ pub fn execute_intent(doc: &LoroDoc, board: &FlowBoardProjection, intent: &FlowI
           cells.delete(&cell.id.to_string())?;
         }
       }
+      // I-S1: sweep the sheet's ink. Strokes referencing the dead sheet used
+      // to linger in `flow.annotations` forever — unrendered, unreachable, and
+      // only ever collected by an all-sheets clear.
+      let annotations = annotations_map(doc);
+      for key in loro_schema::map_keys(&annotations) {
+        let Some(bytes) = map_binary(&annotations, &key) else { continue };
+        let Ok(stroke) = postcard::from_bytes::<crate::projection::AnnotationStroke>(&bytes) else {
+          continue;
+        };
+        if stroke.sheet_id == *sheet_id {
+          annotations.delete(&key)?;
+        }
+      }
       let order = sheet_order(doc);
       if let Some(index) = list_strings(&order)
         .iter()
