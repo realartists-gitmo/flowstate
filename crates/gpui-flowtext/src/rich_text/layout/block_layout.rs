@@ -346,6 +346,7 @@ pub(super) fn layout_structural_block_at(
   block_ix: usize,
   width: Pixels,
   y: Pixels,
+  invisibility_mode: bool,
   window: &mut Window,
   cx: &mut App,
 ) -> Option<LaidOutBlock> {
@@ -371,7 +372,7 @@ pub(super) fn layout_structural_block_at(
         render_ready: false,
       }))
     },
-    Block::Table(table) => Some(LaidOutBlock::Table(layout_table_block(document, block_ix, table, width, y, window, cx))),
+    Block::Table(table) => Some(LaidOutBlock::Table(layout_table_block_with_visibility(document, block_ix, table, width, y, invisibility_mode, window, cx))),
   }
 }
 

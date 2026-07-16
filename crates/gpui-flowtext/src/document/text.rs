@@ -122,6 +122,22 @@ pub struct DocumentOutlineNode {
   pub heading_paragraph: ParagraphId,
   pub start_paragraph: ParagraphId,
   pub end_paragraph_exclusive: Option<ParagraphId>,
+  /// B-S6: a heading living INSIDE a table cell — structure descends.
+  /// Navigation selects the owning cell; `heading_paragraph` is synthetic
+  /// (deterministic from the address) and never resolves to a body
+  /// paragraph. `None` for ordinary body headings.
+  #[serde(default)]
+  pub cell_address: Option<OutlineCellAddress>,
+}
+
+/// B-S6: where a cell-resident heading lives — the owning table block (by
+/// durable id) plus grid + in-cell coordinates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutlineCellAddress {
+  pub table_block: u128,
+  pub row_ix: usize,
+  pub cell_ix: usize,
+  pub cell_paragraph_ix: usize,
 }
 
 /// US Letter width in twips (8.5in x 1440). Mirrors the `flowstate-document`

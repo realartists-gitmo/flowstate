@@ -1,3 +1,52 @@
+/// B-S6: invisibility mode reaches INTO cells — invisible cell paragraphs
+/// drop from layout exactly like body paragraphs, while objects stay (they
+/// are read-mode landmarks, not prose). Edit-mode callers pass `false`.
+#[hotpath::measure]
+pub(super) fn layout_table_block_with_visibility(
+  document: &DocumentProjection,
+  block_ix: usize,
+  table: &TableBlock,
+  width: Pixels,
+  y: Pixels,
+  invisibility_mode: bool,
+  window: &mut Window,
+  cx: &mut App,
+) -> LaidOutTable {
+  if !invisibility_mode {
+    return layout_table_block(document, block_ix, table, width, y, window, cx);
+  }
+  let filtered = table_with_visible_cell_content(document, table);
+  layout_table_block(document, block_ix, &filtered, width, y, window, cx)
+}
+
+/// The invisibility projection of a table: each cell keeps only its VISIBLE
+/// paragraphs (plus all objects); a fully-hidden cell keeps one empty
+/// paragraph so the grid never collapses.
+fn table_with_visible_cell_content(document: &DocumentProjection, table: &TableBlock) -> TableBlock {
+  let mut filtered = table.clone();
+  for row in &mut filtered.rows {
+    for cell in &mut row.cells {
+      cell.blocks.retain(|block| match block {
+        TableCellBlock::Paragraph(paragraph) => {
+          paragraph_is_visible_for_theme(&document.theme, &paragraph.paragraph)
+        },
+        TableCellBlock::Table(_) | TableCellBlock::Image(_) | TableCellBlock::Equation(_) => true,
+      });
+      if cell.blocks.is_empty() {
+        cell.blocks.push(TableCellBlock::Paragraph(crate::TableCellParagraph {
+          paragraph: crate::Paragraph {
+            style: crate::ParagraphStyle::Normal,
+            runs: Vec::new(),
+            version: 0,
+          },
+          text: String::new(),
+        }));
+      }
+    }
+  }
+  filtered
+}
+
 #[hotpath::measure]
 fn layout_table_block(
   document: &DocumentProjection,

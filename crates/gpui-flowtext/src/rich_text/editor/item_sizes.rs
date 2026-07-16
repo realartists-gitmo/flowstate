@@ -294,12 +294,7 @@ impl RichTextEditor {
           }
         },
         Some(Block::Image(_) | Block::Equation(_) | Block::Table(_)) => {
-          if self.invisibility_mode {
-            block_item_ranges.push(block_start..items.len());
-            block_heights.push(px(0.0));
-            continue;
-          }
-          let height = layout_structural_block_at(&self.document, block_ix, width, px(0.0), window, cx)
+          let height = layout_structural_block_at(&self.document, block_ix, width, px(0.0), self.invisibility_mode, window, cx)
             .as_ref()
             .map(structural_block_height)
             .unwrap_or_else(|| estimate_structural_block_item_height(&self.document, block_ix, width))
@@ -474,12 +469,7 @@ impl RichTextEditor {
           }
         },
         Some(Block::Image(_) | Block::Equation(_) | Block::Table(_)) => {
-          if self.invisibility_mode {
-            block_item_ranges.push(block_start..items.len());
-            block_heights.push(px(0.0));
-            continue;
-          }
-          let height = layout_structural_block_at(&self.document, block_ix, width, px(0.0), window, cx)
+          let height = layout_structural_block_at(&self.document, block_ix, width, px(0.0), self.invisibility_mode, window, cx)
             .as_ref()
             .map(structural_block_height)
             .unwrap_or_else(|| estimate_structural_block_item_height(&self.document, block_ix, width))

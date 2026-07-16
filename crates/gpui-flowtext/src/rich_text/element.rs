@@ -423,7 +423,7 @@ impl Element for VirtualBlockElement {
       editor.update(cx, |editor, cx| editor.note_measured_item_width(width, cx));
       let (block, paragraph_after, snap_underline_rules_to_pixels) = editor.update(cx, |editor, cx| {
         (
-          layout_structural_block_at(&editor.document, block_ix, width, px(0.0), window, cx),
+          layout_structural_block_at(&editor.document, block_ix, width, px(0.0), editor.invisibility_mode(), window, cx),
           editor.document.theme.paragraph_after,
           editor.document.theme.snap_underline_rules_to_pixels,
         )

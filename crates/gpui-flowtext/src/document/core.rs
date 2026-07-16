@@ -465,31 +465,89 @@ pub fn document_outline(document: &DocumentProjection) -> Vec<DocumentOutlineNod
   // O(outline) linear `find` per pop — turning this from O(headings²) to O(headings).
   let mut stack: Vec<(usize, usize)> = Vec::new();
 
-  for (paragraph_ix, paragraph) in document.paragraphs.iter().enumerate() {
-    let Some((level, kind)) = section_level_and_kind(document, paragraph.style) else {
-      continue;
-    };
-    while stack
-      .last()
-      .is_some_and(|(ancestor_level, _)| *ancestor_level >= level)
-    {
-      if let Some((_, node_index)) = stack.pop() {
-        outline[node_index].end_paragraph_exclusive = paragraph_id_at(document, paragraph_ix);
-      }
+  // B-S6: the walk is BLOCK-ordered so cell-resident headings interleave at
+  // their table's document position (structure descends).
+  let mut paragraph_ix = 0usize;
+  for (block_ix, block) in document.blocks.iter().enumerate() {
+    match block {
+      Block::Paragraph(paragraph) => {
+        let current_ix = paragraph_ix;
+        paragraph_ix += 1;
+        let Some((level, kind)) = section_level_and_kind(document, paragraph.style) else {
+          continue;
+        };
+        while stack
+          .last()
+          .is_some_and(|(ancestor_level, _)| *ancestor_level >= level)
+        {
+          if let Some((_, node_index)) = stack.pop() {
+            outline[node_index].end_paragraph_exclusive = paragraph_id_at(document, current_ix);
+          }
+        }
+        let paragraph_id = paragraph_id_at(document, current_ix).unwrap_or_else(new_paragraph_id);
+        let parent_id = stack.last().map(|(_, node_index)| outline[*node_index].id);
+        let id = section_id_for_heading(paragraph_id, kind);
+        let node_index = outline.len();
+        outline.push(DocumentOutlineNode {
+          id,
+          parent_id,
+          kind,
+          heading_paragraph: paragraph_id,
+          start_paragraph: paragraph_id,
+          end_paragraph_exclusive: None,
+          cell_address: None,
+        });
+        stack.push((level, node_index));
+      },
+      Block::Table(table) => {
+        // Cell headings are LEAF nodes under the current section — a Pocket
+        // in a cell roots a real card in the outline, but never parents
+        // body content (the stack is untouched).
+        let table_block = document
+          .ids
+          .block_ids
+          .get(block_ix)
+          .map_or(0, |block_id| block_id.0);
+        let parent_id = stack.last().map(|(_, node_index)| outline[*node_index].id);
+        for (row_ix, row) in table.rows.iter().enumerate() {
+          for (cell_ix, cell) in row.cells.iter().enumerate() {
+            for (cell_paragraph_ix, cell_block) in cell.blocks.iter().enumerate() {
+              let TableCellBlock::Paragraph(cell_paragraph) = cell_block else {
+                continue;
+              };
+              let Some((_, kind)) = section_level_and_kind(document, cell_paragraph.paragraph.style) else {
+                continue;
+              };
+              // Deterministic synthetic identity from the address — stable
+              // across rebuilds, never colliding with body paragraph ids
+              // (the high tag bit marks the cell namespace).
+              let synthetic = ParagraphId(
+                (1_u128 << 127)
+                  ^ table_block
+                  ^ ((row_ix as u128) << 96)
+                  ^ ((cell_ix as u128) << 64)
+                  ^ ((cell_paragraph_ix as u128) << 32),
+              );
+              outline.push(DocumentOutlineNode {
+                id: section_id_for_heading(synthetic, kind),
+                parent_id,
+                kind,
+                heading_paragraph: synthetic,
+                start_paragraph: synthetic,
+                end_paragraph_exclusive: Some(synthetic),
+                cell_address: Some(OutlineCellAddress {
+                  table_block,
+                  row_ix,
+                  cell_ix,
+                  cell_paragraph_ix,
+                }),
+              });
+            }
+          }
+        }
+      },
+      Block::Image(_) | Block::Equation(_) => {},
     }
-    let paragraph_id = paragraph_id_at(document, paragraph_ix).unwrap_or_else(new_paragraph_id);
-    let parent_id = stack.last().map(|(_, node_index)| outline[*node_index].id);
-    let id = section_id_for_heading(paragraph_id, kind);
-    let node_index = outline.len();
-    outline.push(DocumentOutlineNode {
-      id,
-      parent_id,
-      kind,
-      heading_paragraph: paragraph_id,
-      start_paragraph: paragraph_id,
-      end_paragraph_exclusive: None,
-    });
-    stack.push((level, node_index));
   }
 
   outline

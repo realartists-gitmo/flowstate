@@ -6,7 +6,7 @@
 /// One palette entry's action. Commands route through THE dispatch
 /// (`handle_window_keybinding`); settings toggles route through the same
 /// update paths the settings UI uses.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum PaletteAction {
   Command(CommandId),
   ToggleAutosave,
@@ -14,6 +14,8 @@ pub(crate) enum PaletteAction {
   ToggleReduceMotion,
   /// R10-A: the go-to navigation provider — peek a heading's paragraph.
   GoToParagraph(usize),
+  /// B-S6: a heading living inside a table cell — select the owning cell.
+  GoToCell(crate::rich_text_element::OutlineCellAddress),
 }
 
 /// A palette entry: display label, the action, and the shortcut hint.
@@ -73,6 +75,27 @@ impl Workspace {
     if let Some(editor) = &self.active_editor {
       let document = editor.read(cx).document();
       for node in document.outline.iter() {
+        // B-S6: cell-resident headings navigate to their owning CELL.
+        if let Some(address) = node.cell_address {
+          let Some(heading) = cell_heading_text(document, &address) else {
+            continue;
+          };
+          let heading = heading.trim();
+          if heading.is_empty() {
+            continue;
+          }
+          let mut label = format!("Go to (in table): {heading}");
+          if label.len() > 72 {
+            label.truncate(69);
+            label.push('…');
+          }
+          entries.push(PaletteEntry {
+            label,
+            action: PaletteAction::GoToCell(address),
+            shortcut: None,
+          });
+          continue;
+        }
         let Some(paragraph_ix) = paragraph_index_for_id(document, node.heading_paragraph) else {
           continue;
         };
@@ -115,6 +138,13 @@ impl Workspace {
       PaletteAction::GoToParagraph(paragraph_ix) => {
         self.peek_active_editor_paragraph(paragraph_ix, window, cx);
       },
+      PaletteAction::GoToCell(address) => {
+        if let Some(editor) = &self.active_editor {
+          editor.update(cx, |editor, cx| {
+            editor.select_cell_by_outline_address(&address, cx);
+          });
+        }
+      },
       PaletteAction::ToggleReduceMotion => {
         let enabled = !crate::app_settings::load_app_settings().editor.reduce_motion;
         save_setting_reporting(
@@ -143,4 +173,28 @@ impl Workspace {
     self.command_palette = None;
     cx.notify();
   }
+}
+
+/// B-S6: the heading text of a cell-resident outline node.
+fn cell_heading_text(
+  document: &crate::rich_text_element::DocumentProjection,
+  address: &crate::rich_text_element::OutlineCellAddress,
+) -> Option<String> {
+  document
+    .blocks
+    .iter()
+    .enumerate()
+    .find_map(|(block_ix, block)| {
+      if document.ids.block_ids.get(block_ix).map(|id| id.0) != Some(address.table_block) {
+        return None;
+      }
+      let crate::rich_text_element::Block::Table(table) = block else {
+        return None;
+      };
+      let cell = table.rows.get(address.row_ix)?.cells.get(address.cell_ix)?;
+      match cell.blocks.get(address.cell_paragraph_ix)? {
+        crate::rich_text_element::TableCellBlock::Paragraph(paragraph) => Some(paragraph.text.clone()),
+        _ => None,
+      }
+    })
 }

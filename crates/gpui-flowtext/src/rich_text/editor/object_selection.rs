@@ -53,7 +53,7 @@ impl RichTextEditor {
   fn equation_screen_bounds(&mut self, block_ix: usize, window: &mut Window, cx: &mut Context<Self>) -> Option<gpui::Bounds<Pixels>> {
     let width = self.current_layout_width();
     let block_top = self.block_top_for_index(block_ix)?;
-    let layout = layout_structural_block_at(&self.document, block_ix, width, block_top, window, cx)?;
+    let layout = layout_structural_block_at(&self.document, block_ix, width, block_top, self.invisibility_mode, window, cx)?;
     let LaidOutBlock::Equation(object) = layout else {
       return None;
     };
@@ -80,7 +80,7 @@ impl RichTextEditor {
     };
     let width = self.current_layout_width();
     let block_top = self.block_top_for_index(block_ix)?;
-    let layout = layout_structural_block_at(&self.document, block_ix, width, block_top, window, cx)?;
+    let layout = layout_structural_block_at(&self.document, block_ix, width, block_top, self.invisibility_mode, window, cx)?;
     let LaidOutBlock::Table(table) = layout else {
       return None;
     };
@@ -124,7 +124,7 @@ impl RichTextEditor {
     let Some(block_top) = self.block_top_for_index(block_ix) else {
       return false;
     };
-    let Some(LaidOutBlock::Table(laid_out)) = layout_structural_block_at(&self.document, block_ix, width, block_top, window, cx) else {
+    let Some(LaidOutBlock::Table(laid_out)) = layout_structural_block_at(&self.document, block_ix, width, block_top, self.invisibility_mode, window, cx) else {
       return false;
     };
     let viewport = self.scroll_handle.bounds();
@@ -183,7 +183,7 @@ impl RichTextEditor {
     let Some(block_top) = self.block_top_for_index(drag.block_ix) else {
       return true;
     };
-    let Some(LaidOutBlock::Table(laid_out)) = layout_structural_block_at(&self.document, drag.block_ix, width, block_top, window, cx)
+    let Some(LaidOutBlock::Table(laid_out)) = layout_structural_block_at(&self.document, drag.block_ix, width, block_top, self.invisibility_mode, window, cx)
     else {
       return true;
     };
@@ -269,6 +269,35 @@ impl RichTextEditor {
     true
   }
 
+  /// B-S6: outline/palette navigation into a CELL-resident heading —
+  /// select the owning cell (which also scrolls it into view).
+  pub fn select_cell_by_outline_address(&mut self, address: &crate::OutlineCellAddress, cx: &mut Context<Self>) -> bool {
+    let Some(block_ix) = (0..self.document.blocks.len())
+      .find(|block_ix| self.semantic_block_id(*block_ix).map(|id| id.0) == Some(address.table_block))
+    else {
+      return false;
+    };
+    let Some(Block::Table(table)) = self.document.blocks.get(block_ix) else {
+      return false;
+    };
+    let Some(cell) = table
+      .rows
+      .get(address.row_ix)
+      .and_then(|row| row.cells.get(address.cell_ix))
+    else {
+      return false;
+    };
+    let selection = BlockSelection::TableCell {
+      block_ix,
+      row_ix: address.row_ix,
+      cell_ix: address.cell_ix,
+      row_id: cell.row_id,
+      column_id: cell.column_id,
+    };
+    self.select_block(selection, cx);
+    true
+  }
+
   /// Paint-facing reorder state (the indicator's slot).
   pub(crate) fn table_move_for_paint(&self) -> Option<TableMoveDrag> {
     self.table_move_drag
@@ -307,7 +336,7 @@ impl RichTextEditor {
     };
     let width = self.current_layout_width();
     let block_top = self.block_top_for_index(block_ix)?;
-    let layout = layout_structural_block_at(&self.document, block_ix, width, block_top, window, cx)?;
+    let layout = layout_structural_block_at(&self.document, block_ix, width, block_top, self.invisibility_mode, window, cx)?;
     let LaidOutBlock::Table(laid_out) = layout else {
       return None;
     };
