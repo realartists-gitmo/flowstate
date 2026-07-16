@@ -8,6 +8,7 @@ use std::collections::HashSet;
 use std::future::Future;
 
 use flowstate_collab::{SessionId, crdt_runtime::RuntimeCommentThread, doc_io::DocIoHandle, presence::CommentTyping};
+use gpui::AnimationExt as _;
 use gpui::{
   App, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, SharedString,
   Subscription, WeakEntity, Window, div, prelude::*, px,
@@ -568,6 +569,12 @@ impl Render for CommentsPanel {
             this.children(resolved.iter().map(|thread| self.render_thread(thread, false, Vec::new(), cx)))
           }),
       )
+      // D-S5: review mode dresses IN — the rail settles rather than popping.
+      .with_animation(
+        gpui::ElementId::Name("comments-review-entry".into()),
+        crate::motion::settle_animation(crate::motion::SETTLE),
+        |this, delta| this.opacity(0.4 + 0.6 * delta),
+      )
   }
 }
 
@@ -648,7 +655,8 @@ impl CommentsPanel {
             })),
         ),
       )
-      // messages
+      // messages — D-S6 connector motif: the thread's messages hang off a
+      // hairline spine in the thread author's color.
       .children(thread.messages.iter().map(|message| {
         let message_id = message.message_id;
         let is_message_author = message.author_user_id == self.author_user_id;
@@ -661,6 +669,9 @@ impl CommentsPanel {
         let edited = !message.deleted && message.updated_at_unix_secs > message.created_at_unix_secs;
         v_flex()
           .gap_0p5()
+          .pl_2()
+          .border_l_2()
+          .border_color(peer_color(SessionId::color_for_user(thread.author_user_id.unwrap_or_default())).opacity(0.35))
           .child(
             h_flex()
               .gap_1()

@@ -17,6 +17,7 @@ use flowstate_collab::{
   doc_io::DocIoHandle,
 };
 use flowstate_document::RevisionKind;
+use gpui::AnimationExt as _;
 use gpui::{
   App, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Render,
   SharedString, Subscription, WeakEntity, Window, div, prelude::*, px,
@@ -697,6 +698,13 @@ impl Render for HistoryTakeover {
                   .on_click(cx.listener(|takeover, _, _, cx| takeover.exit(cx))),
               ),
           ),
+      )
+      // D-S5: the takeover ENTERS — one settled beat, not a hard cut. The
+      // reduced-motion gate collapses it to the final frame.
+      .with_animation(
+        gpui::ElementId::Name("history-takeover-entry".into()),
+        crate::motion::settle_animation(crate::motion::SEQUENCE_BEAT),
+        |this, delta| this.opacity(0.25 + 0.75 * delta),
       )
   }
 }
