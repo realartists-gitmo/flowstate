@@ -134,7 +134,6 @@ pub struct Workspace {
   autosave_flow_in_flight: FxHashSet<Uuid>,
   collaboration_dialog: Option<Entity<crate::collab::share_dialog::CollabShareDialog>>,
   revision_dialog: Option<Entity<crate::workspace::revision_dialog::RevisionDialog>>,
-  comment_dialog: Option<Entity<crate::workspace::comment_dialog::CommentDialog>>,
   // §perf: SessionId keys are locally generated and trusted; use FxHash to avoid SipHash overhead.
   collab_notice_subscriptions: FxHashMap<flowstate_collab::SessionId, Subscription>,
   collab_incompatible_version_notices: HashSet<String>,

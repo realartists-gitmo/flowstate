@@ -1,4 +1,3 @@
-mod comment_dialog;
 mod document_panel;
 pub mod document_search;
 pub mod document_search_overlay;

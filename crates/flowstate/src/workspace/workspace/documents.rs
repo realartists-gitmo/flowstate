@@ -223,7 +223,6 @@ impl Workspace {
       autosave_flow_in_flight: FxHashSet::default(),       // §perf: FxHash for trusted Uuid keys
       collaboration_dialog: None,
       revision_dialog: None,
-      comment_dialog: None,
       collab_notice_subscriptions: FxHashMap::default(), // §perf: FxHash for trusted SessionId keys
       collab_incompatible_version_notices: HashSet::new(),
       file_search_overlay: None,

@@ -10,40 +10,6 @@ impl Workspace {
     Some((editor.document().ids.document_id, editor.document_path()?.clone()))
   }
 
-  pub fn open_comment_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-    let Some(panel_id) = self.active_document_id else { return };
-    let Some(editor) = self.active_editor.clone() else { return };
-    let Some(io) = self.document_runtimes.get(&panel_id).cloned() else {
-      return;
-    };
-    if self.comment_dialog.is_some() {
-      window.close_dialog(cx);
-      self.comment_dialog = None;
-    }
-    let selection = editor.read(cx).selection().clone();
-    let profile = crate::app_settings::load_local_user_profile();
-    let dialog = cx
-      .new(|cx| crate::workspace::comment_dialog::CommentDialog::new(io, editor, selection, profile.user_id, profile.display_name, window, cx));
-    let rendered = dialog.clone();
-    let workspace = cx.entity().downgrade();
-    window.open_dialog(cx, move |component, _, _| {
-      let workspace = workspace.clone();
-      component
-        .title("Comments")
-        .w(px(620.0))
-        .max_w(px(620.0))
-        .on_close(move |_, _, cx| {
-          let _ = workspace.update(cx, |workspace, cx| {
-            workspace.comment_dialog = None;
-            cx.notify();
-          });
-        })
-        .child(rendered.clone())
-    });
-    self.comment_dialog = Some(dialog);
-    cx.notify();
-  }
-
   pub fn open_collaboration_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
     self.open_collaboration_dialog_with_mode(crate::collab::share_dialog::CollabDialogMode::Share, window, cx);
   }

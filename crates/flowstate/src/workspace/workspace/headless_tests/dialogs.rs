@@ -62,20 +62,25 @@ fn close_collaboration_dialog_clears_state(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn comment_dialog_opens_once_runtime_attaches(cx: &mut TestAppContext) {
+fn comments_panel_opens_before_the_runtime_attaches(cx: &mut TestAppContext) {
+  // C-S7: the attach-race net, migrated from the retired comment dialog. The
+  // rail panel must open IMMEDIATELY on a fresh document — before its I/O
+  // runtime attaches from the OS thread — and show the honest waiting state
+  // instead of the old dialog's silent no-op.
   let h = support::open_workspace(cx);
   h.new_document(cx);
-  // The comment dialog needs the panel's I/O runtime, which attaches from an
-  // OS thread outside the test dispatcher.
+  // No runtime wait: open the panel in the race window.
+  h.update(cx, |ws, window, cx| ws.open_comments_panel(window, cx));
+  cx.run_until_parked();
+  assert!(h.read(cx, |ws| ws.comments_panel.is_some()), "panel opens without a runtime");
+  // Once the runtime attaches, the next rail frame hands it to the panel.
   h.wait_until(cx, "document runtime attach", |ws| {
     ws.active_document_id
       .is_some_and(|id| ws.document_runtimes.contains_key(&id))
   });
-  h.update(cx, |ws, window, cx| ws.open_comment_dialog(window, cx));
   cx.run_until_parked();
-  assert!(h.read(cx, |ws| ws.comment_dialog.is_some()));
-  // Reopen path (closes the previous dialog first).
-  h.update(cx, |ws, window, cx| ws.open_comment_dialog(window, cx));
+  // Reopen path stays idempotent (the old dialog test's reopen leg).
+  h.update(cx, |ws, window, cx| ws.open_comments_panel(window, cx));
   cx.run_until_parked();
-  assert!(h.read(cx, |ws| ws.comment_dialog.is_some()));
+  assert!(h.read(cx, |ws| ws.comments_panel.is_some()));
 }
