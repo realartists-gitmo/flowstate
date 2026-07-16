@@ -23,3 +23,4 @@ mod documents;
 mod flows_and_keystrokes;
 mod history;
 mod tabs_and_overlays;
+mod windows;

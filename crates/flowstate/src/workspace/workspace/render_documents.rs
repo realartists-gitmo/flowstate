@@ -278,10 +278,20 @@ impl Workspace {
               .item(PopupMenuItem::new("Move tab right").on_click(move |_, _, cx| {
                 let _ = right_workspace.update(cx, |workspace, cx| workspace.move_document_tab(panel_id, 1, cx));
               }))
-              // TB-S3 tear-off rides the New Window machinery.
-              .item(PopupMenuItem::new("Move to new window").on_click(move |_, window, cx| {
-                let _ = tear_workspace.update(cx, |workspace, cx| workspace.tear_off_document_tab(panel_id, window, cx));
-              }))
+              // TB-S3 tear-off rides the New Window machinery. W-S1: an
+              // untitled tab has no file to reopen elsewhere — disabled, and
+              // the guarded verb explains itself if reached another way.
+              .item(
+                PopupMenuItem::new(if tab.pathless {
+                  "Move to new window (save first)"
+                } else {
+                  "Move to new window"
+                })
+                .disabled(tab.pathless)
+                .on_click(move |_, window, cx| {
+                  let _ = tear_workspace.update(cx, |workspace, cx| workspace.tear_off_document_tab(panel_id, window, cx));
+                }),
+              )
           })
       }))
       .last_empty_space(div().flex_1().h_full())

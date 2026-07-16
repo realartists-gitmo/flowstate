@@ -230,6 +230,10 @@ impl Workspace {
       tab_bar_scroll_handle: ScrollHandle::new(),
       pinned_document_ids: Vec::new(),
       speech_document_id: None,
+      // W-S1: overwritten by `open_workspace_window` before the first frame;
+      // defaults to owner so bare `Workspace::new` construction (tests) keeps
+      // the historical single-window behavior.
+      session_owner: true,
       speech_word_count_cache: FxHashMap::default(),
       status_counter_modes: FxHashMap::default(),   // §perf: FxHash for trusted Uuid keys
       speech_word_count_pending: FxHashSet::default(), // §perf: FxHash for trusted Uuid keys
@@ -708,7 +712,95 @@ impl Workspace {
     );
   }
 
+  /// W-S1: the panel (document or flow) already showing `canonical` in THIS
+  /// window, if any.
+  fn panel_id_for_path(&self, canonical: &Path, cx: &App) -> Option<Uuid> {
+    for panel in &self.document_panels {
+      let panel = panel.read(cx);
+      if let Some(open) = panel.editor().read(cx).document_path()
+        && canonical_open_path(open) == canonical
+      {
+        return Some(panel.id());
+      }
+    }
+    for panel in &self.flow_panels {
+      let panel = panel.read(cx);
+      if let Some(open) = panel.editor().read(cx).document_path()
+        && canonical_open_path(open) == canonical
+      {
+        return Some(panel.id());
+      }
+    }
+    None
+  }
+
+  /// W-S1: activate an already-open tab (either kind) and focus its editor.
+  pub(super) fn activate_document_panel_by_id(&mut self, panel_id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+    if let Some(panel) = self.document_panels.iter().find(|panel| panel.read(cx).id() == panel_id) {
+      let editor = panel.read(cx).editor();
+      self.set_active_document(panel_id, editor.clone(), cx);
+      window.focus(&editor.focus_handle(cx));
+      return;
+    }
+    if let Some(panel) = self.flow_panels.iter().find(|panel| panel.read(cx).id() == panel_id) {
+      let editor = panel.read(cx).editor();
+      self.set_active_flow(panel_id, editor.clone(), cx);
+      window.focus(&editor.focus_handle(cx));
+    }
+  }
+
+  /// W-S1: if `canonical` is open in ANOTHER window, activate that window and
+  /// its tab. Returns true when handled.
+  fn activate_path_in_other_window(&mut self, canonical: &Path, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    let own_handle = window.window_handle();
+    for (handle, workspace) in live_workspace_windows(cx) {
+      if handle == own_handle {
+        continue;
+      }
+      let activated = handle
+        .update(cx, |_, window, cx| {
+          workspace.update(cx, |workspace, cx| {
+            let Some(panel_id) = workspace.panel_id_for_path(canonical, cx) else {
+              return false;
+            };
+            workspace.activate_document_panel_by_id(panel_id, window, cx);
+            window.activate_window();
+            true
+          })
+        })
+        .unwrap_or(false);
+      if activated {
+        return true;
+      }
+    }
+    false
+  }
+
   fn open_document_path_with_target(&mut self, path: PathBuf, target: Option<OpenDocumentTarget>, window: &mut Window, cx: &mut Context<Self>) {
+    // W-S1: THE double-open guard. A path that is already open — in this
+    // window or any other — activates the existing tab instead of minting a
+    // second CrdtRuntime on the same file (two runtimes on one path silently
+    // clobber each other's saves: the docx-clobber defect class).
+    let canonical = canonical_open_path(&path);
+    if let Some(panel_id) = self.panel_id_for_path(&canonical, cx) {
+      self.activate_document_panel_by_id(panel_id, window, cx);
+      match target {
+        Some(OpenDocumentTarget { cursor: Some(cursor), paragraph }) => {
+          self.peek_open_target_cursor(cursor, paragraph, window, cx);
+        },
+        Some(OpenDocumentTarget {
+          cursor: None,
+          paragraph: Some(paragraph_ix),
+        }) => {
+          self.peek_active_editor_paragraph(paragraph_ix, window, cx);
+        },
+        _ => {},
+      }
+      return;
+    }
+    if self.activate_path_in_other_window(&canonical, window, cx) {
+      return;
+    }
     let window_handle = window.window_handle();
     let path_for_recent = path.clone();
     cx.spawn(async move |workspace, cx| {
@@ -812,6 +904,12 @@ impl Workspace {
   }
 
   fn persist_temporary_workspace_session(&mut self, cx: &mut Context<Self>) {
+    // W-S1 (W2-B): only the session-owner window writes the session file.
+    // Before this gate every window debounce-wrote the same path and the last
+    // writer clobbered the rest.
+    if !self.session_owner {
+      return;
+    }
     let mut entries = Vec::new();
     let mut active_index = None;
     let mut panel_id_to_entry_index: std::collections::HashMap<Uuid, usize> = std::collections::HashMap::new();
@@ -921,6 +1019,13 @@ impl Workspace {
   }
 
   fn restore_temporary_workspace_session(&mut self, session: TemporaryWorkspaceSession, window: &mut Window, cx: &mut Context<Self>) {
+    // W-S1 (W1-A/W2-B): only the session-owner window restores. Before this
+    // gate, "New Window" (initial_path = None) restored the ENTIRE previous
+    // session — a surprise duplicate of the window you already had, which then
+    // double-opened every file.
+    if !self.session_owner {
+      return;
+    }
     let active_index = session.active_index;
     let mut active_id = None;
     let mut viewport_scrolls: Vec<(Uuid, Option<usize>)> = Vec::new();
@@ -2107,6 +2212,13 @@ enum TemporaryWorkspaceSessionEntryKind {
 }
 
 #[hotpath::measure]
+/// W-S1: canonical form for the double-open guard's path comparisons.
+/// Canonicalization fails for not-yet-existing paths — fall back to the raw
+/// path so the comparison stays byte-honest rather than erroring.
+fn canonical_open_path(path: &Path) -> PathBuf {
+  std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 fn temporary_workspace_session_path() -> PathBuf {
   // FLOWSTATE_CONFIG_DIR is the headless-test sandbox root; the tab-session
   // file must follow it or tests restore/clobber the real user's open tabs.

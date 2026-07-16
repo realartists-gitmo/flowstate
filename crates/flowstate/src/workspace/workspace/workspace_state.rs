@@ -1171,7 +1171,8 @@ impl Workspace {
   }
 
   /// TB-S3 tear-off: reopen a path-backed document in its own window, then
-  /// close the tab here. Dirty/untitled tabs refuse honestly at the menu.
+  /// close the tab here. W-S1: untitled tabs refuse OUT LOUD (the menu item is
+  /// also disabled for them) — the old silent early-return was a lie.
   pub(super) fn tear_off_document_tab(&mut self, panel_id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
     let path = self
       .document_panels
@@ -1185,7 +1186,14 @@ impl Workspace {
           .find(|panel| panel.read(cx).id() == panel_id)
           .and_then(|panel| panel.read(cx).editor().read(cx).document_path().cloned())
       });
-    let Some(path) = path else { return };
+    let Some(path) = path else {
+      self.report_failure(
+        "Save the document first — an unsaved tab has no file to move to a new window.",
+        None,
+        cx,
+      );
+      return;
+    };
     let _ = crate::workspace::open_workspace_window(Some(path), cx);
     self.close_document_panel(panel_id, window, cx);
   }
@@ -1198,6 +1206,7 @@ impl Workspace {
         let panel = panel.read(cx);
         let title = panel.title_text();
         let dirty = panel.is_dirty(cx);
+        let pathless = panel.editor().read(cx).document_path().is_none();
         let title = truncate_tab_title(&title, 32);
         let id = panel.id();
         DocumentTab {
@@ -1208,6 +1217,7 @@ impl Workspace {
           pin_index: None,
           speech: self.speech_document_id == Some(id),
           dirty,
+          pathless,
         }
       })
       .collect::<Vec<_>>();
@@ -1215,6 +1225,7 @@ impl Workspace {
       let panel = panel.read(cx);
       let title = panel.title_text();
       let dirty = panel.is_dirty(cx);
+      let pathless = panel.editor().read(cx).document_path().is_none();
       let title = truncate_tab_title(&title, 32);
       let id = panel.id();
       DocumentTab {
@@ -1225,6 +1236,7 @@ impl Workspace {
         pin_index: None,
         speech: self.speech_document_id == Some(id),
         dirty,
+        pathless,
       }
     }));
     ordered_document_tabs(tabs, &self.pinned_document_ids)

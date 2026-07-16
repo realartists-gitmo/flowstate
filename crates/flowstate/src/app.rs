@@ -356,6 +356,14 @@ pub fn run_standalone(mut document_path: Option<PathBuf>) {
     register_rich_text_editor_keybindings(cx);
     install_prompt_renderer(cx);
     install_flowtext_adapters();
+    // W-S1: with multiple windows a "quit" is N close requests — the process
+    // must actually exit once the last window is gone.
+    cx.on_window_closed(|cx| {
+      if cx.windows().is_empty() {
+        cx.quit();
+      }
+    })
+    .detach();
     let workspace = open_workspace_window(document_path, cx);
     if let Some(invite) = initial_invite {
       let _ = initial_url_tx.try_send(invite);

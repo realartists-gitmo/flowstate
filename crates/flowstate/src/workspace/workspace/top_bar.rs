@@ -19,7 +19,6 @@ fn flowstate_top_bar_button(cx: &mut Context<Workspace>) -> impl IntoElement {
         .xsmall()
         .ghost()
         .dropdown_menu(move |menu, _window, _cx| {
-          let workspace = workspace.clone();
           let appearance_workspace = workspace.clone();
           menu
             // P5-S2: theme moved to Settings ▸ Appearance (live-applied there).
@@ -31,8 +30,10 @@ fn flowstate_top_bar_button(cx: &mut Context<Workspace>) -> impl IntoElement {
               });
             }))
             .separator()
-            .item(PopupMenuItem::new("Quit Flowstate").on_click(move |_, window, cx| {
-              let _ = workspace.update(cx, |workspace, cx| workspace.request_close_window(window, cx));
+            // W-S1: quit means quit — every window gets its close prompts,
+            // not just the focused one.
+            .item(PopupMenuItem::new("Quit Flowstate").on_click(move |_, _, cx| {
+              crate::workspace::request_quit_all_windows(cx);
             }))
         }),
     )

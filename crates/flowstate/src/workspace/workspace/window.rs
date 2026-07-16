@@ -161,6 +161,48 @@ pub fn install_workspace_close_prompt(workspace: Entity<Workspace>, window: &mut
   });
 }
 
+/// W-S1: the live workspace-window registry. One entry per open window, in
+/// creation order. This is what makes the same-file double-open guard and the
+/// coordinated quit able to see across windows at all.
+#[derive(Default)]
+pub struct WorkspaceWindows {
+  entries: Vec<(AnyWindowHandle, WeakEntity<Workspace>)>,
+}
+
+impl gpui::Global for WorkspaceWindows {}
+
+/// Live (window, workspace) pairs, pruning entries whose workspace has been
+/// released (closed windows drop their Root → Workspace chain).
+pub fn live_workspace_windows(cx: &mut App) -> Vec<(AnyWindowHandle, Entity<Workspace>)> {
+  let registry = cx.default_global::<WorkspaceWindows>();
+  registry
+    .entries
+    .retain(|(_, workspace)| workspace.upgrade().is_some());
+  cx.global::<WorkspaceWindows>()
+    .entries
+    .iter()
+    .filter_map(|(handle, workspace)| Some((*handle, workspace.upgrade()?)))
+    .collect()
+}
+
+fn register_workspace_window(handle: AnyWindowHandle, workspace: WeakEntity<Workspace>, cx: &mut App) {
+  cx.default_global::<WorkspaceWindows>()
+    .entries
+    .push((handle, workspace));
+}
+
+/// W-S1: "Quit Flowstate" asks EVERY window to close (each window runs its own
+/// collaboration/dirty prompts), not just the focused one. A cancel in any
+/// window leaves that window (and the app) alive; the app exits when the last
+/// window is gone.
+pub fn request_quit_all_windows(cx: &mut App) {
+  for (handle, workspace) in live_workspace_windows(cx) {
+    let _ = handle.update(cx, |_, window, cx| {
+      workspace.update(cx, |workspace, cx| workspace.request_close_window(window, cx));
+    });
+  }
+}
+
 #[hotpath::measure]
 pub fn open_workspace_window(document_path: Option<PathBuf>, cx: &mut App) -> WeakEntity<Workspace> {
   let initial_invite = document_path
@@ -170,6 +212,9 @@ pub fn open_workspace_window(document_path: Option<PathBuf>, cx: &mut App) -> We
     .map(flowstate_collab::ticket::SessionTicket::decode_text);
   let document_path = if initial_invite.is_some() { None } else { document_path };
   let window_bounds = startup_window_bounds(cx);
+  // W-S1 (W2-B): the first window of the process owns the persisted session;
+  // every later window is an ephemeral work surface.
+  let session_owner = live_workspace_windows(cx).is_empty();
   let opened_workspace = Rc::new(RefCell::new(None));
   let opened_workspace_slot = opened_workspace.clone();
   cx.open_window(
@@ -183,6 +228,10 @@ pub fn open_workspace_window(document_path: Option<PathBuf>, cx: &mut App) -> We
     |window, cx| {
       window.set_window_title("Flowstate");
       let workspace = cx.new(|cx| Workspace::new(document_path, window, cx));
+      // Set before the deferred session restore runs (it is scheduled for the
+      // next frame inside `Workspace::new` and gates on this flag).
+      workspace.update(cx, |workspace, _| workspace.session_owner = session_owner);
+      register_workspace_window(window.window_handle(), workspace.downgrade(), cx);
       if let Some(invite) = initial_invite {
         match invite {
           Ok(ticket) => workspace.update(cx, |workspace, cx| {

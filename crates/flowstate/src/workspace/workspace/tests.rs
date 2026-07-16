@@ -29,6 +29,7 @@ mod tests {
         pin_index: None,
         speech: false,
         dirty: false,
+        pathless: false,
       },
       DocumentTab {
         id: second,
@@ -38,6 +39,7 @@ mod tests {
         pin_index: None,
         speech: false,
         dirty: false,
+        pathless: false,
       },
       DocumentTab {
         id: third,
@@ -47,6 +49,7 @@ mod tests {
         pin_index: None,
         speech: false,
         dirty: false,
+        pathless: false,
       },
     ];
 

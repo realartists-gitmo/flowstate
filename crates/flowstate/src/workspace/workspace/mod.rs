@@ -106,6 +106,10 @@ pub struct Workspace {
   tab_bar_scroll_handle: ScrollHandle,
   pinned_document_ids: Vec<Uuid>,
   speech_document_id: Option<Uuid>,
+  /// W-S1 (W2-B): exactly one window — the first — owns the on-disk workspace
+  /// session. Secondary windows neither restore nor persist it, so two windows
+  /// can never clobber each other's `flowstate-open-tabs-session.json`.
+  session_owner: bool,
   // §perf: Uuid keys are locally generated and trusted; use FxHash to avoid SipHash overhead.
   /// (edit generation, speech words, total words) per document (SB-S4).
   speech_word_count_cache: FxHashMap<Uuid, (u64, usize, usize)>,
@@ -201,6 +205,9 @@ struct DocumentTab {
   speech: bool,
   /// TB-S4: unsaved changes — rendered as a dot mark, not a `*` in the label.
   dirty: bool,
+  /// W-S1: no backing file yet — tear-off ("Move to new window") is disabled
+  /// for these instead of silently no-oping.
+  pathless: bool,
 }
 
 type FontFamilySelectDelegate = SearchableVec<SharedString>;
