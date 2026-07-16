@@ -182,6 +182,8 @@ pub(crate) fn action_for_command(command: CommandId) -> Option<Box<dyn Action>> 
     | CommandId::SendToSpeechDocument
     | CommandId::SendToSpeechDocumentEnd
     | CommandId::CondenseSelection
+    | CommandId::MoveBlockUp
+    | CommandId::MoveBlockDown
     | CommandId::CondenseSelectionPilcrows
     | CommandId::UncondensePilcrows
     | CommandId::CondensedSelection

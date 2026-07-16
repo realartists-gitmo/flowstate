@@ -70,6 +70,8 @@ pub enum CommandId {
   ApplyHighlightToSelection,
   ClearFormatting,
   ClearHighlight,
+  MoveBlockUp,
+  MoveBlockDown,
   InsertImage,
   InsertTable,
   InsertEquation,
@@ -233,6 +235,9 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
   CommandSpec::new(CommandId::ApplyHighlightToSelection, "Apply Highlight to Selection", EDITOR, &["f11"]),
   CommandSpec::new(CommandId::ClearFormatting, "Clear Formatting", EDITOR, &["f12"]),
   CommandSpec::new(CommandId::ClearHighlight, "Clear Highlight", EDITOR, &["ctrl-shift-h"]),
+  // B-S11: keyboard block movement — MoveBlock's first callers.
+  CommandSpec::new(CommandId::MoveBlockUp, "Move Block Up", EDITOR, &["alt-up"]),
+  CommandSpec::new(CommandId::MoveBlockDown, "Move Block Down", EDITOR, &["alt-down"]),
   CommandSpec::new(CommandId::InsertImage, "Insert Image", EDITOR, &[]),
   CommandSpec::new(CommandId::InsertTable, "Insert Table", EDITOR, &[]),
   CommandSpec::new(CommandId::InsertEquation, "Insert Equation", EDITOR, &[]),

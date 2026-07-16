@@ -443,6 +443,53 @@ impl RichTextEditor {
   /// `DeleteBlocks` intent addressed by the block's durable identity. The
   /// runtime retires the block canonically and its returned patches advance
   /// THE projection — no direct block removal, no snapshot history.
+  /// B-S11: move the selected object block one position up or down — the
+  /// keyboard half of block movement (`MoveBlock` finally has a caller). The
+  /// block stays selected so repeated presses walk it through the document.
+  pub fn move_selected_block(&mut self, down: bool, cx: &mut Context<Self>) -> bool {
+    let block_ix = match self.selected_block {
+      Some(BlockSelection::Image(ix) | BlockSelection::Equation(ix) | BlockSelection::Table(ix)) => ix,
+      _ => return false,
+    };
+    let Some(block_id) = self.semantic_block_id(block_ix) else {
+      return false;
+    };
+    if down && block_ix + 1 >= self.document.blocks.len() {
+      return false; // already last
+    }
+    if !down && block_ix == 0 {
+      return false; // already first
+    }
+    // Destination: UP lands before the previous block; DOWN lands before the
+    // block after next (`None` = document end).
+    let before_ix = if down { block_ix + 2 } else { block_ix - 1 };
+    let before = if before_ix < self.document.blocks.len() {
+      match self.semantic_block_id(before_ix) {
+        Some(id) => Some(id),
+        None => return false,
+      }
+    } else {
+      None
+    };
+    let moved = self
+      .write_intent(
+        LocalIntent::MoveBlock(crate::local_intents::MoveBlockIntent { block: block_id, before }),
+        cx,
+      )
+      .is_some();
+    if moved {
+      // Re-select the block at its new position (the projection advanced).
+      let new_ix = if down { block_ix + 1 } else { block_ix - 1 };
+      let reselect = match self.selected_block {
+        Some(BlockSelection::Image(_)) => BlockSelection::Image(new_ix),
+        Some(BlockSelection::Equation(_)) => BlockSelection::Equation(new_ix),
+        _ => BlockSelection::Table(new_ix),
+      };
+      self.select_block(reselect, cx);
+    }
+    moved
+  }
+
   fn delete_selected_block(&mut self, cx: &mut Context<Self>) -> bool {
     let Some(selection) = self.selected_block else {
       return false;

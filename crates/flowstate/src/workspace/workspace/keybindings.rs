@@ -295,6 +295,20 @@ impl Workspace {
       },
       CommandId::SendToSpeechDocument => self.send_selection_to_speech_document(window, cx),
       CommandId::SendToSpeechDocumentEnd => self.send_selection_to_speech_document_end(window, cx),
+      CommandId::MoveBlockUp => {
+        if let Some(editor) = self.active_editor.clone() {
+          editor.update(cx, |editor, cx| editor.move_selected_block(false, cx))
+        } else {
+          false
+        }
+      },
+      CommandId::MoveBlockDown => {
+        if let Some(editor) = self.active_editor.clone() {
+          editor.update(cx, |editor, cx| editor.move_selected_block(true, cx))
+        } else {
+          false
+        }
+      },
       CommandId::CondenseSelection => self.condense_active_selection(window, cx),
       CommandId::CondenseSelectionPilcrows => {
         if let Some(editor) = self.active_editor.clone() {
