@@ -3,6 +3,11 @@ use std::collections::HashMap;
 use flowstate_flow::{Cell, CellId, Sheet};
 
 pub(super) const CELL_GAP: f32 = 16.0;
+// Board x-geometry shared by the column elements, the drag slot capture, and
+// the aether column-wash canvas — all three must agree on where a column is.
+pub(super) const COLUMN_WIDTH: f32 = 280.0;
+pub(super) const COLUMN_GAP: f32 = 16.0;
+pub(super) const BOARD_PADDING: f32 = 16.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct CellMeasurement {

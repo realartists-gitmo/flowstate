@@ -2,9 +2,11 @@
 //! is column-full-height against a layout snapshot FROZEN at drag start (so
 //! drop targets never move under the pointer), the live make-room reflow is
 //! the preview (render paints the previewed board), ambiguity unfolds landing
-//! pads at the gap (cursor-on-pad selects; release commits; default = run
-//! semantics), a meaning-chip rides the ghost, and a fast release FLINGS the
-//! card to the strongest-magnet valid slot along its trajectory.
+//! pads at the gap (the default pad renders pre-selected; cursor-on-pad
+//! re-selects; release commits), a meaning-chip rides the ghost only at
+//! unambiguous spots (while pads are up they carry the meaning — a chip there
+//! would cover the very options it names), and a fast release FLINGS the card
+//! to the strongest-magnet valid slot along its trajectory.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
@@ -66,7 +68,9 @@ pub(super) struct DragSession {
   /// Window-space anchor of the pad row + its captured hover region.
   pub(super) pad_origin: Option<Point<Pixels>>,
   pub(super) pad_rect: Option<Bounds<Pixels>>,
-  pub(super) hovered_pad: Option<usize>,
+  /// The pad release would commit: the slot's default until the pointer
+  /// claims another pad. Always Some while pads are up.
+  pub(super) selected_pad: Option<usize>,
   /// Pointer samples for fling velocity (position, instant).
   pub(super) samples: VecDeque<(Point<Pixels>, Instant)>,
   /// The chip riding the ghost, updated as the meaning changes.
@@ -75,7 +79,8 @@ pub(super) struct DragSession {
 
 /// The cursor ghost: the dragged card (stacked when a thread rides along,
 /// with a "+N" census badge — F1) plus the meaning-chip stating exactly what
-/// release will do.
+/// release will do. The chip only shows at unambiguous spots (empty meaning =
+/// hidden); when landing pads are up, the selected pad states the meaning.
 pub(super) struct FlowCellDragPreview {
   pub(super) label: SharedString,
   pub(super) census: usize,
@@ -207,7 +212,7 @@ impl FlowEditor {
       pads: Vec::new(),
       pad_origin: None,
       pad_rect: None,
-      hovered_pad: None,
+      selected_pad: None,
       samples: VecDeque::with_capacity(16),
       preview: None,
     });
@@ -265,12 +270,12 @@ impl FlowEditor {
       if drag.pad_rect.is_some_and(|rect| rect.contains(&position)) {
         return;
       }
-      drag.hovered_pad = None;
+      drag.selected_pad = None;
     }
     let zoom = self.board_zoom;
-    let column_width = 280.0 * zoom;
-    let stride = (280.0 + 16.0) * zoom;
-    let relative = (position.x - board_bounds.left()).as_f32() - 16.0 * zoom;
+    let column_width = super::layout::COLUMN_WIDTH * zoom;
+    let stride = (super::layout::COLUMN_WIDTH + super::layout::COLUMN_GAP) * zoom;
+    let relative = (position.x - board_bounds.left()).as_f32() - super::layout::BOARD_PADDING * zoom;
     let column_count = self.active_column_count();
     let raw_index = (relative / stride).floor().max(0.0);
     let within = relative - raw_index * stride;
@@ -284,10 +289,15 @@ impl FlowEditor {
       return;
     };
     let ambiguous = options.len() > 1;
+    let default_index = options.iter().position(|option| option.drop == default_option.drop);
     if let Some(drag) = self.drag.as_mut() {
       if ambiguous {
         drag.pads = options.clone();
         drag.pad_origin = Some(pad_anchor);
+        // The slot's default meaning reads as the pre-selected pad — the pads
+        // carry the meaning while they're up, so the chip stays hidden (it
+        // would pop up exactly where the row unfolds and cover the options).
+        drag.selected_pad = default_index;
         // The hover region is captured generously; the exact rect is refined
         // by the pad row's own painted bounds on hover.
         if drag.pad_rect.is_none() {
@@ -303,7 +313,14 @@ impl FlowEditor {
       }
     }
     let default_drop = default_option.drop;
-    self.set_drag_meaning(default_option.label.clone(), cx);
+    self.set_drag_meaning(
+      if ambiguous {
+        SharedString::default()
+      } else {
+        default_option.label.clone()
+      },
+      cx,
+    );
     if self.pending_cell_drop != Some(default_drop) {
       self.pending_cell_drop = Some(default_drop);
       self.log_drag_over_column(column_index, position, default_drop);
@@ -319,13 +336,12 @@ impl FlowEditor {
     let Some(option) = drag.pads.get(pad_index).cloned() else {
       return;
     };
-    drag.hovered_pad = Some(pad_index);
+    drag.selected_pad = Some(pad_index);
     // Refine the freeze region to the actual painted row (+ margin).
     drag.pad_rect = Some(Bounds::new(
       point(pad_row_bounds.left() - px(12.0), pad_row_bounds.top() - px(12.0)),
       gpui::size(pad_row_bounds.size.width + px(24.0), pad_row_bounds.size.height + px(24.0)),
     ));
-    self.set_drag_meaning(option.label.clone(), cx);
     if self.pending_cell_drop != Some(option.drop) {
       self.pending_cell_drop = Some(option.drop);
       cx.notify();

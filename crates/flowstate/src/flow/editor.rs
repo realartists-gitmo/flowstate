@@ -38,7 +38,7 @@ pub use grid_nav::GridDirection;
 use annotation::paint_stroke;
 use connector::paint_connector_family;
 use drag_drop::{DragSession, FlowCellDrag, FlowCellDragPreview, WirePlugDrag, WirePlugPreview};
-use layout::{CellMeasurement, sheet_cell_layout};
+use layout::{BOARD_PADDING, COLUMN_GAP, COLUMN_WIDTH, CellMeasurement, sheet_cell_layout};
 use zoom::grid_dot_metrics;
 
 #[derive(Clone, Debug)]
@@ -1383,7 +1383,12 @@ impl FlowEditor {
     let control_size = px(20.0 * zoom);
     let control_icon_size = px(12.0 * zoom);
     let cell_layout = sheet_cell_layout(sheet, &self.cell_measurements, zoom);
-    let board_width = px((32.0 + definition.columns.len() as f32 * 280.0 + definition.columns.len().saturating_sub(1) as f32 * 16.0) * zoom);
+    let board_width = px(
+      (2.0 * BOARD_PADDING
+        + definition.columns.len() as f32 * COLUMN_WIDTH
+        + definition.columns.len().saturating_sub(1) as f32 * COLUMN_GAP)
+        * zoom,
+    );
     let weak_editor = cx.entity().downgrade();
     let weak_connector_editor = weak_editor.clone();
     let mut children_by_parent: std::collections::HashMap<CellId, Vec<CellId>> = std::collections::HashMap::new();
@@ -1408,8 +1413,8 @@ impl FlowEditor {
       .min_h_full()
       .w(board_width)
       .flex()
-      .gap(px(16.0 * zoom))
-      .p(px(16.0 * zoom))
+      .gap(px(COLUMN_GAP * zoom))
+      .p(px(BOARD_PADDING * zoom))
       // THE slot-capture handler (§3.1): pointer → column (full-height x
       // capture) → frozen-baseline slot → meaning set + pads. One handler,
       // board-wide — per-cell drop zones are gone.
@@ -1429,12 +1434,11 @@ impl FlowEditor {
         let can_receive_child = column_index + 1 < definition.columns.len();
         let add_editor = cx.entity().clone();
         div()
-          .w(px(280.0 * zoom))
+          .w(px(COLUMN_WIDTH * zoom))
           .flex_none()
           .flex_col()
-          // Part 4: column wash — the side's identity at ambient strength.
-          .bg(side_color.opacity(0.035))
-          .rounded(px(9.0 * zoom))
+          // Part 4: the column wash is painted by the aether canvas (it runs
+          // past the last cell, down as far as the board scrolls), not here.
           .child(
             div()
               .flex()
@@ -1494,7 +1498,7 @@ impl FlowEditor {
               notice.cell.map(|cell| (cell, 6.0 * (age * 35.0).sin() * (1.0 - age / 0.45)))
             });
             let mut previous_bottom = 0.0;
-            let mut elements: Vec<AnyElement> = column_cells.into_iter().map(|cell| {
+            let elements: Vec<AnyElement> = column_cells.into_iter().map(|cell| {
             let id = cell.id;
             // The previewed thread renders translucent at its landing slot —
             // the make-room reflow IS the preview (§3.1).
@@ -1798,8 +1802,8 @@ impl FlowEditor {
           .drag
           .as_ref()
           .filter(|drag| !drag.pads.is_empty())
-          .and_then(|drag| drag.pad_origin.map(|origin| (drag.pads.clone(), origin, drag.hovered_pad))),
-        |this, (pads, origin, hovered)| {
+          .and_then(|drag| drag.pad_origin.map(|origin| (drag.pads.clone(), origin, drag.selected_pad))),
+        |this, (pads, origin, selected_pad)| {
           let local_x = px(origin.x.as_f32() - self.viewport_origin.x);
           let local_y = px(origin.y.as_f32() - self.viewport_origin.y + 34.0);
           this.child(
@@ -1810,7 +1814,9 @@ impl FlowEditor {
               .flex()
               .gap_1()
               .children(pads.into_iter().enumerate().map(|(pad_ix, pad)| {
-                let selected = hovered == Some(pad_ix);
+                // The selected pad IS the meaning statement (no chip while
+                // pads are up): the slot default pre-selects, hover re-selects.
+                let selected = selected_pad == Some(pad_ix);
                 div()
                   .id(("flow-pad", pad_ix))
                   .px_2()
@@ -1916,6 +1922,27 @@ impl Render for FlowEditor {
     }
     let grid_scroll = self.board_scroll.clone();
     let board_zoom = self.board_zoom;
+    // Part 4: column washes belong to the aether, not the column elements —
+    // each side's tint starts at its column header and runs down past the last
+    // cell, to the bottom of the viewport at any scroll position.
+    let wash_columns: Vec<gpui::Hsla> = if self.scrubber.is_some() {
+      Vec::new()
+    } else {
+      self
+        .active_sheet
+        .and_then(|sheet_id| {
+          let sheet = self.board.sheets.iter().find(|sheet| sheet.id == sheet_id)?;
+          let definition = self.board.format.sheet_type(sheet.sheet_type_id)?;
+          Some(
+            definition
+              .columns
+              .iter()
+              .map(|column| flow_side_palette(column.side, cx).base)
+              .collect(),
+          )
+        })
+        .unwrap_or_default()
+    };
     div()
       .id("flow-editor")
       .relative()
@@ -1972,6 +1999,35 @@ impl Render for FlowEditor {
                 y += spacing;
               }
               x += spacing;
+            }
+            // Column washes over the dots: geometry mirrors the column
+            // elements exactly (BOARD_PADDING / COLUMN_WIDTH / COLUMN_GAP),
+            // but the bottom edge is the viewport, not the content.
+            for (index, side_color) in wash_columns.iter().enumerate() {
+              let left = bounds.origin.x + offset.x + px((BOARD_PADDING + index as f32 * (COLUMN_WIDTH + COLUMN_GAP)) * board_zoom);
+              let top = bounds.origin.y + offset.y + px(BOARD_PADDING * board_zoom);
+              let rounded_top = top >= bounds.origin.y;
+              let wash = gpui::Bounds::from_corners(
+                point(left.max(bounds.origin.x), top.max(bounds.origin.y)),
+                point(
+                  (left + px(COLUMN_WIDTH * board_zoom)).min(bounds.origin.x + bounds.size.width),
+                  bounds.origin.y + bounds.size.height,
+                ),
+              );
+              if wash.size.width <= px(0.0) || wash.size.height <= px(0.0) {
+                continue;
+              }
+              let mut quad = gpui::fill(wash, side_color.opacity(0.035));
+              if rounded_top {
+                let radius = px(9.0 * board_zoom);
+                quad = quad.corner_radii(gpui::Corners {
+                  top_left: radius,
+                  top_right: radius,
+                  bottom_left: px(0.0),
+                  bottom_right: px(0.0),
+                });
+              }
+              window.paint_quad(quad);
             }
           },
         )
