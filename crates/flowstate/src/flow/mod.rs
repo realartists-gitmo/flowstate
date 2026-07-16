@@ -2,10 +2,12 @@ mod cell_theme;
 pub mod editor;
 pub mod panel;
 pub mod ribbon;
+pub mod sheet_strip;
 
 pub use editor::{AnnotationTool, FlowEditor, FlowExternalPresence, FlowPresenceSnapshot};
 pub use panel::FlowPanel;
 pub use ribbon::FlowRibbon;
+pub use sheet_strip::FlowSheetStrip;
 
 use gpui::{App, Hsla};
 use gpui_component::ActiveTheme as _;

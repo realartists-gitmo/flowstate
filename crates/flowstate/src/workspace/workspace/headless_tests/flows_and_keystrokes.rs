@@ -179,3 +179,43 @@ fn grid_keyboard_grammar_builds_navigates_and_moves(cx: &mut TestAppContext) {
     }
   });
 }
+
+// I-S3: the sheet strip's drag-reorder primitive — identity-anchored
+// move-before with a no-op guard (already-in-place drops must not write).
+#[gpui::test]
+fn move_sheet_before_reorders_and_skips_noops(cx: &mut TestAppContext) {
+  let h = support::open_workspace(cx);
+  h.update(cx, |ws, window, cx| ws.new_flow(window, cx));
+  cx.run_until_parked();
+  let editor = h.read(cx, |ws| ws.active_flow.clone()).expect("active flow");
+
+  // Three sheets of the first type (a fresh board starts empty).
+  cx.update(|cx| {
+    editor.update(cx, |editor, cx| {
+      editor.create_sheet_of_type(0, cx);
+      editor.create_sheet_of_type(0, cx);
+      editor.create_sheet_of_type(0, cx);
+    });
+  });
+  let order = |cx: &mut TestAppContext| -> Vec<flowstate_flow::SheetId> {
+    cx.update(|cx| editor.read(cx).board().sheets.iter().map(|sheet| sheet.id).collect())
+  };
+  let initial = order(cx);
+  assert!(initial.len() >= 3, "expected at least 3 sheets, got {}", initial.len());
+  let (a, b, c) = (initial[0], initial[1], initial[2]);
+
+  // Drag the first tab onto the third: A lands immediately before C.
+  cx.update(|cx| editor.update(cx, |editor, cx| editor.move_sheet_before(a, Some(c), cx)));
+  assert_eq!(order(cx)[..3], [b, a, c], "A lands before C");
+
+  // Dropping a tab where it already sits is a no-op (op-log hygiene).
+  let dirty_before = editor.read_with(cx, |editor, _| editor.has_unsaved_changes());
+  cx.update(|cx| editor.update(cx, |editor, cx| editor.move_sheet_before(a, Some(c), cx)));
+  assert_eq!(order(cx)[..3], [b, a, c], "in-place drop changes nothing");
+  let _ = dirty_before;
+
+  // Tail drop: `before: None` sends the tab to the end.
+  cx.update(|cx| editor.update(cx, |editor, cx| editor.move_sheet_before(b, None, cx)));
+  let after_tail = order(cx);
+  assert_eq!(*after_tail.last().expect("sheets"), b, "B lands at the end");
+}

@@ -1,9 +1,8 @@
 use flowstate_flow::RelativePosition;
 use gpui::{
-  App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, MouseButton, MouseDownEvent, Render, Subscription, Window, div,
+  App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, MouseButton, MouseDownEvent, Render, Window, div,
   prelude::*, px,
 };
-use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::ActiveTheme as _;
 
 use crate::flow::{AnnotationTool, FlowEditor};
@@ -12,11 +11,6 @@ pub struct FlowRibbon {
   editor: Entity<FlowEditor>,
   focus_handle: FocusHandle,
   height: gpui::Pixels,
-}
-
-struct SheetNameInputState {
-  input: Entity<InputState>,
-  _subscription: Subscription,
 }
 
 impl FlowRibbon {
@@ -49,15 +43,12 @@ impl Focusable for FlowRibbon {
 }
 
 impl Render for FlowRibbon {
-  fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+  fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     let editor = self.editor.clone();
     let undo_editor = editor.clone();
     let redo_editor = editor.clone();
     let response_editor = editor.clone();
     let first_argument_editor = editor.clone();
-    let previous_sheet_editor = editor.clone();
-    let next_sheet_editor = editor.clone();
-    let delete_sheet_editor = editor.clone();
     let above_editor = editor.clone();
     let below_editor = editor.clone();
     let delete_editor = editor.clone();
@@ -69,59 +60,6 @@ impl Render for FlowRibbon {
     let clear_all_editor = self.editor.clone();
     let has_active_sheet = self.editor.read(cx).active_sheet().is_some();
     let has_active_cell = self.editor.read(cx).active_cell().is_some();
-    #[allow(
-      clippy::needless_collect,
-      reason = "Release the editor read guard before constructing buttons that clone the editor entity."
-    )]
-    let sheet_types: Vec<_> = self
-      .editor
-      .read(cx)
-      .board()
-      .format
-      .sheet_types
-      .iter()
-      .map(|sheet_type| sheet_type.name.clone())
-      .collect();
-    let sheet_name_input = self.editor.read(cx).active_sheet().and_then(|sheet_id| {
-      let sheet_name = self
-        .editor
-        .read(cx)
-        .board()
-        .sheets
-        .iter()
-        .find(|sheet| sheet.id == sheet_id)?
-        .name
-        .clone();
-      let editor = self.editor.clone();
-      let state = window.use_keyed_state(("flow-sheet-name-input", sheet_id.as_u128() as u64), cx, move |window, cx| {
-        let input = cx.new(|cx| {
-          InputState::new(window, cx)
-            .default_value(sheet_name)
-            .placeholder("Sheet name")
-        });
-        // I-S1: rename commits on Enter/blur, once — per-keystroke commits
-        // spammed the op log and undo stack, and an empty field wrote a
-        // nameless sheet. An emptied field restores the current name.
-        let subscription = cx.subscribe_in(&input, window, move |_: &mut SheetNameInputState, input, event: &InputEvent, window, cx| {
-          if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
-            let name = input.read(cx).value().trim().to_string();
-            if name.is_empty() {
-              let current = editor.read(cx).active_sheet_name().unwrap_or_default();
-              input.update(cx, |input, cx| input.set_value(current, window, cx));
-              return;
-            }
-            if editor.read(cx).active_sheet_name().as_deref() != Some(name.as_str()) {
-              editor.update(cx, |editor, cx| editor.rename_active_sheet(name, cx));
-            }
-          }
-        });
-        SheetNameInputState {
-          input,
-          _subscription: subscription,
-        }
-      });
-      Some(state.read(cx).input.clone())
-    });
     let chip = |chip: crate::ribbon::shared::RibbonChip| chip.build(cx);
     let scrubbing = self.editor.read(cx).history_scrubbing();
     let annotation_tool = self.editor.read(cx).annotation_tool();
@@ -144,28 +82,6 @@ impl Render for FlowRibbon {
         let editor = self.editor.clone();
         move |_: &MouseDownEvent, _, cx| editor.update(cx, |editor, cx| editor.set_annotation_tool(AnnotationTool::None, cx))
       })
-      // S11: peers on OTHER sheets show as colored dots by the switcher.
-      .children({
-        let active_sheet = self.editor.read(cx).active_sheet();
-        let dots: Vec<_> = self
-          .editor
-          .read(cx)
-          .external_presences()
-          .iter()
-          .filter(|presence| presence.sheet.is_some() && presence.sheet != active_sheet)
-          .map(|presence| {
-            gpui::div()
-              .size(gpui::px(8.0))
-              .rounded_full()
-              .bg(gpui::Hsla::from(gpui::rgba((presence.color_rgb << 8) | 0xff)))
-              .into_any_element()
-          })
-          .collect();
-        dots
-      })
-      .when_some(sheet_name_input, |this, input| {
-        this.child(div().w(px(170.0)).child(Input::new(&input).w_full()))
-      })
       // ---- Undo / Redo ----
       .child(
         ribbon_group(false, cx)
@@ -184,44 +100,6 @@ impl Render for FlowRibbon {
                 .disabled(!can_redo),
             )
             .on_click(move |_, _, cx| redo_editor.update(cx, |editor, cx| editor.redo(cx))),
-          ),
-      )
-      // ---- Sheet ----
-      .child(
-        ribbon_group(true, cx)
-          .children(sheet_types.into_iter().enumerate().map(|(index, name)| {
-            let editor = self.editor.clone();
-            chip(RibbonChip::new(
-              ("flow-create-sheet-type", index),
-              format!("New {name}"),
-              format!("Create a {name} sheet"),
-            ))
-            .on_click(move |_, _, cx| editor.update(cx, |editor, cx| editor.create_sheet_of_type(index, cx)))
-          }))
-          .child(
-            chip(
-              RibbonChip::new("flow-move-sheet-left", "◀", "Move this sheet left")
-                .command_shortcut(CommandId::FlowMoveSheetLeft)
-                .disabled(!has_active_sheet),
-            )
-            .on_click(move |_, _, cx| previous_sheet_editor.update(cx, |editor, cx| editor.move_active_sheet(-1, cx))),
-          )
-          .child(
-            chip(
-              RibbonChip::new("flow-move-sheet-right", "▶", "Move this sheet right")
-                .command_shortcut(CommandId::FlowMoveSheetRight)
-                .disabled(!has_active_sheet),
-            )
-            .on_click(move |_, _, cx| next_sheet_editor.update(cx, |editor, cx| editor.move_active_sheet(1, cx))),
-          )
-          .child(
-            chip(
-              RibbonChip::new("flow-delete-sheet", "Delete sheet", "Delete this sheet — every cell on it goes too")
-                .command_shortcut(CommandId::FlowDeleteSheet)
-                .danger(true)
-                .disabled(!has_active_sheet),
-            )
-            .on_click(move |_, window, cx| delete_sheet_editor.update(cx, |editor, cx| editor.confirm_delete_active_sheet(window, cx))),
           ),
       )
       // ---- Argument ----

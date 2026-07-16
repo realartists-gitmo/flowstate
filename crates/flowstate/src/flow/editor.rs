@@ -1127,6 +1127,33 @@ impl FlowEditor {
     }
   }
 
+  /// I-S3: identity-anchored reorder from the sheet strip's drag — land
+  /// `sheet_id` immediately before `before` (`None` = end).
+  pub fn move_sheet_before(&mut self, sheet_id: SheetId, before: Option<SheetId>, cx: &mut Context<Self>) {
+    if before == Some(sheet_id) {
+      return;
+    }
+    let Some(index) = self
+      .board
+      .sheets
+      .iter()
+      .position(|candidate| candidate.id == sheet_id)
+    else {
+      return;
+    };
+    // Already in place → no-op (don't spam the op log with anchor rewrites).
+    let successor = self.board.sheets.get(index + 1).map(|sheet| sheet.id);
+    if before == successor || (before.is_none() && successor.is_none()) {
+      return;
+    }
+    if self
+      .apply_intent(&FlowIntent::MoveSheet { sheet_id, before }, cx)
+      .is_ok()
+    {
+      self.changed(self.active_cell, cx);
+    }
+  }
+
   fn set_cell_bounds(&mut self, cell_id: CellId, bounds: Bounds<gpui::Pixels>, cx: &mut Context<Self>) {
     self.cell_bounds.insert(cell_id, bounds);
     let screen_height = bounds.size.height.as_f32();

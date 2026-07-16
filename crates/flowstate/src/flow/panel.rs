@@ -7,7 +7,7 @@ use gpui_component::{ActiveTheme as _, IconName, Sizable};
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::flow::{FlowEditor, FlowRibbon};
+use crate::flow::{FlowEditor, FlowRibbon, FlowSheetStrip};
 use crate::workspace::Workspace;
 
 pub struct FlowPanel {
@@ -16,6 +16,7 @@ pub struct FlowPanel {
   path: Option<PathBuf>,
   editor: Entity<FlowEditor>,
   ribbon: Entity<FlowRibbon>,
+  sheet_strip: Entity<FlowSheetStrip>,
   workspace: WeakEntity<Workspace>,
   focus_handle: FocusHandle,
   active: bool,
@@ -31,6 +32,7 @@ impl FlowPanel {
     cx: &mut Context<Self>,
   ) -> Self {
     let ribbon = cx.new(|cx| FlowRibbon::new(editor.clone(), window, cx));
+    let sheet_strip = cx.new(|cx| FlowSheetStrip::new(editor.clone(), window, cx));
     let title = title
       .map(Into::into)
       .unwrap_or_else(|| title_for_path(path.as_ref()));
@@ -40,6 +42,7 @@ impl FlowPanel {
       path,
       editor,
       ribbon,
+      sheet_strip,
       workspace,
       focus_handle: cx.focus_handle(),
       active: false,
@@ -178,9 +181,13 @@ impl Panel for FlowPanel {
 
 impl Render for FlowPanel {
   fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    // I-S3: the sheet strip rides the board's bottom edge.
     div()
       .size_full()
+      .flex()
+      .flex_col()
       .bg(cx.theme().background)
-      .child(self.editor.clone())
+      .child(div().flex_1().min_h_0().child(self.editor.clone()))
+      .child(self.sheet_strip.clone())
   }
 }
