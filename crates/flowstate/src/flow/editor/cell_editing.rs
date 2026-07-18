@@ -1,5 +1,5 @@
 use flowstate_flow::CellId;
-use gpui::{AppContext as _, Context};
+use gpui::{AppContext as _, Context, px};
 use gpui_component::ActiveTheme as _;
 
 use crate::{
@@ -8,6 +8,7 @@ use crate::{
   rich_text_element::{EditorEvent, RichTextEditor},
 };
 
+use super::grid_layout::{DEFAULT_COLUMN_WIDTH, MIN_COLUMN_WIDTH, cell_text_wrap_width};
 use super::{FlowEditor, FlowEditorEvent};
 
 impl FlowEditor {
@@ -20,15 +21,25 @@ impl FlowEditor {
     if self.cell_editors.contains_key(&cell_id) {
       return;
     }
-    let Some(uses_summary_projection) = self.board.sheets.iter().find_map(|sheet| {
-      sheet
-        .cells
+    let Some((uses_summary_projection, column_width)) = self.board.sheets.iter().find_map(|sheet| {
+      let cell = sheet.find_cell(cell_id)?;
+      let column_width = sheet
+        .columns
         .iter()
-        .find(|cell| cell.id == cell_id)
-        .map(|cell| cell.summary.uses_summary_projection)
+        .find(|column| column.id == cell.column_id)
+        .and_then(|column| column.width)
+        .unwrap_or(DEFAULT_COLUMN_WIDTH)
+        .max(MIN_COLUMN_WIDTH);
+      Some((cell.summary.uses_summary_projection, column_width))
     }) else {
       return;
     };
+    // Seed the editor's wrap width to the cell's real content box (spec D4): a
+    // fresh editor has never been laid out, so without this it falls back to
+    // 900px, wraps a multi-line cell to fewer lines, and the autofit row
+    // collapses/shifts for a frame on focus. This is the SAME width its idle
+    // display element wraps at, so entering a cell is a no-op on height.
+    let seed_width = px(cell_text_wrap_width(column_width, self.board_zoom()));
     let Ok(mut document) = self.handle.cell_projection(cell_id) else {
       return;
     };
@@ -57,6 +68,7 @@ impl FlowEditor {
         cx,
       );
       editor.set_write_authority(authority, document, cx);
+      editor.seed_layout_width(seed_width, cx);
       editor
     });
     // Content commits already happened through the authority by the time this

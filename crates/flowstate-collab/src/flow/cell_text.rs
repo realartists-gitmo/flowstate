@@ -117,19 +117,21 @@ impl CellTextContext {
 }
 
 /// Apply one editor intent as minimal ops. Returns the (still-uncommitted)
-/// mutation; the runtime owns commit/refresh/streams/publish.
-pub fn execute_cell_text(doc: &LoroDoc, cell_id: CellId, intent: &LocalIntent) -> Result<(), WriteRejected> {
+/// mutation and the post-edit caret flow position (unicode index into the
+/// cell text, `None` when the caret doesn't move); the runtime owns
+/// commit/refresh/streams/publish + mapping the caret to a projection offset.
+pub fn execute_cell_text(doc: &LoroDoc, cell_id: CellId, intent: &LocalIntent) -> Result<Option<usize>, WriteRejected> {
   let mut ctx = CellTextContext::resolve(doc, cell_id)?;
   match intent {
     LocalIntent::InsertText(insert) => insert_text(&mut ctx, insert),
     LocalIntent::DeleteRange(delete) => delete_range(&mut ctx, delete),
-    LocalIntent::SetMarks(marks) => set_marks(&ctx, marks),
-    LocalIntent::SetParagraphStyle(style) => set_paragraph_style(&ctx, style),
-    LocalIntent::SetParagraphStyles(styles) => set_paragraph_styles(&ctx, styles),
+    LocalIntent::SetMarks(marks) => set_marks(&ctx, marks).map(|()| None),
+    LocalIntent::SetParagraphStyle(style) => set_paragraph_style(&ctx, style).map(|()| None),
+    LocalIntent::SetParagraphStyles(styles) => set_paragraph_styles(&ctx, styles).map(|()| None),
     LocalIntent::SplitParagraph(split) => split_paragraph(&mut ctx, split),
     LocalIntent::JoinParagraphs(join) => join_paragraphs(&mut ctx, join),
     LocalIntent::InsertRichFragment(fragment) => insert_rich_fragment(&mut ctx, fragment),
-    LocalIntent::ReplaceMatches(matches) => replace_matches(&mut ctx, matches),
+    LocalIntent::ReplaceMatches(matches) => replace_matches(&mut ctx, matches).map(|()| None),
     LocalIntent::InsertObject(_)
     | LocalIntent::ReplaceObject(_)
     | LocalIntent::DeleteBlocks(_)
@@ -216,7 +218,7 @@ pub(super) fn repair_missing_paragraph_records(doc: &LoroDoc, cell_id: CellId, m
   written
 }
 
-fn insert_text(ctx: &mut CellTextContext, intent: &InsertTextIntent) -> Result<(), WriteRejected> {
+fn insert_text(ctx: &mut CellTextContext, intent: &InsertTextIntent) -> Result<Option<usize>, WriteRejected> {
   if intent.text.is_empty() {
     return Err(WriteRejected::EmptyIntent);
   }
@@ -224,15 +226,17 @@ fn insert_text(ctx: &mut CellTextContext, intent: &InsertTextIntent) -> Result<(
     return Err(WriteRejected::StructureViolation("plain inserts must not contain structural newlines"));
   }
   let pos = ctx.resolve_anchor(&intent.at)?.max(1); // never before the seed sentinel
+  let inserted = intent.text.chars().count();
   ctx.text.insert(pos, &intent.text).map_err(loro_err)?;
   if let Some(styles) = intent.style_override {
-    apply_run_styles(&ctx.text, pos..pos + intent.text.chars().count(), styles)?;
+    apply_run_styles(&ctx.text, pos..pos + inserted, styles)?;
   }
   ctx.refresh_len();
-  Ok(())
+  // Caret lands just after the inserted text.
+  Ok(Some(pos + inserted))
 }
 
-fn delete_range(ctx: &mut CellTextContext, intent: &DeleteRangeIntent) -> Result<(), WriteRejected> {
+fn delete_range(ctx: &mut CellTextContext, intent: &DeleteRangeIntent) -> Result<Option<usize>, WriteRejected> {
   let a = ctx.resolve_anchor(&intent.start)?;
   let b = ctx.resolve_anchor(&intent.end)?;
   let (start, end) = if a <= b { (a, b) } else { (b, a) };
@@ -258,7 +262,8 @@ fn delete_range(ctx: &mut CellTextContext, intent: &DeleteRangeIntent) -> Result
     ctx.boundaries_by_key.remove(&key);
   }
   ctx.refresh_len();
-  Ok(())
+  // Caret collapses to the start of the removed range.
+  Ok(Some(start))
 }
 
 fn set_marks(ctx: &CellTextContext, intent: &SetMarksIntent) -> Result<(), WriteRejected> {
@@ -354,7 +359,7 @@ fn set_paragraph_styles(ctx: &CellTextContext, intent: &SetParagraphStylesIntent
 
 /// Split: insert a boundary sentinel, scrub run styles off it (sentinel
 /// hygiene), style it, and mint the new paragraph's registry record.
-fn split_paragraph(ctx: &mut CellTextContext, intent: &SplitParagraphIntent) -> Result<(), WriteRejected> {
+fn split_paragraph(ctx: &mut CellTextContext, intent: &SplitParagraphIntent) -> Result<Option<usize>, WriteRejected> {
   let pos = ctx.resolve_anchor(&intent.at)?.max(1);
   ctx.text.insert(pos, "\n").map_err(loro_err)?;
   apply_run_styles(&ctx.text, pos..pos + 1, RunStyles::default())?;
@@ -368,7 +373,8 @@ fn split_paragraph(ctx: &mut CellTextContext, intent: &SplitParagraphIntent) -> 
     .map_err(loro_err)?;
   mint_paragraph_record(ctx, pos)?;
   ctx.refresh_len();
-  Ok(())
+  // Caret lands at the start of the new paragraph, just past its sentinel.
+  Ok(Some(pos + 1))
 }
 
 fn mint_paragraph_record(ctx: &mut CellTextContext, boundary: usize) -> Result<(), WriteRejected> {
@@ -390,7 +396,7 @@ fn mint_paragraph_record(ctx: &mut CellTextContext, boundary: usize) -> Result<(
   Ok(())
 }
 
-fn join_paragraphs(ctx: &mut CellTextContext, intent: &JoinParagraphsIntent) -> Result<(), WriteRejected> {
+fn join_paragraphs(ctx: &mut CellTextContext, intent: &JoinParagraphsIntent) -> Result<Option<usize>, WriteRejected> {
   let first = ctx.paragraph_boundary(intent.first)?;
   let second = ctx.paragraph_boundary(intent.second)?;
   if second <= first {
@@ -409,10 +415,11 @@ fn join_paragraphs(ctx: &mut CellTextContext, intent: &JoinParagraphsIntent) -> 
   }
   ctx.boundaries_by_key.remove(&key);
   ctx.refresh_len();
-  Ok(())
+  // Caret lands at the seam where the boundary sentinel was removed.
+  Ok(Some(second))
 }
 
-fn insert_rich_fragment(ctx: &mut CellTextContext, intent: &InsertRichFragmentIntent) -> Result<(), WriteRejected> {
+fn insert_rich_fragment(ctx: &mut CellTextContext, intent: &InsertRichFragmentIntent) -> Result<Option<usize>, WriteRejected> {
   if intent.blocks.is_empty() {
     return Err(WriteRejected::EmptyIntent);
   }
@@ -448,7 +455,8 @@ fn insert_rich_fragment(ctx: &mut CellTextContext, intent: &InsertRichFragmentIn
     }
   }
   ctx.refresh_len();
-  Ok(())
+  // Caret lands at the end of the inserted fragment.
+  Ok(Some(pos))
 }
 
 /// Back-to-front so earlier ranges never shift; unresolvable or reordered

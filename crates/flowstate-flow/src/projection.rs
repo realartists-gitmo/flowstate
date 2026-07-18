@@ -1,29 +1,31 @@
-//! The board PROJECTION: the read model every consumer (editor, previews,
+//! The grid PROJECTION: the read model every consumer (editor, previews,
 //! summaries) sees. Materialized from the Loro doc by
-//! [`crate::loro_projection`]; never the write path (flow architecture spec
-//! Part 2 — the CRDT is the single source of truth, projections are derived).
+//! [`crate::loro_projection`]; never the write path (excel flow spec §1 —
+//! the CRDT is the single source of truth, projections are derived).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
-use anyhow::{Context as _, bail};
+use anyhow::bail;
 use serde::{Deserialize, Serialize};
 
-use crate::format::{CellId, ColumnId, FlowFormat, SheetId, SheetTypeId, StrokeId};
+use crate::format::{ArgumentSide, CellId, ColumnId, FlowFormat, RowId, SheetId, SheetTypeId, StrokeId};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AnnotationOriginator(pub String);
 
+/// A point in STROKE-LOCAL pixel space (zoom 1). Annotation geometry is a
+/// constant point set; the grid never projects into it (rigid-body law, D6).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct BoardPoint {
+pub struct StrokePoint {
   pub x: f32,
   pub y: f32,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct BoardRect {
-  pub min: BoardPoint,
-  pub max: BoardPoint,
+pub struct StrokeRect {
+  pub min: StrokePoint,
+  pub max: StrokePoint,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -33,14 +35,30 @@ pub struct StrokeStyle {
   pub opacity: f32,
 }
 
+/// The ONE grid-projected point of a stroke (D6): the slot under the
+/// stroke's first point at capture time, plus a pixel offset from that
+/// slot's origin at zoom 1. Everything else about the stroke is anchored
+/// relative to this point, so structure changes can only TRANSLATE the ink —
+/// deformation would require per-point grid dependence the shape does not
+/// have.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GridAnchor {
+  pub row_id: RowId,
+  pub column_id: ColumnId,
+  pub offset: StrokePoint,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AnnotationStroke {
   pub id: StrokeId,
   pub sheet_id: SheetId,
   pub originator: AnnotationOriginator,
-  pub points: Vec<BoardPoint>,
+  pub anchor: GridAnchor,
+  /// Stroke-local pixels relative to the anchor point.
+  pub points: Vec<StrokePoint>,
   pub style: StrokeStyle,
-  pub bbox: BoardRect,
+  /// Stroke-local bounding box.
+  pub bbox: StrokeRect,
 }
 
 /// Cached, cheap read model of a cell's rich text — derived from the cell's
@@ -51,7 +69,7 @@ pub struct CellSummary {
   pub summary_text: Arc<str>,
   pub uses_summary_projection: bool,
   /// Every non-empty run in the cell carries strikethrough — the board-level
-  /// "struck" state (v2: strike is a text mark, so concurrent typing merges
+  /// "struck" state (strike is a text mark, so concurrent typing merges
   /// under it char-level instead of clobbering a whole-cell blob).
   pub struck: bool,
   pub is_empty: bool,
@@ -68,15 +86,41 @@ impl Default for CellSummary {
   }
 }
 
-/// A cell's board-level identity: WHERE it lives (column + flat sheet order,
-/// held by the sheet) and WHO it answers (`parent_id`). Rich text lives in
-/// the Loro doc only; `summary` is the derived read model.
+/// A cell: durable identity + a grid ADDRESS (D1 placement map). Rich text
+/// lives in the Loro doc only; `summary` is the derived read model.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Cell {
   pub id: CellId,
+  pub row_id: RowId,
   pub column_id: ColumnId,
-  pub parent_id: Option<CellId>,
   pub summary: CellSummary,
+}
+
+/// A sheet column as materialized (per-sheet records seeded from the sheet
+/// type at creation; user columns join the same list).
+#[derive(Clone, Debug, PartialEq)]
+pub struct GridColumn {
+  pub id: ColumnId,
+  pub label: String,
+  pub side: ArgumentSide,
+  /// Manual width override; `None` = automatic.
+  pub width: Option<f32>,
+}
+
+/// One sheet-global row. `cells` is aligned with `Sheet::columns` — direct
+/// grid indexing for the renderer, no lookups on the paint path.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GridRow {
+  pub id: RowId,
+  /// D4 manual height override; `None` = autofit.
+  pub height_override: Option<f32>,
+  pub cells: Vec<Option<Cell>>,
+}
+
+impl GridRow {
+  pub fn is_empty(&self) -> bool {
+    self.cells.iter().all(Option::is_none)
+  }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -84,9 +128,63 @@ pub struct Sheet {
   pub id: SheetId,
   pub name: String,
   pub sheet_type_id: SheetTypeId,
-  /// Flat sheet order (the `cell_order` `MovableList`, normalized).
-  pub cells: Vec<Cell>,
+  pub columns: Vec<GridColumn>,
+  pub rows: Vec<GridRow>,
   pub annotations: Vec<AnnotationStroke>,
+}
+
+impl Sheet {
+  pub fn column_index(&self, column_id: ColumnId) -> Option<usize> {
+    self.columns.iter().position(|column| column.id == column_id)
+  }
+
+  pub fn row_index(&self, row_id: RowId) -> Option<usize> {
+    self.rows.iter().position(|row| row.id == row_id)
+  }
+
+  pub fn slot(&self, row_ix: usize, column_ix: usize) -> Option<&Cell> {
+    self.rows.get(row_ix)?.cells.get(column_ix)?.as_ref()
+  }
+
+  pub fn slot_by_ids(&self, row_id: RowId, column_id: ColumnId) -> Option<&Cell> {
+    self.slot(self.row_index(row_id)?, self.column_index(column_id)?)
+  }
+
+  pub fn cells(&self) -> impl Iterator<Item = &Cell> {
+    self
+      .rows
+      .iter()
+      .flat_map(|row| row.cells.iter().filter_map(Option::as_ref))
+  }
+
+  pub fn find_cell(&self, cell_id: CellId) -> Option<&Cell> {
+    self.cells().find(|cell| cell.id == cell_id)
+  }
+
+  /// (row index, column index) of a cell.
+  pub fn cell_position(&self, cell_id: CellId) -> Option<(usize, usize)> {
+    for (row_ix, row) in self.rows.iter().enumerate() {
+      for (column_ix, slot) in row.cells.iter().enumerate() {
+        if slot.as_ref().is_some_and(|cell| cell.id == cell_id) {
+          return Some((row_ix, column_ix));
+        }
+      }
+    }
+    None
+  }
+
+  /// Resolve a stroke anchor to a live (row index, column index) — the ONE
+  /// grid projection an annotation gets (D6). Deterministic fallbacks for
+  /// dead anchors: rows fall back to the LAST live row (the nearest thing to
+  /// "just above where it was" that needs no history), columns to the first
+  /// column; an empty grid resolves to origin (0, 0).
+  pub fn resolve_anchor(&self, anchor: &GridAnchor) -> (usize, usize) {
+    let row_ix = self
+      .row_index(anchor.row_id)
+      .unwrap_or_else(|| self.rows.len().saturating_sub(1));
+    let column_ix = self.column_index(anchor.column_id).unwrap_or(0);
+    (row_ix, column_ix)
+  }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -94,9 +192,6 @@ pub struct FlowBoardProjection {
   pub format: FlowFormat,
   pub sheets: Vec<Sheet>,
 }
-
-/// Transitional alias for pre-v2 call sites; new code names the board.
-pub type FlowProjection = FlowBoardProjection;
 
 impl Default for FlowBoardProjection {
   fn default() -> Self {
@@ -112,22 +207,10 @@ impl FlowBoardProjection {
     self.sheets.iter().find(|sheet| sheet.id == id)
   }
 
-  pub fn sheet_column_ids(&self, sheet_id: SheetId) -> anyhow::Result<Vec<ColumnId>> {
-    let sheet = self.sheet(sheet_id).context("unknown sheet")?;
-    let definition = self
-      .format
-      .sheet_type(sheet.sheet_type_id)
-      .context("unknown sheet type")?;
-    Ok(definition.columns.iter().map(|column| column.id).collect())
-  }
-
   /// Structural invariants the normalized materializer guarantees; used by
   /// tests and the schema-level write wrapper as a belt-and-suspenders check.
-  /// (Unlike v1 this never deserializes cell content — content correctness is
-  /// the cell materializer's concern.)
   pub fn validate(&self) -> anyhow::Result<()> {
     let mut ids = HashSet::new();
-    let mut column_levels = HashMap::new();
     if !ids.insert(self.format.id) {
       bail!("duplicate format id");
     }
@@ -135,61 +218,36 @@ impl FlowBoardProjection {
       if !ids.insert(sheet_type.id) || sheet_type.columns.is_empty() {
         bail!("invalid sheet type {}", sheet_type.name);
       }
-      for (level, column) in sheet_type.columns.iter().enumerate() {
-        if !ids.insert(column.id) {
-          bail!("duplicate column id");
-        }
-        column_levels.insert(column.id, level);
-      }
     }
     for sheet in &self.sheets {
-      let definition = self
-        .format
-        .sheet_type(sheet.sheet_type_id)
-        .with_context(|| format!("sheet {} references unknown type", sheet.name))?;
       if !ids.insert(sheet.id) {
         bail!("duplicate sheet id");
       }
-      let valid_columns: HashSet<_> = definition.columns.iter().map(|column| column.id).collect();
-      let cells: HashMap<_, _> = sheet.cells.iter().map(|cell| (cell.id, cell)).collect();
-      if cells.len() != sheet.cells.len() {
-        bail!("sheet {} contains duplicate cell ids", sheet.name);
+      if sheet.columns.is_empty() {
+        bail!("sheet {} has no columns", sheet.name);
       }
-      for cell in &sheet.cells {
-        if !valid_columns.contains(&cell.column_id) {
-          bail!("cell references a column outside its sheet type");
+      let mut column_ids = HashSet::new();
+      for column in &sheet.columns {
+        if !column_ids.insert(column.id) {
+          bail!("sheet {} contains duplicate column ids", sheet.name);
         }
-        if let Some(parent_id) = cell.parent_id {
-          let parent = cells
-            .get(&parent_id)
-            .context("cell references missing parent")?;
-          let child_level = column_levels[&cell.column_id];
-          let parent_level = column_levels[&parent.column_id];
-          if child_level != parent_level + 1 {
-            bail!("parent-child link must connect adjacent columns");
+      }
+      let mut row_ids = HashSet::new();
+      let mut cell_ids = HashSet::new();
+      for (row_ix, row) in sheet.rows.iter().enumerate() {
+        if !row_ids.insert(row.id) {
+          bail!("sheet {} contains duplicate row ids", sheet.name);
+        }
+        if row.cells.len() != sheet.columns.len() {
+          bail!("sheet {} row {row_ix} is not aligned with its columns", sheet.name);
+        }
+        for (column_ix, slot) in row.cells.iter().enumerate() {
+          let Some(cell) = slot else { continue };
+          if !cell_ids.insert(cell.id) {
+            bail!("sheet {} contains duplicate cell ids", sheet.name);
           }
-        }
-      }
-      for column in &definition.columns {
-        let column_cells: Vec<_> = sheet
-          .cells
-          .iter()
-          .filter(|cell| cell.column_id == column.id)
-          .collect();
-        let mut completed_parents = HashSet::new();
-        let mut current_parent = None;
-        for cell in column_cells {
-          if cell.parent_id != current_parent {
-            if let Some(parent) = current_parent {
-              completed_parents.insert(parent);
-            }
-            if cell
-              .parent_id
-              .is_some_and(|parent| completed_parents.contains(&parent))
-            {
-              bail!("orphan or unrelated cell breaks a sibling run");
-            }
-            current_parent = cell.parent_id;
+          if cell.row_id != row.id || cell.column_id != sheet.columns[column_ix].id {
+            bail!("cell {} address disagrees with its slot", cell.id);
           }
         }
       }
@@ -207,20 +265,27 @@ impl FlowBoardProjection {
 
 /// Defects the TOTAL materializer repaired (in projection space) while
 /// normalizing a merged state — the .db8 quarantine philosophy: never fail,
-/// converge deterministically, report what was mended (flow architecture spec
-/// Part 2.1, normalization law).
+/// converge deterministically, report what was mended (excel flow spec §3).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FlowDefect {
   SheetMissingFromOrder { sheet: SheetId },
   OrderEntryMissingSheet { entry: String },
   SheetTypeUnknown { sheet: SheetId },
-  CellMissingFromOrder { sheet: SheetId, cell: CellId },
-  OrderEntryMissingCell { sheet: SheetId, entry: String },
-  ParentCycleBroken { cell: CellId },
-  DanglingParentOrphaned { cell: CellId, parent: CellId },
-  ColumnAdjacencyOrphaned { cell: CellId },
-  RunSplitRegrouped { cell: CellId },
+  ColumnMissingFromOrder { sheet: SheetId, column: ColumnId },
+  OrderEntryMissingColumn { sheet: SheetId, entry: String },
+  ColumnsSeededFromType { sheet: SheetId },
+  OrderEntryInvalidRow { sheet: SheetId, entry: String },
+  /// A cell referenced a row absent from `row_order`; the row was
+  /// materialized as a phantom at the bottom of the grid (repair pass writes
+  /// it into the order for real).
+  RowMissingFromOrder { sheet: SheetId, row: RowId },
+  /// A cell record had no usable row address at all; it was assigned its
+  /// deterministic bump row.
+  CellRowInvalid { cell: CellId },
   UnknownColumnReassigned { cell: CellId },
+  /// D2: this cell lost a slot collision and was bumped into its
+  /// deterministically synthesized row below the contested one.
+  SlotCollisionBumped { cell: CellId, row: RowId, column: ColumnId },
   CellFlowInvalid { cell: CellId, error: String },
 }
 
@@ -230,13 +295,16 @@ impl std::fmt::Display for FlowDefect {
       Self::SheetMissingFromOrder { sheet } => write!(f, "sheet {sheet} was missing from the order list"),
       Self::OrderEntryMissingSheet { entry } => write!(f, "sheet order entry `{entry}` has no record"),
       Self::SheetTypeUnknown { sheet } => write!(f, "sheet {sheet} references an unknown sheet type"),
-      Self::CellMissingFromOrder { sheet, cell } => write!(f, "cell {cell} was missing from sheet {sheet}'s order"),
-      Self::OrderEntryMissingCell { sheet, entry } => write!(f, "cell order entry `{entry}` in sheet {sheet} has no record"),
-      Self::ParentCycleBroken { cell } => write!(f, "parent cycle broken at cell {cell}"),
-      Self::DanglingParentOrphaned { cell, parent } => write!(f, "cell {cell} referenced missing parent {parent}"),
-      Self::ColumnAdjacencyOrphaned { cell } => write!(f, "cell {cell} orphaned: parent link crossed non-adjacent columns"),
-      Self::RunSplitRegrouped { cell } => write!(f, "cell {cell} relocated to regroup a split sibling run"),
-      Self::UnknownColumnReassigned { cell } => write!(f, "cell {cell} referenced a column outside its sheet type"),
+      Self::ColumnMissingFromOrder { sheet, column } => write!(f, "column {column} was missing from sheet {sheet}'s order"),
+      Self::OrderEntryMissingColumn { sheet, entry } => write!(f, "column order entry `{entry}` in sheet {sheet} has no record"),
+      Self::ColumnsSeededFromType { sheet } => write!(f, "sheet {sheet} had no live columns; seeded from its sheet type"),
+      Self::OrderEntryInvalidRow { sheet, entry } => write!(f, "row order entry `{entry}` in sheet {sheet} is not a row id"),
+      Self::RowMissingFromOrder { sheet, row } => write!(f, "row {row} was missing from sheet {sheet}'s order"),
+      Self::CellRowInvalid { cell } => write!(f, "cell {cell} had no usable row address"),
+      Self::UnknownColumnReassigned { cell } => write!(f, "cell {cell} referenced a column outside its sheet"),
+      Self::SlotCollisionBumped { cell, row, column } => {
+        write!(f, "cell {cell} lost the slot ({row}, {column}) and was bumped to a synthesized row")
+      },
       Self::CellFlowInvalid { cell, error } => write!(f, "cell {cell} rich text failed to materialize: {error}"),
     }
   }

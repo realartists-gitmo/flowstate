@@ -8,7 +8,7 @@
 mod tests {
   use flowstate_collab::flow::{FlowDocHandle, FlowRuntime};
   use flowstate_document::{InputParagraph, InputRun, RunStyles};
-  use flowstate_flow::{CellPlacement, CellSeed, FlowIntent};
+  use flowstate_flow::{CellSeed, FlowIntent};
   use uuid::Uuid;
 
   #[test]
@@ -25,13 +25,23 @@ mod tests {
           sheet_type_id: sheet_type,
         })
         .unwrap();
+      let rows = [Uuid::from_u128(0x10), Uuid::from_u128(0x11)];
+      handle
+        .apply(&FlowIntent::InsertRows {
+          sheet_id: sheet,
+          before: None,
+          row_ids: rows.to_vec(),
+        })
+        .unwrap();
+      let column = handle.board_projection().unwrap().sheet(sheet).unwrap().columns[0].id;
       let cells = [Uuid::from_u128(2), Uuid::from_u128(3)];
       for (i, &cell) in cells.iter().enumerate() {
         handle
           .apply(&FlowIntent::AddCell {
             sheet_id: sheet,
             cell_id: cell,
-            placement: CellPlacement::SheetEnd { column_index: 0 },
+            row_id: rows[i],
+            column_id: column,
             seed: CellSeed::Paragraphs(vec![InputParagraph {
               style: flowstate_document::PARAGRAPH_TAG,
               runs: vec![InputRun {
@@ -54,22 +64,14 @@ mod tests {
       }
       handle.undo_group_end().unwrap();
       let board = handle.board_projection().unwrap();
-      assert!(board.sheets[0].cells.iter().all(|c| c.summary.struck), "round {round}: strikes applied");
+      assert!(board.sheets[0].cells().all(|c| c.summary.struck), "round {round}: strikes applied");
       assert!(handle.undo().unwrap(), "round {round}: undo available");
       let board = handle.board_projection().unwrap();
-      if !board.sheets[0].cells.iter().all(|c| !c.summary.struck) {
-        let still: Vec<_> = board.sheets[0]
-          .cells
-          .iter()
-          .map(|c| c.summary.struck)
-          .collect();
+      if !board.sheets[0].cells().all(|c| !c.summary.struck) {
+        let still: Vec<_> = board.sheets[0].cells().map(|c| c.summary.struck).collect();
         let undo2 = handle.undo().unwrap();
         let board2 = handle.board_projection().unwrap();
-        let after2: Vec<_> = board2.sheets[0]
-          .cells
-          .iter()
-          .map(|c| c.summary.struck)
-          .collect();
+        let after2: Vec<_> = board2.sheets[0].cells().map(|c| c.summary.struck).collect();
         panic!("round {round}: one undo left struck={still:?}; second undo (changed={undo2}) -> {after2:?}");
       }
     }

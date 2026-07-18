@@ -10,6 +10,7 @@ pub type FormatId = Uuid;
 pub type SheetTypeId = Uuid;
 pub type SheetId = Uuid;
 pub type ColumnId = Uuid;
+pub type RowId = Uuid;
 pub type CellId = Uuid;
 pub type StrokeId = Uuid;
 

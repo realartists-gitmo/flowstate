@@ -15,8 +15,8 @@ use std::sync::Arc;
 
 use flowstate_flow::CellId;
 use gpui_flowtext::{
-  DocumentOffset, EditorSelection, LocalCommit, LocalIntent, LocalWriteAuthority, LocalWriteOutcome, ProjectionReplace, ProjectionStreamItem,
-  UndoOutcome, WriteRejected,
+  CursorEndpoint, DocumentOffset, EditorSelection, LocalCommit, LocalIntent, LocalWriteAuthority, LocalWriteOutcome, ProjectionReplace,
+  ProjectionStreamItem, SelectionAffinity, SelectionSnapshot, UndoOutcome, VisualGravity, WriteRejected,
 };
 use loro::cursor::{Cursor, Side};
 use loro::{ContainerTrait as _, LoroDoc};
@@ -38,7 +38,7 @@ impl FlowCellAuthority {
     self.cell_id
   }
 
-  fn cell_text(doc: &LoroDoc, cell_id: CellId) -> Option<loro::LoroText> {
+  pub(crate) fn cell_text(doc: &LoroDoc, cell_id: CellId) -> Option<loro::LoroText> {
     let record = flowstate_flow::loro_schema::cell_record(doc, cell_id)?;
     let flow = flowstate_flow::loro_schema::cell_flow(&record)?;
     flow
@@ -96,6 +96,23 @@ impl LocalWriteAuthority for FlowCellAuthority {
       .map_err(|_| WriteRejected::GatePoisoned)?;
     let outcome = guard.apply_cell_text(self.cell_id, &intent)?;
     drop(guard);
+    // The post-edit caret (spec §8): map the runtime's flow-position back to a
+    // projection offset and carry its Loro cursor so the editor advances the
+    // caret instead of stranding it at the pre-edit position.
+    let selection_after = outcome.caret.as_ref().map(|(flow_pos, cursor_bytes)| {
+      let offset = Self::offset_for_flow_pos(&outcome.replace.document, *flow_pos);
+      let endpoint = CursorEndpoint {
+        cursor: cursor_bytes.clone(),
+        delta: 0,
+        affinity: SelectionAffinity::Neutral,
+        gravity: VisualGravity::Neutral,
+        offset,
+      };
+      SelectionSnapshot {
+        anchor: endpoint.clone(),
+        head: endpoint,
+      }
+    });
     let commit = LocalCommit {
       patches: gpui_flowtext::ProjectionPatchBatch {
         transaction_id: 0,
@@ -105,7 +122,7 @@ impl LocalWriteAuthority for FlowCellAuthority {
       },
       frontier: outcome.replace.frontier.clone(),
       version_vector: outcome.replace.version_vector.clone(),
-      selection_after: None,
+      selection_after,
       counters: gpui_flowtext::IntentCounters {
         full_rebuild: true,
         ..Default::default()
@@ -220,4 +237,7 @@ impl LocalWriteAuthority for FlowCellAuthority {
 /// authority to build its outcome.
 pub struct CellTextCommit {
   pub replace: ProjectionReplace,
+  /// Post-edit caret: `(flow-unicode position, encoded Loro cursor)`. `None`
+  /// when the intent doesn't move the caret (pure styling).
+  pub caret: Option<(usize, Vec<u8>)>,
 }

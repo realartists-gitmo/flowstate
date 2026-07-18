@@ -12,7 +12,7 @@ mod tests {
   use flowstate_collab::local_write::GateHolder;
   use flowstate_document::{InputParagraph, InputRun, RunStyles};
   use flowstate_flow::{
-    AnnotationOriginator, AnnotationStroke, BoardPoint, BoardRect, CellId, CellPlacement, CellSeed, FlowDropIntent, FlowIntent, SheetId,
+    AnnotationOriginator, AnnotationStroke, CellId, CellSeed, ColumnId, FlowIntent, GridAnchor, RowId, SheetId, StrokePoint, StrokeRect,
     StrokeStyle,
   };
   use uuid::Uuid;
@@ -39,11 +39,17 @@ mod tests {
   fn board_signature(board: &flowstate_flow::FlowBoardProjection) -> Vec<String> {
     let mut lines = Vec::new();
     for sheet in &board.sheets {
-      lines.push(format!("sheet {} name={:?} cells={}", sheet.id, sheet.name, sheet.cells.len()));
-      for cell in &sheet.cells {
+      lines.push(format!(
+        "sheet {} name={:?} rows={} cells={}",
+        sheet.id,
+        sheet.name,
+        sheet.rows.len(),
+        sheet.cells().count()
+      ));
+      for cell in sheet.cells() {
         lines.push(format!(
-          "  cell {} col={} parent={:?} struck={} empty={} summary={:?}",
-          cell.id, cell.column_id, cell.parent_id, cell.summary.struck, cell.summary.is_empty, cell.summary.summary_text
+          "  cell {} col={} row={} struck={} empty={} summary={:?}",
+          cell.id, cell.column_id, cell.row_id, cell.summary.struck, cell.summary.is_empty, cell.summary.summary_text
         ));
       }
       lines.push(format!("  annotations={}", sheet.annotations.len()));
@@ -123,7 +129,25 @@ mod tests {
       .board_projection()
       .unwrap()
       .sheet(sheet)
-      .map(|sheet| sheet.cells.iter().map(|cell| cell.id).collect())
+      .map(|sheet| sheet.cells().map(|cell| cell.id).collect())
+      .unwrap_or_default()
+  }
+
+  fn live_rows(handle: &FlowDocHandle, sheet: SheetId) -> Vec<RowId> {
+    handle
+      .board_projection()
+      .unwrap()
+      .sheet(sheet)
+      .map(|sheet| sheet.rows.iter().map(|row| row.id).collect())
+      .unwrap_or_default()
+  }
+
+  fn live_columns(handle: &FlowDocHandle, sheet: SheetId) -> Vec<ColumnId> {
+    handle
+      .board_projection()
+      .unwrap()
+      .sheet(sheet)
+      .map(|sheet| sheet.columns.iter().map(|column| column.id).collect())
       .unwrap_or_default()
   }
 
@@ -146,6 +170,13 @@ mod tests {
         sheet_type_id: sheet_type,
       })
       .unwrap();
+    seed_handle
+      .apply(&FlowIntent::InsertRows {
+        sheet_id: sheet,
+        before: None,
+        row_ids: (0..4).map(|_| rng.uuid()).collect(),
+      })
+      .unwrap();
     let snapshot = {
       let guard = seed_handle
         .gate()
@@ -163,38 +194,35 @@ mod tests {
         let ops = 1 + rng.below(3);
         for _ in 0..ops {
           let cells = live_cells(peer, sheet);
-          let roll = rng.below(8);
+          let rows = live_rows(peer, sheet);
+          let columns = live_columns(peer, sheet);
+          let roll = rng.below(10);
           let result: Result<(), String> = match roll {
-            0 | 1 => {
-              let cell_id = rng.uuid();
-              let placement = if cells.is_empty() || rng.below(3) == 0 {
-                CellPlacement::SheetEnd { column_index: rng.below(3) }
-              } else {
-                CellPlacement::After(cells[rng.below(cells.len())])
-              };
+            0 | 1 if !rows.is_empty() && !columns.is_empty() => {
               minted += 1;
               peer
                 .apply(&FlowIntent::AddCell {
                   sheet_id: sheet,
-                  cell_id,
-                  placement,
+                  cell_id: rng.uuid(),
+                  row_id: rows[rng.below(rows.len())],
+                  column_id: columns[rng.below(columns.len())],
                   seed: CellSeed::Paragraphs(paragraphs(&format!("r{round} p{peer_ix} c{minted}"))),
                 })
                 .map(|_| ())
                 .map_err(|error| error.to_string())
             },
-            2 if !cells.is_empty() => {
-              let parent = cells[rng.below(cells.len())];
-              peer
-                .apply(&FlowIntent::AddCell {
-                  sheet_id: sheet,
-                  cell_id: rng.uuid(),
-                  placement: CellPlacement::LastChildOf(parent),
-                  seed: CellSeed::Empty,
-                })
-                .map(|_| ())
-                .map_err(|error| error.to_string())
-            },
+            2 => peer
+              .apply(&FlowIntent::InsertRows {
+                sheet_id: sheet,
+                before: if rows.is_empty() || rng.below(2) == 0 {
+                  None
+                } else {
+                  Some(rows[rng.below(rows.len())])
+                },
+                row_ids: vec![rng.uuid()],
+              })
+              .map(|_| ())
+              .map_err(|error| error.to_string()),
             3 if cells.len() > 2 => peer
               .apply(&FlowIntent::DeleteCell {
                 sheet_id: sheet,
@@ -202,27 +230,15 @@ mod tests {
               })
               .map(|_| ())
               .map_err(|error| error.to_string()),
-            4 if cells.len() > 1 => {
-              let mover = cells[rng.below(cells.len())];
-              let target = cells[rng.below(cells.len())];
-              let drop = match rng.below(4) {
-                0 => FlowDropIntent::BeforeSibling(target),
-                1 => FlowDropIntent::AfterSibling(target),
-                2 => FlowDropIntent::LastChildOf(target),
-                _ => FlowDropIntent::RootInColumn {
-                  column_index: rng.below(3),
-                  insertion_index: rng.below(cells.len() + 1),
-                },
-              };
-              peer
-                .apply(&FlowIntent::MoveCellSubtree {
-                  sheet_id: sheet,
-                  cell_id: mover,
-                  drop,
-                })
-                .map(|_| ())
-                .map_err(|error| error.to_string())
-            },
+            4 if cells.len() > 1 && !rows.is_empty() && !columns.is_empty() => peer
+              .apply(&FlowIntent::SetCellAddress {
+                sheet_id: sheet,
+                cell_id: cells[rng.below(cells.len())],
+                row_id: rows[rng.below(rows.len())],
+                column_id: columns[rng.below(columns.len())],
+              })
+              .map(|_| ())
+              .map_err(|error| error.to_string()),
             5 if !cells.is_empty() => peer
               .apply(&FlowIntent::SetCellStruck {
                 sheet_id: sheet,
@@ -231,23 +247,61 @@ mod tests {
               })
               .map(|_| ())
               .map_err(|error| error.to_string()),
-            6 => peer
+            6 if !columns.is_empty() => peer
               .apply(&FlowIntent::AddAnnotation {
                 stroke: AnnotationStroke {
                   id: rng.uuid(),
                   sheet_id: sheet,
                   originator: AnnotationOriginator(format!("peer-{peer_ix}")),
-                  points: vec![BoardPoint {
-                    x: rng.below(500) as f32,
-                    y: rng.below(500) as f32,
-                  }],
+                  anchor: GridAnchor {
+                    row_id: rows.first().copied().unwrap_or_else(Uuid::nil),
+                    column_id: columns[rng.below(columns.len())],
+                    offset: StrokePoint {
+                      x: rng.below(200) as f32,
+                      y: rng.below(60) as f32,
+                    },
+                  },
+                  points: vec![
+                    StrokePoint { x: 0.0, y: 0.0 },
+                    StrokePoint {
+                      x: rng.below(120) as f32,
+                      y: rng.below(120) as f32,
+                    },
+                  ],
                   style: StrokeStyle {
                     color_rgba: 0xff33_3333,
                     width: 2.0,
                     opacity: 1.0,
                   },
-                  bbox: BoardRect::default(),
+                  bbox: StrokeRect::default(),
                 },
+              })
+              .map(|_| ())
+              .map_err(|error| error.to_string()),
+            7 if rows.len() > 1 => peer
+              .apply(&FlowIntent::MoveRows {
+                sheet_id: sheet,
+                row_ids: vec![rows[rng.below(rows.len())]],
+                before: if rng.below(2) == 0 {
+                  None
+                } else {
+                  Some(rows[rng.below(rows.len())])
+                },
+              })
+              .map(|_| ())
+              .map_err(|error| error.to_string()),
+            8 if rows.len() > 2 => peer
+              .apply(&FlowIntent::DeleteRows {
+                sheet_id: sheet,
+                row_ids: vec![rows[rng.below(rows.len())]],
+              })
+              .map(|_| ())
+              .map_err(|error| error.to_string()),
+            9 if !rows.is_empty() && rng.below(2) == 0 => peer
+              .apply(&FlowIntent::SetRowHeight {
+                sheet_id: sheet,
+                row_id: rows[rng.below(rows.len())],
+                height: (rng.below(2) == 0).then(|| 40.0 + rng.below(160) as f32),
               })
               .map(|_| ())
               .map_err(|error| error.to_string()),

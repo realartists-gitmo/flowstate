@@ -413,6 +413,27 @@ impl RichTextEditor {
     self.invalidate_document_layout_caches();
   }
 
+  /// Test/benchmark accessor: the flow-cell content height the editor would
+  /// render RIGHT NOW, through the REAL width path (the `current_layout_width`
+  /// fallback included — no explicit width is forced). Mirrors exactly the
+  /// `flow_cell_height` fold in `Render`, so it captures the height the grid's
+  /// `on_children_prepainted` hook would report for D4 autofit. Use it to prove
+  /// a fresh (unmeasured) cell editor mis-measures until `seed_layout_width` is
+  /// called.
+  pub fn benchmark_flow_cell_height(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Pixels {
+    self
+      .paragraph_item_sizes(window, cx)
+      .iter()
+      .fold(px(0.0), |height, item| height + item.height)
+      .max(px(1.0))
+  }
+
+  /// Test accessor: the width the editor is currently laying text out at, or
+  /// `None` if it has never been measured or seeded.
+  pub fn benchmark_measured_item_width(&self) -> Option<Pixels> {
+    self.measured_item_width
+  }
+
   fn virtual_item_sizes(
     &mut self,
     width: Pixels,

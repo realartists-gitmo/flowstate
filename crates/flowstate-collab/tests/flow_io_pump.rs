@@ -11,7 +11,7 @@ mod tests {
   use flowstate_collab::flow::{FlowDocHandle, FlowIoHandle, FlowPublishEvent, FlowRuntime, WriteGate};
   use flowstate_collab::local_write::GateHolder;
   use flowstate_document::{InputParagraph, InputRun, RunStyles};
-  use flowstate_flow::{CellId, CellPlacement, CellSeed, FlowIntent};
+  use flowstate_flow::{CellId, CellSeed, FlowIntent};
   use gpui_flowtext::{InsertTextIntent, LocalIntent, LocalWriteAuthority as _, TextAnchor};
   use uuid::Uuid;
 
@@ -44,12 +44,28 @@ mod tests {
         sheet_type_id: sheet_type,
       })
       .map_err(|error| anyhow::anyhow!("seed sheet rejected: {error}"))?;
+    let row = Uuid::from_u128(0xf10c_1002);
+    source_handle
+      .apply(&FlowIntent::InsertRows {
+        sheet_id: sheet,
+        before: None,
+        row_ids: vec![row],
+      })
+      .map_err(|error| anyhow::anyhow!("seed row rejected: {error}"))?;
+    let column = source_handle
+      .board_projection()
+      .map_err(|error| anyhow::anyhow!("board unavailable: {error}"))?
+      .sheet(sheet)
+      .expect("seed sheet")
+      .columns[0]
+      .id;
     let cell: CellId = Uuid::from_u128(0xf10c_0002);
     source_handle
       .apply(&FlowIntent::AddCell {
         sheet_id: sheet,
         cell_id: cell,
-        placement: CellPlacement::SheetEnd { column_index: 0 },
+        row_id: row,
+        column_id: column,
         seed: CellSeed::Paragraphs(seed_paragraphs("drip seed")),
       })
       .map_err(|error| anyhow::anyhow!("seed cell rejected: {error}"))?;
@@ -260,12 +276,28 @@ mod tests {
         sheet_type_id: sheet_type,
       })
       .map_err(|error| anyhow::anyhow!("seed sheet rejected: {error}"))?;
+    let row = Uuid::from_u128(0xf10c_1004);
+    handle
+      .apply(&FlowIntent::InsertRows {
+        sheet_id: sheet,
+        before: None,
+        row_ids: vec![row],
+      })
+      .map_err(|error| anyhow::anyhow!("seed row rejected: {error}"))?;
+    let column = handle
+      .board_projection()
+      .map_err(|error| anyhow::anyhow!("board unavailable: {error}"))?
+      .sheet(sheet)
+      .expect("seed sheet")
+      .columns[0]
+      .id;
     let cell: CellId = Uuid::from_u128(0xf10c_0004);
     handle
       .apply(&FlowIntent::AddCell {
         sheet_id: sheet,
         cell_id: cell,
-        placement: CellPlacement::SheetEnd { column_index: 0 },
+        row_id: row,
+        column_id: column,
         seed: CellSeed::Paragraphs(seed_paragraphs("pump seed")),
       })
       .map_err(|error| anyhow::anyhow!("seed cell rejected: {error}"))?;

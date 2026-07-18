@@ -19,17 +19,9 @@ use notify::{
 };
 use rusqlite::{Connection, OptionalExtension as _, params};
 use serde::{Deserialize, Serialize};
-use tantivy::{
-  Index, IndexWriter, TantivyDocument, Term, doc,
-  query::{BooleanQuery, Occur, Query, QueryParser, TermQuery},
-  schema::{Field, IndexRecordOption, STORED, STRING, Schema, TEXT, TextFieldIndexing, TextOptions, Value as _},
-  tokenizer::NgramTokenizer,
-};
+mod seekstorm_index;
 
 const CATALOG_FILE: &str = "catalog.sqlite3";
-const TANTIVY_DIR: &str = "tantivy-v2";
-const FILENAME_TOKENIZER: &str = "filename_ngram";
-const WRITER_MEMORY_BYTES: usize = 96_000_000;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum FileKind {
@@ -163,12 +155,11 @@ pub struct SearchHit {
   pub paragraph_end_cursor: Option<Vec<u8>>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct TubIndex {
   root: PathBuf,
   catalog_path: PathBuf,
-  index: Index,
-  schema: TubSchema,
+  index: seekstorm::index::IndexArc,
 }
 
 impl TubIndex {
@@ -178,21 +169,13 @@ impl TubIndex {
     fs::create_dir_all(&data_dir).with_context(|| format!("creating tub data directory {}", data_dir.display()))?;
 
     let catalog_path = data_dir.join(CATALOG_FILE);
-    let index_dir = data_dir.join(TANTIVY_DIR);
-    fs::create_dir_all(&index_dir).with_context(|| format!("creating Tantivy index directory {}", index_dir.display()))?;
-
-    let (schema, fields) = build_schema();
-    let index = match Index::open_in_dir(&index_dir) {
-      Ok(index) => index,
-      Err(_) => Index::create_in_dir(&index_dir, schema).with_context(|| format!("creating Tantivy index {}", index_dir.display()))?,
-    };
-    register_tokenizers(&index);
+    let index_dir = data_dir.join(seekstorm_index::SEEKSTORM_DIR);
+    let index = seekstorm_index::open_or_create(&index_dir)?;
 
     let this = Self {
       root,
       catalog_path,
       index,
-      schema: fields,
     };
     this.initialize_catalog()?;
     Ok(this)
@@ -204,7 +187,8 @@ impl TubIndex {
   }
 
   pub fn scan_and_index(&self) -> Result<Vec<TubFile>> {
-    let mut writer = None;
+    let mut docs_to_index: Vec<seekstorm::index::Document> = Vec::new();
+    let mut ids_to_delete: Vec<String> = Vec::new();
     let existing = self.files_by_path()?;
     let mut seen_paths = HashSet::new();
     let mut files = Vec::new();
@@ -233,9 +217,16 @@ impl TubIndex {
         continue;
       };
 
-      let path = canonicalize_file(path)?;
+      // Per-file resilience: a member file the walker surfaced but we cannot
+      // stat (deleted mid-scan, permissions) is skipped, never fatal — one
+      // bad file must not take down the whole tub.
+      let Ok(path) = canonicalize_file(path) else {
+        continue;
+      };
       seen_paths.insert(path.clone());
-      let metadata = fs::metadata(&path)?;
+      let Ok(metadata) = fs::metadata(&path) else {
+        continue;
+      };
       let size_bytes = metadata.len();
       let modified_ns = modified_ns(&metadata);
       let display_path = display_path_for(&self.root, &path);
@@ -243,7 +234,7 @@ impl TubIndex {
       let file_name = path
         .file_name()
         .map_or_else(|| display_path.clone(), |name| name.to_string_lossy().to_string());
-      let fingerprint = fingerprint(size_bytes, modified_ns, kind, &path)?;
+      let fingerprint = fingerprint(size_bytes, modified_ns, kind, &path);
       let existing = existing.get(&path);
       let file_id = existing.map_or_else(|| stable_file_id(&self.root, &path), |record| record.file_id.clone());
 
@@ -258,26 +249,27 @@ impl TubIndex {
 
       let mut indexed = true;
       let mut last_error = None;
-      let writer = self.index_writer(&mut writer)?;
-      writer.delete_term(Term::from_field_text(self.schema.file_id, &file_id));
-      writer.add_document(file_document(
-        &self.schema,
-        FileDocumentInput {
-          file_id: &file_id,
-          kind,
-          path: &path,
-          display_path: &display_path,
-          file_name: &file_name,
-          size_bytes,
-          modified_ns,
-        },
-      ))?;
+      ids_to_delete.push(file_id.clone());
+      docs_to_index.push(seekstorm_index::document_from_file(&FileDocumentInput {
+        file_id: &file_id,
+        kind,
+        path: &path,
+        display_path: &display_path,
+        file_name: &file_name,
+        size_bytes,
+        modified_ns,
+      })?);
 
-      if matches!(kind, FileKind::Db8 | FileKind::Fl0) {
+      // Docx joins db8/fl0: content_index_units imports + cleans the docx to Loro
+      // and derives the SAME units ("two tools, one language"). The docx
+      // fingerprint (parse-version + size + mtime) keeps this incremental — a
+      // docx is re-imported only when it changes, so the cost is the one-time
+      // first index, not every scan.
+      if matches!(kind, FileKind::Db8 | FileKind::Fl0 | FileKind::Docx) {
         match content_index_units(kind, &file_id, &path, &display_path, &file_name) {
           Ok(units) => {
             for unit in units {
-              writer.add_document(unit_document(&self.schema, &unit))?;
+              docs_to_index.push(seekstorm_index::document_from_unit(&unit)?);
             }
           },
           Err(error) => {
@@ -320,13 +312,12 @@ impl TubIndex {
       .values()
       .filter(|record| !seen_paths.contains(&record.path))
     {
-      let writer = self.index_writer(&mut writer)?;
-      writer.delete_term(Term::from_field_text(self.schema.file_id, &stale.file_id));
+      ids_to_delete.push(stale.file_id.clone());
       pending_deletes.push(stale.file_id.clone());
     }
 
-    if let Some(mut writer) = writer {
-      writer.commit()?;
+    if !ids_to_delete.is_empty() || !docs_to_index.is_empty() {
+      seekstorm_index::apply_scan(&self.index, &ids_to_delete, docs_to_index)?;
     }
     for record in pending_upserts {
       self.upsert_file(&record)?;
@@ -367,7 +358,7 @@ impl TubIndex {
           .collect(),
       );
     }
-    self.search_tantivy(query, &[SearchUnitKind::File], limit, true)
+    self.search_units(query, &[SearchUnitKind::File], limit, true)
   }
 
   pub fn search_content(&self, query: &str, kinds: &[SearchUnitKind], limit: usize) -> Result<Vec<SearchHit>> {
@@ -379,7 +370,7 @@ impl TubIndex {
     } else {
       kinds
     };
-    self.search_tantivy(query, kinds, limit, false)
+    self.search_units(query, kinds, limit, false)
   }
 
   pub fn default_content(&self, kinds: &[SearchUnitKind], limit: usize) -> Result<Vec<SearchHit>> {
@@ -392,7 +383,7 @@ impl TubIndex {
     let mut hits = Vec::with_capacity(limit);
 
     for file in self.list_files()? {
-      if !matches!(file.kind, FileKind::Db8 | FileKind::Fl0) || !file.indexed {
+      if !matches!(file.kind, FileKind::Db8 | FileKind::Fl0 | FileKind::Docx) || !file.indexed {
         continue;
       }
       for unit in content_index_units(file.kind, &file.file_id, &file.path, &file.display_path, &file.file_name)? {
@@ -420,59 +411,15 @@ impl TubIndex {
     Ok(TubWatcher { watcher, receiver })
   }
 
-  fn search_tantivy(&self, query: &str, allowed_kinds: &[SearchUnitKind], limit: usize, filename_only: bool) -> Result<Vec<SearchHit>> {
-    register_tokenizers(&self.index);
-    let reader = self.index.reader()?;
-    let searcher = reader.searcher();
-    let fields = if filename_only {
-      vec![self.schema.file_name, self.schema.display_path, self.schema.file_name_exact]
-    } else {
-      vec![
-        self.schema.heading,
-        self.schema.body,
-        self.schema.cite,
-        self.schema.file_name,
-        self.schema.display_path,
-      ]
-    };
-    let parser = QueryParser::for_index(&self.index, fields);
-    let (parsed, _) = parser.parse_query_lenient(query);
-    // T-S1: the kind constraint is part of the QUERY, not a post-filter — the
-    // old fetch-8x-then-drop shape silently under-returned whenever the top
-    // of the score order was dominated by other kinds.
-    let kind_union: Vec<(Occur, Box<dyn Query>)> = allowed_kinds
-      .iter()
-      .map(|kind| {
-        (
-          Occur::Should,
-          Box::new(TermQuery::new(
-            Term::from_field_text(self.schema.unit_kind, kind.as_str()),
-            IndexRecordOption::Basic,
-          )) as Box<dyn Query>,
-        )
-      })
-      .collect();
-    let filtered = BooleanQuery::new(vec![
-      (Occur::Must, parsed),
-      (Occur::Must, Box::new(BooleanQuery::new(kind_union)) as Box<dyn Query>),
-    ]);
-    let top_docs = searcher.search(&filtered, &tantivy::collector::TopDocs::with_limit(limit).order_by_score())?;
-    let mut hits = Vec::new();
-
-    for (score, address) in top_docs {
-      let document = searcher.doc::<TantivyDocument>(address)?;
-      let Some(mut hit) = hit_from_document(&self.schema, &document, score) else {
-        continue;
-      };
-      if !filename_only {
-        self.hydrate_hit_preview(&mut hit)?;
-      }
-      hits.push(hit);
-      if hits.len() >= limit {
-        break;
+  fn search_units(&self, query: &str, allowed_kinds: &[SearchUnitKind], limit: usize, filename_only: bool) -> Result<Vec<SearchHit>> {
+    // The kind constraint is a native SeekStorm facet filter (retires the old
+    // T-S1 boolean-union workaround); previews hydrate here, exactly as before.
+    let mut hits = seekstorm_index::search(&self.index, query, allowed_kinds, filename_only, limit)?;
+    if !filename_only {
+      for hit in &mut hits {
+        self.hydrate_hit_preview(hit)?;
       }
     }
-
     Ok(hits)
   }
 
@@ -494,6 +441,17 @@ impl TubIndex {
       return Ok(());
     };
     if start >= end {
+      return Ok(());
+    }
+
+    // Only a .db8 carries a re-readable package for range hydration. Docx units
+    // reference a foreign file we don't own (reading it as a package would fail —
+    // and writing near it is the docx-clobber law), so they preview from the
+    // stored insert_text instead.
+    if !matches!(file_kind_from_path(&hit.path), Some(FileKind::Db8)) {
+      if !hit.insert_text.trim().is_empty() {
+        hit.preview_paragraphs = vec![preview_paragraph_from_text(&hit.insert_text)];
+      }
       return Ok(());
     }
 
@@ -530,13 +488,6 @@ impl TubIndex {
 
   fn connection(&self) -> Result<Connection> {
     Connection::open(&self.catalog_path).with_context(|| format!("opening tub catalog {}", self.catalog_path.display()))
-  }
-
-  fn index_writer<'writer>(&self, writer: &'writer mut Option<IndexWriter>) -> Result<&'writer mut IndexWriter> {
-    if writer.is_none() {
-      *writer = Some(self.index.writer(WRITER_MEMORY_BYTES)?);
-    }
-    Ok(writer.as_mut().expect("writer initialized"))
   }
 
   fn files_by_path(&self) -> Result<HashMap<PathBuf, CatalogFileRecord>> {
@@ -695,28 +646,6 @@ fn is_relevant_tub_watch_event(event: &Event) -> bool {
 }
 
 #[derive(Clone, Debug)]
-struct TubSchema {
-  file_id: Field,
-  unit_id: Field,
-  unit_kind: Field,
-  path: Field,
-  display_path: Field,
-  file_name: Field,
-  file_name_exact: Field,
-  heading_path: Field,
-  heading: Field,
-  cite: Field,
-  body: Field,
-  insert_text: Field,
-  paragraph_start: Field,
-  paragraph_end: Field,
-  paragraph_start_cursor: Field,
-  paragraph_end_cursor: Field,
-  size_bytes: Field,
-  modified_ns: Field,
-}
-
-#[derive(Clone, Debug)]
 struct CatalogFileRecord {
   file_id: String,
   path: PathBuf,
@@ -801,108 +730,6 @@ struct FileDocumentInput<'input> {
   modified_ns: u64,
 }
 
-fn build_schema() -> (Schema, TubSchema) {
-  let mut builder = Schema::builder();
-  let filename_indexing = TextFieldIndexing::default()
-    .set_tokenizer(FILENAME_TOKENIZER)
-    .set_index_option(IndexRecordOption::WithFreqsAndPositions);
-  let filename_options = TextOptions::default()
-    .set_indexing_options(filename_indexing)
-    .set_stored();
-
-  let file_id = builder.add_text_field("file_id", STRING | STORED);
-  let unit_id = builder.add_text_field("unit_id", STRING | STORED);
-  let unit_kind = builder.add_text_field("unit_kind", STRING | STORED);
-  let path = builder.add_text_field("path", STORED);
-  let display_path = builder.add_text_field("display_path", TEXT | STORED);
-  let file_name = builder.add_text_field("file_name", filename_options);
-  let file_name_exact = builder.add_text_field("file_name_exact", STRING | STORED);
-  let heading_path = builder.add_text_field("heading_path", TEXT | STORED);
-  let heading = builder.add_text_field("heading", TEXT | STORED);
-  let cite = builder.add_text_field("cite", TEXT | STORED);
-  let body = builder.add_text_field("body", TEXT | STORED);
-  let insert_text = builder.add_text_field("insert_text", STORED);
-  let paragraph_start = builder.add_text_field("paragraph_start", STORED);
-  let paragraph_end = builder.add_text_field("paragraph_end", STORED);
-  let paragraph_start_cursor = builder.add_text_field("paragraph_start_cursor", STORED);
-  let paragraph_end_cursor = builder.add_text_field("paragraph_end_cursor", STORED);
-  let size_bytes = builder.add_u64_field("size_bytes", STORED);
-  let modified_ns = builder.add_u64_field("modified_ns", STORED);
-  let schema = builder.build();
-  let fields = TubSchema {
-    file_id,
-    unit_id,
-    unit_kind,
-    path,
-    display_path,
-    file_name,
-    file_name_exact,
-    heading_path,
-    heading,
-    cite,
-    body,
-    insert_text,
-    paragraph_start,
-    paragraph_end,
-    paragraph_start_cursor,
-    paragraph_end_cursor,
-    size_bytes,
-    modified_ns,
-  };
-  (schema, fields)
-}
-
-fn register_tokenizers(index: &Index) {
-  if let Ok(tokenizer) = NgramTokenizer::new(2, 8, true) {
-    index.tokenizers().register(FILENAME_TOKENIZER, tokenizer);
-  }
-}
-
-fn file_document(schema: &TubSchema, input: FileDocumentInput<'_>) -> TantivyDocument {
-  doc!(
-    schema.file_id => input.file_id,
-    schema.unit_id => format!("{}:file", input.file_id),
-    schema.unit_kind => SearchUnitKind::File.as_str(),
-    schema.path => input.path.to_string_lossy().to_string(),
-    schema.display_path => input.display_path,
-    schema.file_name => input.file_name,
-    schema.file_name_exact => input.file_name,
-    schema.heading_path => "",
-    schema.heading => input.file_name,
-    schema.cite => input.kind.as_str(),
-    schema.body => "",
-    schema.insert_text => "",
-    schema.paragraph_start => "",
-    schema.paragraph_end => "",
-    schema.paragraph_start_cursor => "",
-    schema.paragraph_end_cursor => "",
-    schema.size_bytes => input.size_bytes,
-    schema.modified_ns => input.modified_ns,
-  )
-}
-
-fn unit_document(schema: &TubSchema, unit: &IndexUnit) -> TantivyDocument {
-  doc!(
-    schema.file_id => unit.file_id.as_str(),
-    schema.unit_id => unit.unit_id.as_str(),
-    schema.unit_kind => unit.unit_kind.as_str(),
-    schema.path => unit.path.to_string_lossy().to_string(),
-    schema.display_path => unit.display_path.as_str(),
-    schema.file_name => unit.file_name.as_str(),
-    schema.file_name_exact => unit.file_name.as_str(),
-    schema.heading_path => unit.heading_path.join(" / "),
-    schema.heading => unit.heading.as_str(),
-    schema.cite => unit.cite.as_deref().unwrap_or(""),
-    schema.body => unit.body.as_str(),
-    schema.insert_text => unit.insert_text.as_str(),
-    schema.paragraph_start => unit.paragraph_start.map(|value| value.to_string()).unwrap_or_default(),
-    schema.paragraph_end => unit.paragraph_end_exclusive.map(|value| value.to_string()).unwrap_or_default(),
-    schema.paragraph_start_cursor => unit.paragraph_start_cursor.as_deref().map(hex_bytes).unwrap_or_default(),
-    schema.paragraph_end_cursor => unit.paragraph_end_cursor.as_deref().map(hex_bytes).unwrap_or_default(),
-    schema.size_bytes => unit.insert_text.len() as u64,
-    schema.modified_ns => 0_u64,
-  )
-}
 
 fn hit_from_unit(unit: IndexUnit) -> SearchHit {
   SearchHit {
@@ -926,41 +753,6 @@ fn hit_from_unit(unit: IndexUnit) -> SearchHit {
   }
 }
 
-fn hit_from_document(schema: &TubSchema, document: &TantivyDocument, score: f32) -> Option<SearchHit> {
-  let unit_kind = SearchUnitKind::from_str(&stored_text(document, schema.unit_kind)?)?;
-  let heading_path = stored_text(document, schema.heading_path)
-    .unwrap_or_default()
-    .split(" / ")
-    .filter(|part| !part.is_empty())
-    .map(ToOwned::to_owned)
-    .collect::<Vec<_>>();
-  Some(SearchHit {
-    file_id: stored_text(document, schema.file_id)?,
-    unit_id: stored_text(document, schema.unit_id)?,
-    unit_kind,
-    path: PathBuf::from(stored_text(document, schema.path)?),
-    display_path: stored_text(document, schema.display_path)?,
-    file_name: stored_text(document, schema.file_name_exact)?,
-    heading_path,
-    title: stored_text(document, schema.heading).unwrap_or_default(),
-    cite: non_empty(stored_text(document, schema.cite).unwrap_or_default()),
-    snippet: preview_text(&stored_text(document, schema.body).unwrap_or_default(), 360),
-    insert_text: stored_text(document, schema.insert_text).unwrap_or_default(),
-    preview_paragraphs: Vec::new(),
-    score,
-    paragraph_start: stored_text(document, schema.paragraph_start).and_then(|value| value.parse::<usize>().ok()),
-    paragraph_end_exclusive: stored_text(document, schema.paragraph_end).and_then(|value| value.parse::<usize>().ok()),
-    paragraph_start_cursor: stored_text(document, schema.paragraph_start_cursor).and_then(|value| unhex_bytes(&value)),
-    paragraph_end_cursor: stored_text(document, schema.paragraph_end_cursor).and_then(|value| unhex_bytes(&value)),
-  })
-}
-
-fn stored_text(document: &TantivyDocument, field: Field) -> Option<String> {
-  document
-    .get_first(field)
-    .and_then(|value| value.as_value().as_str())
-    .map(ToOwned::to_owned)
-}
 
 fn hex_bytes(bytes: &[u8]) -> String {
   let mut out = String::with_capacity(bytes.len() * 2);
@@ -971,21 +763,6 @@ fn hex_bytes(bytes: &[u8]) -> String {
   out
 }
 
-fn unhex_bytes(value: &str) -> Option<Vec<u8>> {
-  if value.is_empty() {
-    return None;
-  }
-  let mut bytes = Vec::with_capacity(value.len() / 2);
-  let mut chunks = value.as_bytes().chunks_exact(2);
-  if !chunks.remainder().is_empty() {
-    return None;
-  }
-  for chunk in &mut chunks {
-    let text = std::str::from_utf8(chunk).ok()?;
-    bytes.push(u8::from_str_radix(text, 16).ok()?);
-  }
-  Some(bytes)
-}
 
 /// T-S6: per-format content-unit extraction.
 fn content_index_units(kind: FileKind, file_id: &str, path: &Path, display_path: &str, file_name: &str) -> Result<Vec<IndexUnit>> {
@@ -1005,7 +782,7 @@ fn fl0_index_units(file_id: &str, path: &Path, display_path: &str, file_name: &s
   let board = document.projection();
   let mut units = Vec::new();
   for sheet in &board.sheets {
-    for cell in &sheet.cells {
+    for cell in sheet.cells() {
       let body = cell.summary.summary_text.trim().to_string();
       if body.is_empty() {
         continue;
@@ -1281,7 +1058,7 @@ fn modified_ns(metadata: &fs::Metadata) -> u64 {
   .expect("nanosecond timestamp is clamped to u64::MAX")
 }
 
-fn fingerprint(size_bytes: u64, modified_ns: u64, kind: FileKind, path: &Path) -> Result<String> {
+fn fingerprint(size_bytes: u64, modified_ns: u64, kind: FileKind, path: &Path) -> String {
   let mut fingerprint = format!("{size_bytes}:{modified_ns}");
   // T-S5: the docx fingerprint covers the PARSE version — a parser upgrade
   // re-indexes every docx instead of serving stale units forever.
@@ -1289,15 +1066,18 @@ fn fingerprint(size_bytes: u64, modified_ns: u64, kind: FileKind, path: &Path) -
     use std::fmt::Write as _;
     let _ = write!(fingerprint, ":docx-v{DOCX_UNIT_PARSE_VERSION}");
   }
+  // An unreadable search cache (legacy format, corruption) must not abort
+  // the scan: the fingerprint falls back to size+mtime and the content
+  // indexing stage records the same read error on the file itself.
   if kind == FileKind::Db8
-    && let Some((frontier, unit_count)) = cached_search_metadata(path)?
+    && let Ok(Some((frontier, unit_count))) = cached_search_metadata(path)
   {
     fingerprint.push(':');
     fingerprint.push_str(&frontier);
     fingerprint.push(':');
     fingerprint.push_str(&unit_count.to_string());
   }
-  Ok(fingerprint)
+  fingerprint
 }
 
 fn cached_search_metadata(path: &Path) -> Result<Option<(String, usize)>> {
@@ -1423,6 +1203,36 @@ mod tests {
     let kind = SearchUnitKind::from_str("mystery_kind").expect("unknown kind should be preserved");
     assert_eq!(kind.as_str(), "mystery_kind");
     assert!(matches!(kind, SearchUnitKind::Unknown(value) if value == "mystery_kind"));
+  }
+
+  /// One unreadable member file must not take down the whole tub: the scan
+  /// completes, lists the file as unindexed with its error, and moves on
+  /// (regression: pre-cutover `.db8` fixtures aborted every scan from the
+  /// FINGERPRINT stage, before the tolerant unit-indexing stage ran).
+  #[test]
+  fn scan_survives_unreadable_db8_files() {
+    let base = std::env::temp_dir().join(format!("flowstate-tub-unreadable-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&base);
+    let root = base.join("root");
+    let data = base.join("data");
+    fs::create_dir_all(&root).expect("create tub root");
+    fs::create_dir_all(&data).expect("create data dir");
+    // The legacy pre-Loro-cutover magic, and outright garbage.
+    fs::write(root.join("legacy_fixture.db8"), b"DB8\0\x05\0\0\0not a package anymore").expect("write legacy file");
+    fs::write(root.join("corrupt.db8"), b"total garbage").expect("write corrupt file");
+
+    let index = TubIndex::open(&root, &data).expect("open tub index");
+    let files = index
+      .scan_and_index()
+      .expect("a scan must survive unreadable member files");
+
+    assert_eq!(files.len(), 2, "both files are cataloged");
+    for file in &files {
+      assert!(!file.indexed, "{}: an unreadable file is listed as unindexed", file.file_name);
+      assert!(file.last_error.is_some(), "{}: the file carries its read error", file.file_name);
+    }
+
+    let _ = fs::remove_dir_all(&base);
   }
 }
 #[cfg(test)]

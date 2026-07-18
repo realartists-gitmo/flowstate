@@ -10,7 +10,7 @@ use flowstate_collab::local_write::GateHolder;
 use flowstate_document::{InputParagraph, InputRun, RunStyles};
 use flowstate_document::{InsertTextIntent, LocalIntent, LocalWriteAuthority as _, TextAnchor};
 use flowstate_flow::CellId as Uuid;
-use flowstate_flow::{CellPlacement, CellSeed, FlowDropIntent, FlowIntent, SheetId};
+use flowstate_flow::{CellSeed, FlowIntent, SheetId};
 
 /// The .db8 local-intent keystroke budget is single-digit milliseconds on a
 /// 2M-char body; a flow CELL keystroke touches one tiny text container and
@@ -74,12 +74,30 @@ pub fn run(rounds: usize) {
       sheet_type_id: sheet_type,
     })
     .unwrap();
+  let rows: Vec<flowstate_flow::RowId> = (0..8).map(|_| rng.uuid()).collect();
+  seed
+    .apply(&FlowIntent::InsertRows {
+      sheet_id: sheet,
+      before: None,
+      row_ids: rows.clone(),
+    })
+    .unwrap();
+  let columns: Vec<flowstate_flow::ColumnId> = seed
+    .board_projection()
+    .unwrap()
+    .sheet(sheet)
+    .unwrap()
+    .columns
+    .iter()
+    .map(|column| column.id)
+    .collect();
   for index in 0..4_usize {
     seed
       .apply(&FlowIntent::AddCell {
         sheet_id: sheet,
         cell_id: rng.uuid(),
-        placement: CellPlacement::SheetEnd { column_index: index % 2 },
+        row_id: rows[index],
+        column_id: columns[index % 2],
         seed: CellSeed::Paragraphs(vec![InputParagraph {
           style: flowstate_document::PARAGRAPH_TAG,
           runs: vec![InputRun {
@@ -108,7 +126,7 @@ pub fn run(rounds: usize) {
         .board_projection()
         .unwrap()
         .sheet(sheet)
-        .map(|sheet| sheet.cells.iter().map(|cell| cell.id).collect())
+        .map(|sheet| sheet.cells().map(|cell| cell.id).collect())
         .unwrap_or_default();
       if cells.is_empty() {
         continue;
@@ -128,18 +146,20 @@ pub fn run(rounds: usize) {
         }));
         keystrokes.push(started.elapsed().as_secs_f64() * 1e3);
       }
-      // Structural intent.
+      // Structural intent (occupied-slot rejections are legal outcomes).
       let structural = match rng.below(3) {
         0 => FlowIntent::AddCell {
           sheet_id: sheet,
           cell_id: rng.uuid(),
-          placement: CellPlacement::After(cells[rng.below(cells.len())]),
+          row_id: rows[rng.below(rows.len())],
+          column_id: columns[rng.below(columns.len())],
           seed: CellSeed::Empty,
         },
-        1 if cells.len() > 1 => FlowIntent::MoveCellSubtree {
+        1 if cells.len() > 1 => FlowIntent::SetCellAddress {
           sheet_id: sheet,
           cell_id: cells[rng.below(cells.len())],
-          drop: FlowDropIntent::BeforeSibling(cells[rng.below(cells.len())]),
+          row_id: rows[rng.below(rows.len())],
+          column_id: columns[rng.below(columns.len())],
         },
         _ => FlowIntent::SetCellStruck {
           sheet_id: sheet,

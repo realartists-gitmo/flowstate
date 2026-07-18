@@ -8,7 +8,7 @@ use uuid::Uuid;
 use crate::document::FlowDocument;
 
 const MAGIC: &[u8; 8] = b"FLOWFL0\0";
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 /// Refuse to read pathological on-disk sizes before allocating for them.
 const MAX_FL0_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -62,7 +62,7 @@ pub fn encode(document: &FlowDocument) -> anyhow::Result<Vec<u8>> {
   encode_snapshot(&document.snapshot()?)
 }
 
-/// Frame a raw Loro snapshot as .fl0 v2 bytes.
+/// Frame a raw Loro snapshot as .fl0 v3 bytes.
 pub fn encode_snapshot(snapshot: &[u8]) -> anyhow::Result<Vec<u8>> {
   let compressed = zstd::stream::encode_all(snapshot, 3)?;
   let mut bytes = Vec::with_capacity(MAGIC.len() + 8 + compressed.len());
@@ -77,7 +77,7 @@ pub fn decode(bytes: &[u8]) -> anyhow::Result<FlowDocument> {
   FlowDocument::from_snapshot(&decode_snapshot(bytes)?)
 }
 
-/// Unframe .fl0 v2 bytes back to the raw Loro snapshot (schema validation is
+/// Unframe .fl0 v3 bytes back to the raw Loro snapshot (schema validation is
 /// the runtime's job — `from_snapshot` checks `flow.meta/schema_version`).
 pub fn decode_snapshot(bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
   let mut cursor = Cursor::new(bytes);
@@ -87,11 +87,14 @@ pub fn decode_snapshot(bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
     return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid .fl0 signature").into());
   }
   let version = read_u32(&mut cursor)?;
-  if version == 1 {
+  if version == 1 || version == 2 {
+    // D3: v2 (the Living Grid schema) is dropped like v1 — it never left the
+    // known alpha circle, so it gets the same explicit rejection instead of
+    // a frozen legacy module.
     return Err(
       io::Error::new(
         io::ErrorKind::InvalidData,
-        "unsupported .fl0 version 1 (pre-release format, never shipped; no migration path)",
+        format!("unsupported .fl0 version {version} (pre-release format, never shipped; no migration path)"),
       )
       .into(),
     );
@@ -195,10 +198,12 @@ mod tests {
   }
 
   #[test]
-  fn rejects_v1_with_the_no_migration_message() {
-    let mut bytes = encode(&FlowDocument::new()).unwrap();
-    bytes[8..12].copy_from_slice(&1_u32.to_le_bytes());
-    let error = decode(&bytes).map(|_| ()).unwrap_err().to_string();
-    assert!(error.contains("pre-release format, never shipped"), "got: {error}");
+  fn rejects_v1_and_v2_with_the_no_migration_message() {
+    for version in [1_u32, 2_u32] {
+      let mut bytes = encode(&FlowDocument::new()).unwrap();
+      bytes[8..12].copy_from_slice(&version.to_le_bytes());
+      let error = decode(&bytes).map(|_| ()).unwrap_err().to_string();
+      assert!(error.contains("pre-release format, never shipped"), "v{version} got: {error}");
+    }
   }
 }

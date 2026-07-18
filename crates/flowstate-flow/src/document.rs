@@ -1,20 +1,18 @@
-//! The schema-level flow document: a Loro doc + its normalized board
+//! The schema-level flow document: a Loro doc + its normalized grid
 //! projection. This is the SOLO/fixture/test entrance to the one intent
 //! executor ([`crate::mutate`]); the collaborative runtime
 //! (`flowstate-collab/src/flow`) wraps the same doc behind a write gate with
-//! streams and recorded-inverse undo. Compat op methods mirror the legacy
-//! surface as thin intent wrappers until the app's Living Grid rewiring
-//! (build order S8) lands.
+//! streams and recorded-inverse undo.
 
 use loro::{ExportMode, LoroDoc, UndoManager, VersionVector};
 use uuid::Uuid;
 
-use crate::format::{FlowFormat, SheetId, SheetTypeId};
-use crate::intents::{AnnotationScope, CellPlacement, CellSeed, FlowDropIntent, FlowIntent, RelativePosition};
+use crate::format::{ArgumentSide, ColumnId, FlowFormat, RowId, SheetId, SheetTypeId};
+use crate::intents::{AnnotationScope, CellSeed, FlowIntent};
 use crate::loro_schema;
 use crate::mutate::{self, MutationReport};
-use crate::projection::{AnnotationOriginator, AnnotationStroke, FlowBoardProjection, FlowDefect, Sheet};
-use crate::{CellId, board_ops};
+use crate::projection::{AnnotationOriginator, AnnotationStroke, FlowBoardProjection, FlowDefect};
+use crate::CellId;
 
 pub type FlowFrontier = Vec<u8>;
 
@@ -162,8 +160,8 @@ impl FlowDocument {
   }
 }
 
-/// Legacy-surface compat: thin intent wrappers so pre-S8 app call sites keep
-/// compiling. New code constructs [`FlowIntent`]s directly.
+/// Grid conveniences: thin intent wrappers that mint fresh ids. New code that
+/// already holds ids constructs [`FlowIntent`]s directly.
 impl FlowDocument {
   pub fn create_sheet(&mut self, name: impl Into<String>, sheet_type_id: SheetTypeId) -> anyhow::Result<SheetId> {
     let sheet_id = Uuid::new_v4();
@@ -187,98 +185,92 @@ impl FlowDocument {
       .map(|_| ())
   }
 
-  pub fn move_sheet(&mut self, sheet_id: SheetId, target_index: usize) -> anyhow::Result<()> {
-    let before = self
-      .board
-      .sheets
-      .iter()
-      .filter(|sheet| sheet.id != sheet_id)
-      .nth(target_index)
-      .map(|sheet| sheet.id);
+  pub fn move_sheet(&mut self, sheet_id: SheetId, before: Option<SheetId>) -> anyhow::Result<()> {
     self
       .apply_intent(&FlowIntent::MoveSheet { sheet_id, before })
       .map(|_| ())
   }
 
-  pub fn add_plain_cell(
+  /// Insert `count` fresh rows before the anchor (`None` = end); returns the
+  /// minted row ids in order.
+  pub fn insert_rows(&mut self, sheet_id: SheetId, before: Option<RowId>, count: usize) -> anyhow::Result<Vec<RowId>> {
+    let row_ids: Vec<RowId> = (0..count).map(|_| Uuid::new_v4()).collect();
+    self.apply_intent(&FlowIntent::InsertRows {
+      sheet_id,
+      before,
+      row_ids: row_ids.clone(),
+    })?;
+    Ok(row_ids)
+  }
+
+  pub fn insert_row(&mut self, sheet_id: SheetId, before: Option<RowId>) -> anyhow::Result<RowId> {
+    Ok(self.insert_rows(sheet_id, before, 1)?[0])
+  }
+
+  /// Append a fresh row at the bottom and return its id (the ghost-row
+  /// materialization primitive).
+  pub fn append_row(&mut self, sheet_id: SheetId) -> anyhow::Result<RowId> {
+    self.insert_row(sheet_id, None)
+  }
+
+  pub fn move_rows(&mut self, sheet_id: SheetId, row_ids: Vec<RowId>, before: Option<RowId>) -> anyhow::Result<()> {
+    self
+      .apply_intent(&FlowIntent::MoveRows { sheet_id, row_ids, before })
+      .map(|_| ())
+  }
+
+  pub fn delete_rows(&mut self, sheet_id: SheetId, row_ids: Vec<RowId>) -> anyhow::Result<()> {
+    self
+      .apply_intent(&FlowIntent::DeleteRows { sheet_id, row_ids })
+      .map(|_| ())
+  }
+
+  pub fn set_row_height(&mut self, sheet_id: SheetId, row_id: RowId, height: Option<f32>) -> anyhow::Result<()> {
+    self
+      .apply_intent(&FlowIntent::SetRowHeight { sheet_id, row_id, height })
+      .map(|_| ())
+  }
+
+  pub fn add_column(
     &mut self,
     sheet_id: SheetId,
-    column_index: usize,
-    parent_id: Option<CellId>,
-    insertion_index: Option<usize>,
-  ) -> anyhow::Result<CellId> {
+    label: impl Into<String>,
+    side: ArgumentSide,
+    before: Option<ColumnId>,
+  ) -> anyhow::Result<ColumnId> {
+    let column_id = Uuid::new_v4();
+    self.apply_intent(&FlowIntent::AddColumn {
+      sheet_id,
+      column_id,
+      label: label.into(),
+      side,
+      before,
+    })?;
+    Ok(column_id)
+  }
+
+  /// A fresh empty cell at (row, column).
+  pub fn add_cell_at(&mut self, sheet_id: SheetId, row_id: RowId, column_id: ColumnId) -> anyhow::Result<CellId> {
     let cell_id = Uuid::new_v4();
-    let placement = match (parent_id, insertion_index) {
-      (Some(parent), _) => CellPlacement::LastChildOf(parent),
-      (None, Some(0)) => CellPlacement::ColumnTop { column_index },
-      (None, Some(index)) => {
-        // Positional hint: anchor to the cell currently at `index`, else end.
-        let sheet = self
-          .board
-          .sheet(sheet_id)
-          .ok_or_else(|| anyhow::anyhow!("unknown sheet"))?;
-        match sheet.cells.get(index) {
-          Some(anchor) => CellPlacement::Before(anchor.id),
-          None => CellPlacement::SheetEnd { column_index },
-        }
-      },
-      (None, None) => CellPlacement::SheetEnd { column_index },
-    };
     self.apply_intent(&FlowIntent::AddCell {
       sheet_id,
       cell_id,
-      placement,
+      row_id,
+      column_id,
       seed: CellSeed::Empty,
     })?;
     Ok(cell_id)
   }
 
-  pub fn add_orphan_at_column_top(&mut self, sheet_id: SheetId, column_index: usize) -> anyhow::Result<CellId> {
-    let cell_id = Uuid::new_v4();
-    self.apply_intent(&FlowIntent::AddCell {
-      sheet_id,
-      cell_id,
-      placement: CellPlacement::ColumnTop { column_index },
-      seed: CellSeed::Empty,
-    })?;
-    Ok(cell_id)
-  }
-
-  pub fn add_sibling(&mut self, sheet_id: SheetId, cell_id: CellId, position: RelativePosition) -> anyhow::Result<CellId> {
-    let new_id = Uuid::new_v4();
-    let placement = match position {
-      RelativePosition::Before => CellPlacement::Before(cell_id),
-      RelativePosition::After => CellPlacement::After(cell_id),
-    };
-    self.apply_intent(&FlowIntent::AddCell {
-      sheet_id,
-      cell_id: new_id,
-      placement,
-      seed: CellSeed::Empty,
-    })?;
-    Ok(new_id)
-  }
-
-  pub fn add_response(&mut self, sheet_id: SheetId, parent_id: CellId) -> anyhow::Result<CellId> {
-    let new_id = Uuid::new_v4();
-    self.apply_intent(&FlowIntent::AddCell {
-      sheet_id,
-      cell_id: new_id,
-      placement: CellPlacement::LastChildOf(parent_id),
-      seed: CellSeed::Empty,
-    })?;
-    Ok(new_id)
-  }
-
-  pub fn add_first_response(&mut self, sheet_id: SheetId, parent_id: CellId) -> anyhow::Result<CellId> {
-    let new_id = Uuid::new_v4();
-    self.apply_intent(&FlowIntent::AddCell {
-      sheet_id,
-      cell_id: new_id,
-      placement: CellPlacement::FirstChildOf(parent_id),
-      seed: CellSeed::Empty,
-    })?;
-    Ok(new_id)
+  pub fn set_cell_address(&mut self, sheet_id: SheetId, cell_id: CellId, row_id: RowId, column_id: ColumnId) -> anyhow::Result<()> {
+    self
+      .apply_intent(&FlowIntent::SetCellAddress {
+        sheet_id,
+        cell_id,
+        row_id,
+        column_id,
+      })
+      .map(|_| ())
   }
 
   pub fn delete_cell(&mut self, sheet_id: SheetId, cell_id: CellId) -> anyhow::Result<()> {
@@ -287,40 +279,12 @@ impl FlowDocument {
       .map(|_| ())
   }
 
-  pub fn move_cell_subtree(&mut self, sheet_id: SheetId, cell_id: CellId, intent: FlowDropIntent) -> anyhow::Result<()> {
-    self
-      .apply_intent(&FlowIntent::MoveCellSubtree {
-        sheet_id,
-        cell_id,
-        drop: intent,
-      })
-      .map(|_| ())
-  }
-
-  pub fn move_cell(
-    &mut self,
-    sheet_id: SheetId,
-    cell_id: CellId,
-    target_column: usize,
-    target_index: usize,
-    new_parent: Option<CellId>,
-  ) -> anyhow::Result<()> {
-    let intent = new_parent.map_or(
-      FlowDropIntent::RootInColumn {
-        column_index: target_column,
-        insertion_index: target_index,
-      },
-      FlowDropIntent::LastChildOf,
-    );
-    self.move_cell_subtree(sheet_id, cell_id, intent)
-  }
-
   /// Toggle strike over the whole cell (legacy surface computed the toggle).
   pub fn strike_cell(&mut self, sheet_id: SheetId, cell_id: CellId) -> anyhow::Result<()> {
     let struck = self
       .board
       .sheet(sheet_id)
-      .and_then(|sheet| sheet.cells.iter().find(|cell| cell.id == cell_id))
+      .and_then(|sheet| sheet.find_cell(cell_id))
       .map(|cell| cell.summary.struck)
       .ok_or_else(|| anyhow::anyhow!("unknown cell"))?;
     self
@@ -336,7 +300,7 @@ impl FlowDocument {
     let uses_summary = self
       .board
       .sheet(sheet_id)
-      .and_then(|sheet| sheet.cells.iter().find(|cell| cell.id == cell_id))
+      .and_then(|sheet| sheet.find_cell(cell_id))
       .map(|cell| cell.summary.uses_summary_projection)
       .ok_or_else(|| anyhow::anyhow!("unknown cell"))?;
     if uses_summary {
@@ -347,7 +311,7 @@ impl FlowDocument {
   }
 
   /// Transitional solo write-back: replace a cell's rich text from its
-  /// editor's projection (S4's per-cell authority supersedes this).
+  /// editor's projection (surfaces on the per-cell authority don't need it).
   pub fn replace_cell_document(
     &mut self,
     sheet_id: SheetId,
@@ -357,7 +321,7 @@ impl FlowDocument {
     self
       .board
       .sheet(sheet_id)
-      .and_then(|sheet| sheet.cells.iter().find(|cell| cell.id == cell_id))
+      .and_then(|sheet| sheet.find_cell(cell_id))
       .ok_or_else(|| anyhow::anyhow!("unknown cell"))?;
     mutate::replace_cell_document(&self.loro, cell_id, document)?;
     self.loro.set_next_commit_message("cell.replace-document");
@@ -402,48 +366,5 @@ impl FlowDocument {
       Err(error) if error.to_string().contains("unknown annotation") => Ok(false),
       Err(error) => Err(error),
     }
-  }
-
-  // ---- pure preview pass-throughs (kept for pre-S8 call sites) -----------
-
-  pub fn child_append_index(&self, sheet_id: SheetId, parent_id: CellId) -> anyhow::Result<usize> {
-    let sheet = self
-      .board
-      .sheet(sheet_id)
-      .ok_or_else(|| anyhow::anyhow!("unknown sheet"))?;
-    board_ops::child_append_index(sheet, parent_id)
-  }
-
-  pub fn child_prepend_index(&self, sheet_id: SheetId, parent_id: CellId) -> anyhow::Result<usize> {
-    let sheet = self
-      .board
-      .sheet(sheet_id)
-      .ok_or_else(|| anyhow::anyhow!("unknown sheet"))?;
-    board_ops::child_prepend_index(sheet, parent_id)
-  }
-
-  pub fn deletion_fallback(&self, sheet_id: SheetId, cell_id: CellId) -> Option<CellId> {
-    let sheet = self.board.sheet(sheet_id)?;
-    let column_ids = self.board.sheet_column_ids(sheet_id).ok()?;
-    board_ops::deletion_fallback(sheet, &column_ids, cell_id)
-  }
-
-  pub fn preview_move_cell_subtree(&self, sheet_id: SheetId, cell_id: CellId, intent: FlowDropIntent) -> Option<Sheet> {
-    let sheet = self.board.sheet(sheet_id)?;
-    let column_ids = self.board.sheet_column_ids(sheet_id).ok()?;
-    board_ops::preview_move_cell_subtree(sheet, &column_ids, cell_id, intent)
-  }
-
-  pub fn preview_without_subtree(&self, sheet_id: SheetId, cell_id: CellId) -> Option<Sheet> {
-    let sheet = self.board.sheet(sheet_id)?;
-    board_ops::preview_without_subtree(sheet, cell_id)
-  }
-
-  pub fn subtree_cell_ids_for(&self, sheet_id: SheetId, cell_id: CellId) -> Vec<CellId> {
-    self
-      .board
-      .sheet(sheet_id)
-      .map(|sheet| board_ops::subtree_cell_ids(sheet, cell_id))
-      .unwrap_or_default()
   }
 }

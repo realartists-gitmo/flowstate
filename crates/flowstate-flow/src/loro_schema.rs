@@ -1,28 +1,33 @@
-//! The .fl0 v2 Loro container layout (flow architecture spec Part 2.1) and
-//! its write-side ensure/seed helpers. Structure:
+//! The .fl0 v3 Loro container layout (excel flow spec §1) and its write-side
+//! ensure/seed helpers. Structure:
 //!
 //! ```text
-//! "flow.meta"        Map    format (postcard, immutable) · schema_version=2 ·
-//!                           document_id · created_at / modified_at
-//! "flow.sheet_order" MovableList<String>   board order of sheet uuids
-//! "flow.sheets_by_id" Map → {sheet}: id · name (LWW) · sheet_type_id ·
-//!                           "cell_order" MovableList<String> (flat column order)
-//! "flow.cells_by_id"  Map → {cell}: id · sheet_id · column_id (LWW) ·
-//!                           parent_id (LWW, absent = root) ·
-//!                           "flow" Map (exact .db8 flow shape + per-cell
-//!                                      "paragraphs_by_id" registry)
-//! "flow.annotations"  Map    stroke uuid → postcard blob (write-once/delete)
+//! "flow.meta"           Map    format (postcard, immutable) · schema_version=3 ·
+//!                              document_id · created_at / modified_at
+//! "flow.sheet_order"    MovableList<String>   board order of sheet uuids
+//! "flow.sheets_by_id"   Map → {sheet}: id · name (LWW) · sheet_type_id ·
+//!                              "row_order"     MovableList<String> (sheet-global rows) ·
+//!                              "column_order"  MovableList<String> ·
+//!                              "columns_by_id" Map → {column}: id · label (LWW) ·
+//!                                              side · width (LWW, absent = auto) ·
+//!                              "row_heights"   Map row uuid → f64 (LWW per key)
+//! "flow.cells_by_id"    Map → {cell}: id · sheet_id · row_id (LWW) ·
+//!                              column_id (LWW) ·
+//!                              "flow" Map (exact .db8 flow shape + per-cell
+//!                                         "paragraphs_by_id" registry)
+//! "flow.annotations"    Map    stroke uuid → postcard blob (write-once/delete)
 //! ```
 //!
-//! Ordering is `MovableList` so a reorder writes ONLY the order list — it can
-//! never clobber a concurrent text edit. Parentage is a per-cell LWW register;
-//! merged states that violate flow invariants are normalized (never rejected)
-//! by [`crate::loro_projection`].
+//! Ordering is `MovableList` everywhere (sheets, rows, columns) so a reorder
+//! writes ONLY the order list — it can never clobber a concurrent edit. A
+//! cell's address is its `row_id`/`column_id` LWW pair (D1 placement map);
+//! merged states that violate grid invariants are normalized (never
+//! rejected) by [`crate::loro_projection`].
 
 use loro::{ContainerTrait as _, LoroDoc, LoroMap, LoroMovableList, LoroResult, LoroValue, ValueOrContainer};
 use uuid::Uuid;
 
-use crate::format::{CellId, ColumnId, FlowFormat, SheetId, SheetTypeId};
+use crate::format::{ArgumentSide, CellId, ColumnId, FlowFormat, RowId, SheetId, SheetTypeId};
 
 pub const META_MAP: &str = "flow.meta";
 pub const SHEET_ORDER: &str = "flow.sheet_order";
@@ -34,16 +39,19 @@ pub const ANNOTATIONS_MAP: &str = "flow.annotations";
 pub const COMMENTS_BY_ID: &str = "flow.comments_by_id";
 /// H-S6: the checkpoint records (named pins / session saves / auto grain).
 pub const CHECKPOINTS_LIST: &str = "flow.checkpoints";
-pub const CELL_ORDER_KEY: &str = "cell_order";
+pub const ROW_ORDER_KEY: &str = "row_order";
+pub const COLUMN_ORDER_KEY: &str = "column_order";
+pub const COLUMNS_BY_ID_KEY: &str = "columns_by_id";
+pub const ROW_HEIGHTS_KEY: &str = "row_heights";
 pub const CELL_FLOW_KEY: &str = "flow";
 pub const CELL_PARAGRAPHS_KEY: &str = "paragraphs_by_id";
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 pub const META_FORMAT_KEY: &str = "format";
 pub const META_SCHEMA_VERSION_KEY: &str = "schema_version";
 pub const META_DOCUMENT_ID_KEY: &str = "document_id";
 
-/// One-time creation of a fresh .fl0 v2 document. The format is immutable by
+/// One-time creation of a fresh .fl0 v3 document. The format is immutable by
 /// law: written exactly once here, never rewritten by any executor.
 pub fn init_flow_document(doc: &LoroDoc, format: &FlowFormat, document_id: Uuid) -> anyhow::Result<()> {
   flowstate_document::configure_text_styles(doc);
@@ -110,12 +118,34 @@ pub fn annotations_map(doc: &LoroDoc) -> LoroMap {
   doc.get_map(ANNOTATIONS_MAP)
 }
 
-pub fn ensure_sheet_record(doc: &LoroDoc, sheet_id: SheetId, name: &str, sheet_type_id: SheetTypeId) -> LoroResult<LoroMap> {
+/// Create (or fetch) a sheet record, seeding its columns from the sheet type
+/// definition (format columns are copied in — the format stays a pure
+/// template; renames/moves/widths are uniform across seeded and user
+/// columns). Sheets are born with ZERO rows: ghost rows are render-only and
+/// materialize via `InsertRows` on first touch.
+pub fn ensure_sheet_record(
+  doc: &LoroDoc,
+  sheet_id: SheetId,
+  name: &str,
+  sheet_type_id: SheetTypeId,
+  seed_columns: &[crate::format::ColumnDefinition],
+) -> anyhow::Result<LoroMap> {
   let sheet = sheets_map(doc).ensure_mergeable_map(&sheet_id.to_string())?;
   sheet.insert("id", sheet_id.to_string())?;
   sheet.insert("name", name)?;
   sheet.insert("sheet_type_id", sheet_type_id.to_string())?;
-  sheet.ensure_mergeable_movable_list(CELL_ORDER_KEY)?;
+  sheet.ensure_mergeable_movable_list(ROW_ORDER_KEY)?;
+  let column_order = sheet.ensure_mergeable_movable_list(COLUMN_ORDER_KEY)?;
+  sheet.ensure_mergeable_map(COLUMNS_BY_ID_KEY)?;
+  sheet.ensure_mergeable_map(ROW_HEIGHTS_KEY)?;
+  // Seed columns only on true creation (concurrent CreateSheet with the same
+  // id converges: both peers write the identical seed).
+  if column_order.is_empty() {
+    for definition in seed_columns {
+      ensure_column_record(&sheet, definition.id, &definition.label, definition.side)?;
+      column_order.insert(column_order.len(), definition.id.to_string())?;
+    }
+  }
   Ok(sheet)
 }
 
@@ -123,8 +153,60 @@ pub fn sheet_record(doc: &LoroDoc, sheet_id: SheetId) -> Option<LoroMap> {
   child_map(&sheets_map(doc), &sheet_id.to_string())
 }
 
-pub fn sheet_cell_order(sheet: &LoroMap) -> LoroResult<LoroMovableList> {
-  sheet.ensure_mergeable_movable_list(CELL_ORDER_KEY)
+pub fn sheet_row_order(sheet: &LoroMap) -> LoroResult<LoroMovableList> {
+  sheet.ensure_mergeable_movable_list(ROW_ORDER_KEY)
+}
+
+pub fn sheet_column_order(sheet: &LoroMap) -> LoroResult<LoroMovableList> {
+  sheet.ensure_mergeable_movable_list(COLUMN_ORDER_KEY)
+}
+
+pub fn sheet_columns_map(sheet: &LoroMap) -> LoroResult<LoroMap> {
+  sheet.ensure_mergeable_map(COLUMNS_BY_ID_KEY)
+}
+
+pub fn sheet_row_heights(sheet: &LoroMap) -> LoroResult<LoroMap> {
+  sheet.ensure_mergeable_map(ROW_HEIGHTS_KEY)
+}
+
+pub fn ensure_column_record(sheet: &LoroMap, column_id: ColumnId, label: &str, side: ArgumentSide) -> LoroResult<LoroMap> {
+  let columns = sheet.ensure_mergeable_map(COLUMNS_BY_ID_KEY)?;
+  let column = columns.ensure_mergeable_map(&column_id.to_string())?;
+  column.insert("id", column_id.to_string())?;
+  column.insert("label", label)?;
+  column.insert("side", side_str(side))?;
+  Ok(column)
+}
+
+pub fn column_record(sheet: &LoroMap, column_id: ColumnId) -> Option<LoroMap> {
+  child_map(&child_map(sheet, COLUMNS_BY_ID_KEY)?, &column_id.to_string())
+}
+
+pub fn set_column_width(column: &LoroMap, width: Option<f32>) -> LoroResult<()> {
+  match width {
+    Some(width) => column.insert("width", f64::from(width)),
+    None => {
+      if column.get("width").is_some() {
+        column.delete("width")?;
+      }
+      Ok(())
+    },
+  }
+}
+
+pub fn side_str(side: ArgumentSide) -> &'static str {
+  match side {
+    ArgumentSide::One => "one",
+    ArgumentSide::Two => "two",
+  }
+}
+
+pub fn parse_side(value: &str) -> Option<ArgumentSide> {
+  match value {
+    "one" => Some(ArgumentSide::One),
+    "two" => Some(ArgumentSide::Two),
+    _ => None,
+  }
 }
 
 /// The durable flow id embedded in a cell's flow map — namespaced so cell
@@ -134,28 +216,15 @@ pub fn cell_flow_id(cell_id: CellId) -> String {
   format!("cell.{}.flow", cell_id.as_simple())
 }
 
-/// Create (or fetch) a cell's record. The cell's rich text arrives via
-/// [`seed_cell_flow`] / [`crate::loro_import::write_cell_paragraphs`] —
-/// creation and content are separate ops inside ONE intent commit.
-pub fn ensure_cell_record(
-  doc: &LoroDoc,
-  cell_id: CellId,
-  sheet_id: SheetId,
-  column_id: ColumnId,
-  parent: Option<CellId>,
-) -> LoroResult<LoroMap> {
+/// Create (or fetch) a cell's record AT an address. The cell's rich text
+/// arrives via [`seed_cell_flow`] / `write_cell_paragraphs` — creation and
+/// content are separate ops inside ONE intent commit.
+pub fn ensure_cell_record(doc: &LoroDoc, cell_id: CellId, sheet_id: SheetId, row_id: RowId, column_id: ColumnId) -> LoroResult<LoroMap> {
   let cell = cells_map(doc).ensure_mergeable_map(&cell_id.to_string())?;
   cell.insert("id", cell_id.to_string())?;
   cell.insert("sheet_id", sheet_id.to_string())?;
+  cell.insert("row_id", row_id.to_string())?;
   cell.insert("column_id", column_id.to_string())?;
-  match parent {
-    Some(parent) => cell.insert("parent_id", parent.to_string())?,
-    None => {
-      if cell.get("parent_id").is_some() {
-        cell.delete("parent_id")?;
-      }
-    },
-  }
   let flow = cell.ensure_mergeable_map(CELL_FLOW_KEY)?;
   let flow_id = cell_flow_id(cell_id);
   flow.insert(flowstate_document::FLOW_ID_KEY, flow_id.as_str())?;
@@ -179,16 +248,10 @@ pub fn cell_paragraph_registry(flow: &LoroMap) -> Option<LoroMap> {
   child_map(flow, CELL_PARAGRAPHS_KEY)
 }
 
-pub fn set_cell_parent(cell: &LoroMap, parent: Option<CellId>) -> LoroResult<()> {
-  match parent {
-    Some(parent) => cell.insert("parent_id", parent.to_string()),
-    None => {
-      if cell.get("parent_id").is_some() {
-        cell.delete("parent_id")?;
-      }
-      Ok(())
-    },
-  }
+/// The move (D1): LWW register writes only — the nested flow container is
+/// never touched, so concurrent typing merges through a move.
+pub fn set_cell_row(cell: &LoroMap, row: RowId) -> LoroResult<()> {
+  cell.insert("row_id", row.to_string())
 }
 
 pub fn set_cell_column(cell: &LoroMap, column: ColumnId) -> LoroResult<()> {
@@ -244,6 +307,14 @@ pub fn map_uuid(map: &LoroMap, key: &str) -> Option<Uuid> {
 pub fn map_binary(map: &LoroMap, key: &str) -> Option<Vec<u8>> {
   match map.get(key) {
     Some(ValueOrContainer::Value(LoroValue::Binary(value))) => Some(value.to_vec()),
+    _ => None,
+  }
+}
+
+pub fn map_f64(map: &LoroMap, key: &str) -> Option<f64> {
+  match map.get(key) {
+    Some(ValueOrContainer::Value(LoroValue::Double(value))) => Some(value),
+    Some(ValueOrContainer::Value(LoroValue::I64(value))) => Some(value as f64),
     _ => None,
   }
 }

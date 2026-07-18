@@ -5,6 +5,7 @@ pub mod ribbon;
 pub mod sheet_strip;
 
 pub use editor::{AnnotationTool, FlowEditor, FlowExternalPresence, FlowPresenceSnapshot};
+pub(crate) use editor::{FlowPreview, render_flow_board_preview};
 pub use panel::FlowPanel;
 pub use ribbon::FlowRibbon;
 pub use sheet_strip::FlowSheetStrip;

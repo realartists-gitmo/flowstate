@@ -38,11 +38,17 @@ impl Render for RichTextEditor {
     let render_items = render_layout.items.clone();
     let hide_initial_layout = render_layout.hide_initial_layout;
     let flow_cell_surface = self.config.flow_cell_surface;
-    let flow_cell_height = item_sizes.iter().fold(px(1.0), |height, item| height + item.height);
+    // Sum the TRUE content height (no base pad) so the height the flow grid
+    // reads back for autofit matches the idle `RichTextDocumentElement` exactly
+    // — a base pad here would make a focused cell measure taller than its idle
+    // display and nudge the autofit row down on click. The `.max(px(1.0))` on
+    // the rendered box below keeps a zero-content editor non-degenerate without
+    // leaking that floor into the measured height.
+    let flow_cell_height = item_sizes.iter().fold(px(0.0), |height, item| height + item.height);
     div()
       .id("rich-text-editor")
       .relative()
-      .when(flow_cell_surface, |this| this.w_full().h(flow_cell_height))
+      .when(flow_cell_surface, |this| this.w_full().h(flow_cell_height.max(px(1.0))))
       .when(!flow_cell_surface, |this| this.size_full())
       .when(!flow_cell_surface, |this| this.bg(self.document.theme.document_background_color))
       .track_focus(&self.focus_handle(cx))

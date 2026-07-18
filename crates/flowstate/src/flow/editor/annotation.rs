@@ -1,8 +1,13 @@
-use flowstate_flow::{AnnotationOriginator, AnnotationStroke, BoardPoint, BoardRect, StrokeStyle};
+//! Ink on the grid — rigid-body strokes (D6): each stroke stores ONE grid
+//! anchor (row, column, px offset) and its geometry as stroke-local pixels.
+//! Structure changes can only TRANSLATE ink; deformation is impossible by
+//! construction.
+
+use flowstate_flow::{AnnotationOriginator, AnnotationStroke, GridAnchor, StrokePoint, StrokeRect, StrokeStyle};
 use gpui::{Context, Hsla, PathBuilder, Pixels, Point, Window, point, px};
 use gpui_component::PixelsExt as _;
 
-use super::{AnnotationTool, FlowEditor};
+use super::{AnnotationTool, BoardPoint, FlowEditor};
 
 impl FlowEditor {
   pub fn marker_color_rgba(&self) -> u32 {
@@ -50,9 +55,8 @@ impl FlowEditor {
     self.local_annotation_originator = originator;
   }
 
-  /// I-S1: the ribbon's "Clear ink" clears THIS SHEET — exactly what its label
-  /// always claimed (the old implementation wiped every sheet). Clears both
-  /// the local identity's strokes and legacy pre-identity "local" strokes.
+  /// I-S1: the ribbon's "Clear ink" clears THIS SHEET. Clears both the local
+  /// identity's strokes and legacy pre-identity "local" strokes.
   pub fn clear_annotations(&mut self, cx: &mut Context<Self>) {
     let Some(sheet) = self.active_sheet else {
       return;
@@ -80,9 +84,7 @@ impl FlowEditor {
   }
 
   /// I-S1 ownership rule: you erase YOUR strokes — plus legacy `"local"`
-  /// strokes, which carry zero identity information (every pre-identity peer
-  /// stamped that literal; write-once blobs can't be adopted, and freezing
-  /// them would make legacy ink immortal).
+  /// strokes, which carry zero identity information.
   fn erasable_originators(&self) -> Vec<AnnotationOriginator> {
     let legacy = AnnotationOriginator("local".into());
     if self.local_annotation_originator == legacy {
@@ -96,13 +98,6 @@ impl FlowEditor {
     originator == &self.local_annotation_originator || originator.0 == "local"
   }
 
-  fn annotation_point(&self, position: Point<Pixels>) -> BoardPoint {
-    BoardPoint {
-      x: (position.x.as_f32() - self.viewport_origin.x) / self.board_zoom,
-      y: (position.y.as_f32() - self.viewport_origin.y) / self.board_zoom,
-    }
-  }
-
   pub(super) fn set_viewport_origin(&mut self, origin: Point<Pixels>) {
     self.viewport_origin = BoardPoint {
       x: origin.x.as_f32(),
@@ -114,23 +109,41 @@ impl FlowEditor {
     match self.annotation_tool {
       AnnotationTool::Marker => {
         self.drawing_points.clear();
-        self.drawing_points.push(self.annotation_point(position));
+        let point = self.model_point(position);
+        self.drawing_points.push(point);
       },
-      AnnotationTool::Eraser => self.erase_at(self.annotation_point(position), cx),
+      AnnotationTool::Eraser => {
+        let point = self.model_point(position);
+        self.erase_at(point, cx);
+      },
       AnnotationTool::None => {},
     }
     cx.notify();
   }
 
+  /// G: right-button drag begins a freehand stroke with no tool armed, drawn
+  /// in the local user's profile color (their presence/identity color).
+  pub(super) fn begin_ink(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+    let color_rgb = crate::app_settings::load_local_user_profile().color_rgb & 0x00ff_ffff;
+    self.active_ink_color = Some((color_rgb << 8) | 0xff);
+    self.right_inking = true;
+    self.drawing_points.clear();
+    self.drawing_points.push(self.model_point(position));
+    cx.notify();
+  }
+
   pub(super) fn continue_annotation(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
     if self.annotation_tool == AnnotationTool::Eraser {
-      self.erase_at(self.annotation_point(position), cx);
+      let point = self.model_point(position);
+      self.erase_at(point, cx);
       return;
     }
-    if self.annotation_tool != AnnotationTool::Marker || self.drawing_points.is_empty() {
+    // The armed marker OR an in-flight right-drag both extend the draft.
+    let inking = self.annotation_tool == AnnotationTool::Marker || self.right_inking;
+    if !inking || self.drawing_points.is_empty() {
       return;
     }
-    let point = self.annotation_point(position);
+    let point = self.model_point(position);
     let should_append = self.drawing_points.last().is_none_or(|last| {
       let dx = point.x - last.x;
       let dy = point.y - last.y;
@@ -142,7 +155,13 @@ impl FlowEditor {
     }
   }
 
+  /// Commit the draft as a rigid body: the slot under the FIRST point is the
+  /// stroke's one grid anchor; every stored coordinate is stroke-local.
   pub(super) fn finish_annotation(&mut self, cx: &mut Context<Self>) {
+    // Take the ink color (and disarm the right-drag) regardless of how we
+    // return, so a stray right-click never leaves us stuck inking.
+    let ink_color = self.active_ink_color.take().unwrap_or(self.marker_color_rgba);
+    self.right_inking = false;
     let Some(sheet_id) = self.active_sheet else {
       self.drawing_points.clear();
       return;
@@ -151,17 +170,44 @@ impl FlowEditor {
       self.drawing_points.clear();
       return;
     }
-    let points = simplify_stroke(&std::mem::take(&mut self.drawing_points), 1.5);
+    let raw = simplify_stroke(&std::mem::take(&mut self.drawing_points), 1.5);
+    let Some(first) = raw.first().copied() else {
+      return;
+    };
+    let Some(anchor) = ({
+      let Some((layout, sheet)) = self.active_layout() else {
+        return;
+      };
+      let row_ix = layout.row_at(first.y).unwrap_or(0).min(layout.real_rows.saturating_sub(1));
+      let column_ix = layout.column_at(first.x).unwrap_or(0);
+      let (slot_x, slot_y) = layout.slot_origin(row_ix, column_ix);
+      sheet.columns.get(column_ix).map(|column| GridAnchor {
+        row_id: sheet.rows.get(row_ix).map(|row| row.id).unwrap_or_else(uuid::Uuid::nil),
+        column_id: column.id,
+        offset: StrokePoint {
+          x: first.x - slot_x,
+          y: first.y - slot_y,
+        },
+      })
+    }) else {
+      return;
+    };
+    let points: Vec<StrokePoint> = raw
+      .iter()
+      .map(|point| StrokePoint {
+        x: point.x - first.x,
+        y: point.y - first.y,
+      })
+      .collect();
     let bbox = stroke_bbox(&points);
     let stroke = AnnotationStroke {
       id: uuid::Uuid::new_v4(),
       sheet_id,
       originator: self.local_annotation_originator.clone(),
+      anchor,
       points,
       style: StrokeStyle {
-        // I-S2: the chosen pen color (color_rgba was in every stroke blob all
-        // along — only the hardcoded amber ever reached it).
-        color_rgba: self.marker_color_rgba,
+        color_rgba: ink_color,
         width: 4.0,
         opacity: 0.55,
       },
@@ -175,33 +221,43 @@ impl FlowEditor {
     }
   }
 
+  /// Eraser hit test in board space: reproject each stroke through its
+  /// anchor (the same law the painter uses) and test segment distance.
   fn erase_at(&mut self, point: BoardPoint, cx: &mut Context<Self>) {
-    let Some(sheet) = self
-      .active_sheet
-      .and_then(|sheet_id| self.board.sheets.iter().find(|sheet| sheet.id == sheet_id))
-    else {
-      return;
+    let touched = {
+      let Some((layout, sheet)) = self.active_layout() else {
+        return;
+      };
+      let radius = 10.0;
+      sheet
+        .annotations
+        .iter()
+        .find(|stroke| {
+          if !self.originator_erasable(&stroke.originator) {
+            return false;
+          }
+          let (row_ix, column_ix) = sheet.resolve_anchor(&stroke.anchor);
+          let (slot_x, slot_y) = layout.slot_origin(row_ix, column_ix);
+          let base = BoardPoint {
+            x: slot_x + stroke.anchor.offset.x,
+            y: slot_y + stroke.anchor.offset.y,
+          };
+          let local = BoardPoint {
+            x: point.x - base.x,
+            y: point.y - base.y,
+          };
+          local.x >= stroke.bbox.min.x - radius
+            && local.x <= stroke.bbox.max.x + radius
+            && local.y >= stroke.bbox.min.y - radius
+            && local.y <= stroke.bbox.max.y + radius
+            && stroke
+              .points
+              .windows(2)
+              .any(|segment| segment_distance(local, segment[0], segment[1]) <= radius)
+        })
+        .map(|stroke| (stroke.id, stroke.originator.clone(), sheet.id))
     };
-    let radius = 10.0;
-    let touched = sheet
-      .annotations
-      .iter()
-      .find(|stroke| {
-        self.originator_erasable(&stroke.originator)
-          && point.x >= stroke.bbox.min.x - radius
-          && point.x <= stroke.bbox.max.x + radius
-          && point.y >= stroke.bbox.min.y - radius
-          && point.y <= stroke.bbox.max.y + radius
-          && stroke
-            .points
-            .windows(2)
-            .any(|segment| segment_distance(point, segment[0], segment[1]) <= radius)
-      })
-      // I-S1: the delete intent carries the STROKE's originator so the
-      // executor's ownership check passes for legacy "local" strokes too.
-      .map(|stroke| (stroke.id, stroke.originator.clone()));
-    let sheet_id = sheet.id;
-    if let Some((stroke_id, originator)) = touched
+    if let Some((stroke_id, originator, sheet_id)) = touched
       && self
         .apply_intent(
           &flowstate_flow::FlowIntent::DeleteAnnotation {
@@ -218,7 +274,7 @@ impl FlowEditor {
   }
 }
 
-fn stroke_bbox(points: &[BoardPoint]) -> BoardRect {
+fn stroke_bbox(points: &[StrokePoint]) -> StrokeRect {
   let mut min = points[0];
   let mut max = points[0];
   for point in &points[1..] {
@@ -227,7 +283,7 @@ fn stroke_bbox(points: &[BoardPoint]) -> BoardRect {
     max.x = max.x.max(point.x);
     max.y = max.y.max(point.y);
   }
-  BoardRect { min, max }
+  StrokeRect { min, max }
 }
 
 fn simplify_stroke(points: &[BoardPoint], minimum_distance: f32) -> Vec<BoardPoint> {
@@ -256,7 +312,7 @@ fn simplify_stroke(points: &[BoardPoint], minimum_distance: f32) -> Vec<BoardPoi
   simplified
 }
 
-fn segment_distance(point: BoardPoint, start: BoardPoint, end: BoardPoint) -> f32 {
+fn segment_distance(point: BoardPoint, start: StrokePoint, end: StrokePoint) -> f32 {
   let dx = end.x - start.x;
   let dy = end.y - start.y;
   let length_squared = dx * dx + dy * dy;
@@ -270,7 +326,9 @@ fn segment_distance(point: BoardPoint, start: BoardPoint, end: BoardPoint) -> f3
   (point.x - nearest_x).hypot(point.y - nearest_y)
 }
 
-pub(super) fn paint_stroke(origin: Point<Pixels>, points: &[BoardPoint], width: Pixels, color: Hsla, zoom: f32, window: &mut Window) {
+/// Paint a stroke's LOCAL points at an anchor origin (screen space); zoom
+/// scales uniformly — translation only, never deformation.
+pub(super) fn paint_stroke(origin: Point<Pixels>, points: &[StrokePoint], width: Pixels, color: Hsla, zoom: f32, window: &mut Window) {
   let Some(first) = points.first() else {
     return;
   };

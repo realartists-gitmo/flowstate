@@ -1,10 +1,10 @@
-use flowstate_flow::RelativePosition;
 use gpui::{
   App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, MouseButton, MouseDownEvent, Render, Window, div,
   prelude::*, px,
 };
 use gpui_component::ActiveTheme as _;
 
+use crate::flow::editor::RelativePosition;
 use crate::flow::{AnnotationTool, FlowEditor};
 
 pub struct FlowRibbon {
@@ -135,9 +135,9 @@ impl Render for FlowRibbon {
           )
           .child(
             chip(
-              RibbonChip::new("flow-add-sibling-above", "Above", "Add a sibling cell above")
+              RibbonChip::new("flow-add-sibling-above", "Row above", "Insert a row above the cursor, with a fresh card in its column")
                 .command_shortcut(CommandId::FlowAddSiblingAbove)
-                .disabled(!has_active_cell),
+                .disabled(!has_active_sheet),
             )
             .on_click(move |_, window, cx| {
               above_editor.update(cx, |editor, cx| {
@@ -148,9 +148,9 @@ impl Render for FlowRibbon {
           )
           .child(
             chip(
-              RibbonChip::new("flow-add-sibling", "Below", "Add a sibling cell below")
+              RibbonChip::new("flow-add-sibling", "Row below", "Insert a row below the cursor, with a fresh card in its column")
                 .command_shortcut(CommandId::FlowAddSiblingBelow)
-                .disabled(!has_active_cell),
+                .disabled(!has_active_sheet),
             )
             .on_click(move |_, window, cx| {
               below_editor.update(cx, |editor, cx| {
@@ -159,6 +159,31 @@ impl Render for FlowRibbon {
               });
             }),
           ),
+      )
+      // ---- Grid structure ----
+      .child(
+        ribbon_group(true, cx)
+          .child({
+            let editor = self.editor.clone();
+            chip(
+              RibbonChip::new("flow-delete-row", "Delete row", "Delete the cursor's row and every card in it").disabled(!has_active_sheet),
+            )
+            .on_click(move |_, _, cx| editor.update(cx, |editor, cx| editor.delete_cursor_row(cx)))
+          })
+          .child({
+            let editor = self.editor.clone();
+            chip(RibbonChip::new("flow-add-column", "Column", "Add a column at the right edge").disabled(!has_active_sheet))
+              .on_click(move |_, _, cx| editor.update(cx, |editor, cx| editor.add_column_end(cx)))
+          })
+          .child({
+            let editor = self.editor.clone();
+            chip(
+              RibbonChip::new("flow-delete-column", "Delete column", "Delete the cursor's column (asks first)")
+                .danger(true)
+                .disabled(!has_active_sheet),
+            )
+            .on_click(move |_, window, cx| editor.update(cx, |editor, cx| editor.confirm_delete_cursor_column(window, cx)))
+          }),
       )
       // ---- Cell ----
       .child(

@@ -157,6 +157,26 @@ impl RichTextEditor {
     self.note_measured_item_width(width, cx);
   }
 
+  /// Seed the width this editor lays its text out at BEFORE it has ever been
+  /// drawn, so its very first frame wraps at the true content width instead of
+  /// the unmeasured `px(900.0)` fallback in `current_layout_width` /
+  /// `paragraph_item_sizes`.
+  ///
+  /// The flow grid uses this when it spins a cell's `RichTextEditor` up on
+  /// focus: a fresh editor has never been laid out (`measured_item_width` is
+  /// `None` and its scroll viewport is 0-wide), so without a seed it measures a
+  /// multi-line cell short at 900px, the D4 autofit row collapses, and the whole
+  /// column shifts for a frame — with a transient re-wrap flash — until the real
+  /// width lands. Seeding the column's content width makes focus a no-op on
+  /// height. A later real layout re-confirms the same width, so this never
+  /// fights the measured value.
+  pub fn seed_layout_width(&mut self, width: Pixels, cx: &mut Context<Self>) {
+    if width <= px(0.0) {
+      return;
+    }
+    self.note_measured_item_width(width, cx);
+  }
+
   fn block_ix_for_paragraph(&self, target_paragraph_ix: usize) -> Option<usize> {
     super::block_ix_for_paragraph(&self.document, target_paragraph_ix)
   }

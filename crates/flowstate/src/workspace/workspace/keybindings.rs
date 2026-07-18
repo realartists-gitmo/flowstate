@@ -45,10 +45,13 @@ impl Workspace {
           flow.update(cx, |editor, cx| editor.redo(cx));
           true
         },
+        // Excel muscle memory: Enter moves the cursor DOWN one row (through
+        // empty slots and into the ghost run), it does not insert a row. The
+        // explicit add-row verbs stay on FlowAddSiblingAbove/Below.
         CommandId::InsertNewline => {
           flow.update(cx, |editor, cx| {
-            editor.add_sibling(flowstate_flow::RelativePosition::After, cx);
-            editor.focus_active_cell(window, cx);
+            editor.navigate(crate::flow::editor::GridDirection::Down, cx);
+            editor.focus_cursor_slot(window, cx);
           });
           true
         },
@@ -61,14 +64,14 @@ impl Workspace {
         },
         CommandId::FlowAddSiblingAbove => {
           flow.update(cx, |editor, cx| {
-            editor.add_sibling(flowstate_flow::RelativePosition::Before, cx);
+            editor.add_sibling(crate::flow::editor::RelativePosition::Before, cx);
             editor.focus_active_cell(window, cx);
           });
           true
         },
         CommandId::FlowAddSiblingBelow => {
           flow.update(cx, |editor, cx| {
-            editor.add_sibling(flowstate_flow::RelativePosition::After, cx);
+            editor.add_sibling(crate::flow::editor::RelativePosition::After, cx);
             editor.focus_active_cell(window, cx);
           });
           true
@@ -142,8 +145,17 @@ impl Workspace {
           flow.update(cx, |editor, cx| editor.move_active_sheet(1, cx));
           true
         },
+        // Backspace out of an EMPTY cell: remove the empty cell and step the
+        // cursor UP to the previous row (Excel-ish unwind), so repeated
+        // backspaces walk back up through blanks. A non-empty cell is not
+        // intercepted here — the keystroke reaches the editor and deletes a
+        // character as usual.
         CommandId::Backspace if flow.read(cx).active_cell_is_empty() => {
-          flow.update(cx, |editor, cx| editor.delete_selected(window, cx));
+          flow.update(cx, |editor, cx| {
+            editor.delete_selected(window, cx);
+            editor.navigate(crate::flow::editor::GridDirection::Up, cx);
+            editor.focus_cursor_slot(window, cx);
+          });
           true
         },
         CommandId::DeleteWordForward | CommandId::FlowDeleteSelected => {

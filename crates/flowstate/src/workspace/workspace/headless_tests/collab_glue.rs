@@ -93,7 +93,7 @@ fn start_and_leave_flow_collaboration_session_round_trip(cx: &mut TestAppContext
   flow.update(cx, |editor, cx| editor.add_new_family(cx));
   flow.read_with(cx, |editor, _cx| {
     assert_eq!(
-      editor.board().sheets[0].cells.len(),
+      editor.board().sheets[0].cells().count(),
       2,
       "the flow tab keeps editing through its untouched authority after leave"
     );
@@ -180,7 +180,7 @@ fn flow_external_presence_hand_and_cell_caret(cx: &mut TestAppContext) {
   cx.run_until_parked();
   let (sheet, cell) = editor.read_with(cx, |editor, _cx| {
     let sheet = &editor.board().sheets[0];
-    (sheet.id, sheet.cells[0].id)
+    (sheet.id, sheet.cells().next().expect("cell").id)
   });
   // Give the cell text and encode a "remote" caret inside it via the same
   // cursor law a real peer would use.

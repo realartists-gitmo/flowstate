@@ -87,6 +87,10 @@ pub struct Workspace {
   active_toolkit_tool: Option<ToolkitTool>,
   recent_documents: Vec<PathBuf>,
   recent_document_previews: HashMap<PathBuf, DocumentProjection>,
+  /// Flow (.fl0) recents render a faithful static board viewport (the flow
+  /// analogue of the `.db8` card's rich-text preview), built from the loaded
+  /// board projection + each cell's rich-text projection.
+  recent_flow_previews: HashMap<PathBuf, crate::flow::FlowPreview>,
   /// R5-B: home-surface pinned recents (persisted; float ahead of MRU).
   pinned_recent_documents: Vec<PathBuf>,
   /// R3-A: orphaned recovery snapshots found at startup — the home

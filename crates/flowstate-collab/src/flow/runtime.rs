@@ -350,21 +350,24 @@ impl FlowRuntime {
   ) -> Result<super::cell_authority::CellTextCommit, gpui_flowtext::WriteRejected> {
     let vv_before = self.doc.oplog_vv();
     let frontier_before = self.doc.state_frontiers();
-    if let Err(rejection) = super::cell_text::execute_cell_text(&self.doc, cell_id, intent) {
-      // Compound intents may have partially applied: converge back.
-      self.doc.set_next_commit_origin("repair");
-      self.doc.commit();
-      if self.doc.state_frontiers() != frontier_before {
-        let _ = self.doc.revert_to(&frontier_before);
+    let caret_pos = match super::cell_text::execute_cell_text(&self.doc, cell_id, intent) {
+      Ok(caret_pos) => caret_pos,
+      Err(rejection) => {
+        // Compound intents may have partially applied: converge back.
         self.doc.set_next_commit_origin("repair");
         self.doc.commit();
-        let _ = self.refresh(None);
-        // Publish the compensation: later exports start after these ops, so
-        // leaving them unpublished is a permanent causal gap on every peer.
-        let _ = self.queue_local_update(&vv_before);
-      }
-      return Err(rejection);
-    }
+        if self.doc.state_frontiers() != frontier_before {
+          let _ = self.doc.revert_to(&frontier_before);
+          self.doc.set_next_commit_origin("repair");
+          self.doc.commit();
+          let _ = self.refresh(None);
+          // Publish the compensation: later exports start after these ops, so
+          // leaving them unpublished is a permanent causal gap on every peer.
+          let _ = self.queue_local_update(&vv_before);
+        }
+        return Err(rejection);
+      },
+    };
     self.doc.set_next_commit_origin("local");
     self
       .doc
@@ -386,12 +389,20 @@ impl FlowRuntime {
     let projection = self
       .cell_projection(cell_id)
       .map_err(|_| gpui_flowtext::WriteRejected::StructureViolation("flow cell projection unavailable"))?;
+    // Anchor the post-edit caret on a Loro cursor so it survives concurrent
+    // remote edits exactly (spec §8), mirroring the body's `selection_after`.
+    let caret = caret_pos.and_then(|flow_pos| {
+      let text = super::cell_authority::FlowCellAuthority::cell_text(&self.doc, cell_id)?;
+      let cursor = text.get_cursor(flow_pos, loro::cursor::Side::Left)?;
+      Some((flow_pos, cursor.encode()))
+    });
     Ok(super::cell_authority::CellTextCommit {
       replace: gpui_flowtext::ProjectionReplace {
         document: projection,
         frontier: self.frontier(),
         version_vector: self.doc.oplog_vv().encode(),
       },
+      caret,
     })
   }
 
@@ -428,6 +439,14 @@ impl FlowRuntime {
       self.queue_local_update(&vv_pre_repair)?;
     }
     self.refresh(Some(&dirty))?;
+    // Merge artifacts the normalizer repaired in projection space (phantom
+    // rows, D2 bumps) converge canonically here; the repair delta publishes
+    // its own window like any local commit.
+    let vv_pre_grid_repair = self.doc.oplog_vv();
+    if self.repair_grid_structure() {
+      self.queue_local_update(&vv_pre_grid_repair)?;
+      self.refresh(Some(&HashSet::new()))?;
+    }
     self.push_board_stream();
     for cell in dirty {
       self.push_cell_replace(cell);
@@ -473,6 +492,103 @@ impl FlowRuntime {
     wrote
   }
 
+  /// The grid STRUCTURAL repair pass (excel flow spec §3): converge canonical
+  /// state to the normalized projection the shared materializer already
+  /// decided — phantom/bump rows written into `row_order`, re-homed cell
+  /// addresses written to their LWW registers, type-fallback columns made
+  /// real. Deterministic on every peer (it writes projection facts, and the
+  /// projection is a pure function of canonical state); capped per target so
+  /// an unclearable defect quarantines instead of looping. Commits with
+  /// `repair` origin (undo-inert); the caller decides the publish window.
+  fn repair_grid_structure(&mut self) -> bool {
+    const MAX_REPAIR_ATTEMPTS: u8 = 3;
+    if self.defects.is_empty() {
+      return false;
+    }
+    let mut wrote = false;
+    let sheets = self.board.sheets.clone();
+    for sheet in &sheets {
+      let Some(record) = loro_schema::sheet_record(&self.doc, sheet.id) else {
+        continue;
+      };
+      // Type-fallback columns become canonical records.
+      if let Ok(column_order) = loro_schema::sheet_column_order(&record)
+        && column_order.is_empty()
+        && !sheet.columns.is_empty()
+        && self.repair_allowed(&format!("grid/{}/columns", sheet.id), MAX_REPAIR_ATTEMPTS)
+      {
+        for column in &sheet.columns {
+          if loro_schema::ensure_column_record(&record, column.id, &column.label, column.side).is_ok() {
+            let _ = column_order.insert(column_order.len(), column.id.to_string());
+          }
+        }
+        wrote = true;
+      }
+      // Phantom / bump rows enter the canonical order at their projected
+      // position (anchor: the first LATER projected row that is already
+      // canonical — identical on every peer because projections are).
+      if let Ok(row_order) = loro_schema::sheet_row_order(&record) {
+        for (index, row) in sheet.rows.iter().enumerate() {
+          let entry = row.id.to_string();
+          let canonical = loro_schema::list_strings(&row_order);
+          if canonical.iter().any(|candidate| candidate == &entry) {
+            continue;
+          }
+          if !self.repair_allowed(&format!("grid/{}/row/{}", sheet.id, row.id), MAX_REPAIR_ATTEMPTS) {
+            continue;
+          }
+          let position = sheet.rows[index + 1..]
+            .iter()
+            .find_map(|later| {
+              let later_entry = later.id.to_string();
+              canonical.iter().position(|candidate| candidate == &later_entry)
+            })
+            .unwrap_or(canonical.len());
+          if row_order.insert(position.min(row_order.len()), entry).is_ok() {
+            wrote = true;
+          }
+        }
+      }
+      // Bumped / re-homed cell addresses converge to the projection.
+      for cell in sheet.cells() {
+        let Some(cell_record) = loro_schema::cell_record(&self.doc, cell.id) else {
+          continue;
+        };
+        let canonical_row = loro_schema::map_uuid(&cell_record, "row_id");
+        let canonical_column = loro_schema::map_uuid(&cell_record, "column_id");
+        if canonical_row == Some(cell.row_id) && canonical_column == Some(cell.column_id) {
+          continue;
+        }
+        if !self.repair_allowed(&format!("grid/{}/cell/{}", sheet.id, cell.id), MAX_REPAIR_ATTEMPTS) {
+          continue;
+        }
+        if canonical_row != Some(cell.row_id) {
+          let _ = loro_schema::set_cell_row(&cell_record, cell.row_id);
+        }
+        if canonical_column != Some(cell.column_id) {
+          let _ = loro_schema::set_cell_column(&cell_record, cell.column_id);
+        }
+        wrote = true;
+      }
+    }
+    if wrote {
+      self.doc.set_next_commit_origin("repair");
+      self.doc.set_next_commit_message("flow.grid-repair");
+      self.doc.commit();
+    }
+    let _ = self.take_touched();
+    wrote
+  }
+
+  fn repair_allowed(&mut self, key: &str, cap: u8) -> bool {
+    let count = self.repair_attempts.entry(key.to_string()).or_insert(0);
+    if *count >= cap {
+      return false;
+    }
+    *count += 1;
+    true
+  }
+
   // ---- undo (through the gate, streamed, published) -----------------------
 
   pub fn can_undo(&self) -> bool {
@@ -516,6 +632,11 @@ impl FlowRuntime {
     // repair delta rides the `vv_before` export below (no separate publish).
     self.repair_cell_registries(&dirty);
     self.refresh(Some(&dirty))?;
+    // Undo can resurrect states the normalizer had to repair; converge them
+    // canonically inside the same publish window (`vv_before` export below).
+    if self.repair_grid_structure() {
+      self.refresh(Some(&HashSet::new()))?;
+    }
     self.push_board_stream();
     for cell in dirty {
       self.push_cell_replace(cell);
@@ -613,12 +734,7 @@ impl FlowRuntime {
       .board
       .sheets
       .iter()
-      .flat_map(|sheet| {
-        sheet
-          .cells
-          .iter()
-          .map(|cell| (cell.id, cell.summary.clone()))
-      })
+      .flat_map(|sheet| sheet.cells().map(|cell| (cell.id, cell.summary.clone())))
       .collect();
     self.rebuild_text_container_index();
     // Local intents must never trigger a hidden whole-board content rebuild:
@@ -630,7 +746,7 @@ impl FlowRuntime {
   fn rebuild_text_container_index(&mut self) {
     self.text_containers.clear();
     for sheet in &self.board.sheets {
-      for cell in &sheet.cells {
+      for cell in sheet.cells() {
         let Some(record) = loro_schema::cell_record(&self.doc, cell.id) else {
           continue;
         };
@@ -688,7 +804,7 @@ impl FlowRuntime {
       .board
       .sheets
       .iter()
-      .flat_map(|sheet| sheet.cells.iter().map(|cell| cell.id))
+      .flat_map(|sheet| sheet.cells().map(|cell| cell.id))
       .collect();
     let mut threads = Vec::new();
     comments.for_each(|key, value| {
@@ -759,7 +875,7 @@ impl FlowRuntime {
           .board
           .sheets
           .iter()
-          .flat_map(|sheet| sheet.cells.iter())
+          .flat_map(|sheet| sheet.cells())
           .find(|candidate| candidate.id == cell_id)
           .ok_or_else(|| anyhow::anyhow!("cell {cell_id:?} does not exist"))?;
         cell.summary.summary_text.to_string()
@@ -1033,12 +1149,17 @@ impl FlowRuntime {
     self.touch_modified_meta();
     self.queue_local_update(&vv_before)?;
     self.refresh(None)?;
+    let vv_pre_grid_repair = self.doc.oplog_vv();
+    if self.repair_grid_structure() {
+      self.queue_local_update(&vv_pre_grid_repair)?;
+      self.refresh(Some(&HashSet::new()))?;
+    }
     self.push_board_stream();
     let cells: Vec<CellId> = self
       .board
       .sheets
       .iter()
-      .flat_map(|sheet| sheet.cells.iter().map(|cell| cell.id))
+      .flat_map(|sheet| sheet.cells().map(|cell| cell.id))
       .collect();
     for cell in cells {
       self.push_cell_replace(cell);

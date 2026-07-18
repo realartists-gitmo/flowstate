@@ -204,7 +204,7 @@ impl Workspace {
             label: sheet.name.clone().into(),
             nav_width,
             depth: 0,
-            is_folder: !sheet.cells.is_empty(),
+            is_folder: sheet.cells().next().is_some(),
             is_expanded: sheet_expanded,
             is_active: active_sheet == Some(sheet_id) && active_cell.is_none(),
             has_search_match: false,
@@ -233,24 +233,60 @@ impl Workspace {
       if !sheet_expanded {
         continue;
       }
-      let Some(definition) = projection.format.sheet_type(sheet.sheet_type_id) else {
-        continue;
-      };
-      let roots: Vec<_> = sheet.cells.iter().filter(|cell| cell.parent_id.is_none()).map(|cell| cell.id).collect();
-      for cell_id in roots {
-        append_flow_outline_cell_rows(
-          sheet,
-          definition,
-          cell_id,
-          &editor,
-          active_cell,
-          nav_width,
-          window,
-          &[0],
-          sheet_color,
-          true,
-          cx,
-          &mut rows,
+      // Grid outline: cells in row-major order, labeled by their column.
+      for cell in sheet.cells() {
+        let Some(column_ix) = sheet.column_index(cell.column_id) else {
+          continue;
+        };
+        let column = &sheet.columns[column_ix];
+        let side_palette = crate::flow::flow_side_palette(column.side, cx);
+        let side_color = side_palette.base;
+        let cell_id = cell.id;
+        let label = {
+          let text = cell.summary.summary_text.to_string();
+          if text.trim().is_empty() {
+            format!("{} · (empty)", column.label)
+          } else {
+            format!("{} · {}", column.label, text)
+          }
+        };
+        let activate_editor = editor.clone();
+        let key = cell_id.as_u128() as usize;
+        rows.push(
+          render_sidebar_tree_row(
+            SidebarTreeRow {
+              row_id: ("flow-outline-cell", key),
+              toggle_id: ("flow-outline-toggle", key),
+              label_id: ("flow-outline-label", key),
+              label: label.into(),
+              nav_width,
+              depth: 1,
+              is_folder: false,
+              is_expanded: false,
+              is_active: active_cell == Some(cell_id),
+              has_search_match: false,
+              guide: OutlineRowGuides {
+                ancestor_depths: vec![0],
+                extends_from_toggle: false,
+              },
+              hierarchy_color: Some(side_color),
+              label_color: None,
+              interaction_palette: Some(side_palette),
+              guide_colors: Some(vec![sheet_color.unwrap_or_else(|| outline_hierarchy_color(0, cx))]),
+              incoming_branch: None,
+              icon: None,
+              icon_color: None,
+              toggle_action: None,
+              label_action: Rc::new(move |_, cx| activate_editor.update(cx, |editor, cx| editor.activate_cell(cell_id, cx))),
+              label_double_action: None,
+              stop_icon_mouse_down: true,
+              stop_label_mouse_down: true,
+              context_menu_action: None,
+            },
+            window,
+            cx,
+          )
+          .into_any_element(),
         );
       }
     }
@@ -264,122 +300,6 @@ impl Workspace {
       .child(self.render_left_nav_header("Flow", cx))
       .child(div().flex_1().w_full().overflow_y_scrollbar().children(rows))
       .into_any_element()
-  }
-}
-
-fn append_flow_outline_cell_rows(
-  sheet: &flowstate_flow::Sheet,
-  definition: &flowstate_flow::SheetTypeDefinition,
-  cell_id: flowstate_flow::CellId,
-  editor: &Entity<FlowEditor>,
-  active_cell: Option<flowstate_flow::CellId>,
-  nav_width: Pixels,
-  window: &mut Window,
-  ancestor_depths: &[usize],
-  sheet_color: Option<Hsla>,
-  is_final_child: bool,
-  cx: &mut Context<Workspace>,
-  rows: &mut Vec<AnyElement>,
-) {
-  let Some(cell) = sheet.cells.iter().find(|cell| cell.id == cell_id) else {
-    return;
-  };
-  let Some(column_depth) = definition.columns.iter().position(|column| column.id == cell.column_id) else {
-    return;
-  };
-  let depth = column_depth + 1;
-  let children: Vec<_> = sheet
-    .cells
-    .iter()
-    .filter(|candidate| candidate.parent_id == Some(cell_id))
-    .map(|candidate| candidate.id)
-    .collect();
-  let expanded = editor.read(cx).outline_item_expanded(cell_id);
-  let side_palette = crate::flow::flow_side_palette(definition.columns[column_depth].side, cx);
-  let side_color = side_palette.base;
-  let guide_colors = (0..depth)
-    .map(|guide_depth| {
-      if guide_depth == 0 {
-        sheet_color.unwrap_or_else(|| outline_hierarchy_color(0, cx))
-      } else {
-        crate::flow::flow_side_palette(definition.columns[guide_depth - 1].side, cx).base
-      }
-    })
-    .collect();
-  let label = {
-    let text = cell.summary.summary_text.to_string();
-    if text.trim().is_empty() { "(empty)".to_string() } else { text }
-  };
-  let activate_editor = editor.clone();
-  let toggle_editor = editor.clone();
-  let incoming_branch = cell.parent_id.map(|_| IncomingBranch {
-    parent_depth: depth.saturating_sub(1),
-    is_final_child,
-  });
-  let guide = OutlineRowGuides {
-    ancestor_depths: ancestor_depths.to_vec(),
-    // Flow branches are rendered in their parent's indentation slot. The
-    // document-outline toggle extension uses a different coordinate and would
-    // leave a short duplicate segment below every expanded flow parent.
-    extends_from_toggle: false,
-  };
-  let key = cell_id.as_u128() as usize;
-  rows.push(
-    render_sidebar_tree_row(
-      SidebarTreeRow {
-        row_id: ("flow-outline-cell", key),
-        toggle_id: ("flow-outline-toggle", key),
-        label_id: ("flow-outline-label", key),
-        label: label.into(),
-        nav_width,
-        depth,
-        is_folder: !children.is_empty(),
-        is_expanded: expanded,
-        is_active: active_cell == Some(cell_id),
-        has_search_match: false,
-        guide,
-        hierarchy_color: Some(side_color),
-        label_color: None,
-        interaction_palette: Some(side_palette),
-        guide_colors: Some(guide_colors),
-        incoming_branch,
-        icon: None,
-        icon_color: None,
-        toggle_action: Some(Rc::new(move |_, cx| {
-          toggle_editor.update(cx, |editor, cx| editor.toggle_outline_item(cell_id, cx));
-        })),
-        label_action: Rc::new(move |_, cx| activate_editor.update(cx, |editor, cx| editor.activate_cell(cell_id, cx))),
-        label_double_action: None,
-        stop_icon_mouse_down: true,
-        stop_label_mouse_down: true,
-        context_menu_action: None,
-      },
-      window,
-      cx,
-    )
-    .into_any_element(),
-  );
-  if expanded {
-    let mut child_ancestors = ancestor_depths.to_vec();
-    if !is_final_child {
-      child_ancestors.push(depth.saturating_sub(1));
-    }
-    for (index, child_id) in children.iter().copied().enumerate() {
-      append_flow_outline_cell_rows(
-        sheet,
-        definition,
-        child_id,
-        editor,
-        active_cell,
-        nav_width,
-        window,
-        &child_ancestors,
-        sheet_color,
-        index + 1 == children.len(),
-        cx,
-        rows,
-      );
-    }
   }
 }
 

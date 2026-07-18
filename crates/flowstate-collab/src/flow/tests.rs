@@ -1,8 +1,9 @@
-//! S3 gate: every intent class through the gated handle, undo ping-pong,
-//! import classification (per-cell streams), and the publish contract.
+//! S2 gate: every grid intent class through the gated handle, undo
+//! ping-pong, import classification (per-cell streams), the publish
+//! contract, and the grid structural repair pass (D2 bump-down convergence).
 
 use flowstate_document::{InputParagraph, InputRun, RunStyles};
-use flowstate_flow::{CellPlacement, CellSeed, FlowDropIntent, FlowIntent, SheetId};
+use flowstate_flow::{CellId, CellSeed, ColumnId, FlowIntent, RowId, SheetId};
 use uuid::Uuid;
 
 use super::runtime::{FlowPublishEvent, FlowRuntime};
@@ -34,32 +35,98 @@ fn handle_with_sheet() -> (FlowDocHandle, SheetId) {
   (handle, sheet)
 }
 
-fn add_cell(handle: &FlowDocHandle, sheet: SheetId, placement: CellPlacement, text: &str) -> flowstate_flow::CellId {
+fn column(handle: &FlowDocHandle, sheet: SheetId, index: usize) -> ColumnId {
+  handle.board_projection().unwrap().sheet(sheet).unwrap().columns[index].id
+}
+
+fn append_row(handle: &FlowDocHandle, sheet: SheetId) -> RowId {
+  let row_id = Uuid::new_v4();
+  handle
+    .apply(&FlowIntent::InsertRows {
+      sheet_id: sheet,
+      before: None,
+      row_ids: vec![row_id],
+    })
+    .unwrap();
+  row_id
+}
+
+fn add_cell_at(handle: &FlowDocHandle, sheet: SheetId, row: RowId, column_id: ColumnId, text: &str) -> CellId {
   let cell_id = Uuid::new_v4();
   handle
     .apply(&FlowIntent::AddCell {
       sheet_id: sheet,
       cell_id,
-      placement,
+      row_id: row,
+      column_id,
       seed: CellSeed::Paragraphs(paragraphs(text)),
     })
     .unwrap();
   cell_id
 }
 
+/// Fresh row at the bottom + a cell in the first column (the ghost-row
+/// materialization shape most tests want).
+fn add_cell(handle: &FlowDocHandle, sheet: SheetId, text: &str) -> CellId {
+  let row = append_row(handle, sheet);
+  add_cell_at(handle, sheet, row, column(handle, sheet, 0), text)
+}
+
+fn cell_count(handle: &FlowDocHandle, sheet: SheetId) -> usize {
+  handle
+    .board_projection()
+    .unwrap()
+    .sheet(sheet)
+    .unwrap()
+    .cells()
+    .count()
+}
+
+fn drain_publish(handle: &FlowDocHandle) -> Vec<Vec<u8>> {
+  let mut guard = handle.gate().lock(GateHolder::DocumentService).unwrap();
+  guard
+    .take_pending_publish()
+    .into_iter()
+    .map(|FlowPublishEvent::LocalUpdate { bytes, .. }| bytes)
+    .collect()
+}
+
+fn import_into(handle: &FlowDocHandle, blobs: &[Vec<u8>]) {
+  handle
+    .import_remote_updates(&blobs.iter().map(Vec::as_slice).collect::<Vec<_>>())
+    .unwrap();
+}
+
 #[test]
 fn every_intent_class_commits_through_the_gate() {
   let (handle, sheet) = handle_with_sheet();
-  let a1 = add_cell(&handle, sheet, CellPlacement::SheetEnd { column_index: 0 }, "A1");
-  let b1 = add_cell(&handle, sheet, CellPlacement::LastChildOf(a1), "B1");
+  let row1 = append_row(&handle, sheet);
+  let row2 = append_row(&handle, sheet);
+  let col0 = column(&handle, sheet, 0);
+  let col1 = column(&handle, sheet, 1);
+  let a1 = add_cell_at(&handle, sheet, row1, col0, "A1");
+  let b1 = add_cell_at(&handle, sheet, row1, col1, "B1");
+
   handle
-    .apply(&FlowIntent::MoveCellSubtree {
+    .apply(&FlowIntent::SetCellAddress {
       sheet_id: sheet,
       cell_id: b1,
-      drop: FlowDropIntent::RootInColumn {
-        column_index: 1,
-        insertion_index: 0,
-      },
+      row_id: row2,
+      column_id: col1,
+    })
+    .unwrap();
+  handle
+    .apply(&FlowIntent::MoveRows {
+      sheet_id: sheet,
+      row_ids: vec![row2],
+      before: Some(row1),
+    })
+    .unwrap();
+  handle
+    .apply(&FlowIntent::SetRowHeight {
+      sheet_id: sheet,
+      row_id: row1,
+      height: Some(96.0),
     })
     .unwrap();
   handle
@@ -67,6 +134,37 @@ fn every_intent_class_commits_through_the_gate() {
       sheet_id: sheet,
       cell_id: a1,
       struck: true,
+    })
+    .unwrap();
+  let overview = Uuid::new_v4();
+  handle
+    .apply(&FlowIntent::AddColumn {
+      sheet_id: sheet,
+      column_id: overview,
+      label: "Overview".into(),
+      side: flowstate_flow::ArgumentSide::One,
+      before: Some(col0),
+    })
+    .unwrap();
+  handle
+    .apply(&FlowIntent::RenameColumn {
+      sheet_id: sheet,
+      column_id: overview,
+      label: "OV".into(),
+    })
+    .unwrap();
+  handle
+    .apply(&FlowIntent::SetColumnWidth {
+      sheet_id: sheet,
+      column_id: overview,
+      width: Some(320.0),
+    })
+    .unwrap();
+  handle
+    .apply(&FlowIntent::MoveColumn {
+      sheet_id: sheet,
+      column_id: overview,
+      before: None,
     })
     .unwrap();
   handle
@@ -75,20 +173,33 @@ fn every_intent_class_commits_through_the_gate() {
       name: "Renamed".into(),
     })
     .unwrap();
+
   let board = handle.board_projection().unwrap();
-  assert_eq!(board.sheet(sheet).unwrap().name, "Renamed");
-  assert!(
-    board
-      .sheet(sheet)
-      .unwrap()
-      .cells
-      .iter()
-      .any(|cell| cell.id == a1 && cell.summary.struck)
-  );
+  let sheet_ref = board.sheet(sheet).unwrap();
+  assert_eq!(sheet_ref.name, "Renamed");
+  assert_eq!(sheet_ref.rows[0].id, row2, "MoveRows landed row2 first");
+  assert_eq!(sheet_ref.rows[1].height_override, Some(96.0));
+  assert!(sheet_ref.find_cell(a1).unwrap().summary.struck);
+  assert_eq!(sheet_ref.find_cell(b1).unwrap().row_id, row2);
+  assert_eq!(sheet_ref.columns.last().unwrap().label, "OV");
+  assert_eq!(sheet_ref.columns.last().unwrap().width, Some(320.0));
+
+  handle
+    .apply(&FlowIntent::DeleteColumn {
+      sheet_id: sheet,
+      column_id: overview,
+    })
+    .unwrap();
   handle
     .apply(&FlowIntent::DeleteCell {
       sheet_id: sheet,
       cell_id: b1,
+    })
+    .unwrap();
+  handle
+    .apply(&FlowIntent::DeleteRows {
+      sheet_id: sheet,
+      row_ids: vec![row2],
     })
     .unwrap();
   handle
@@ -97,27 +208,69 @@ fn every_intent_class_commits_through_the_gate() {
   assert!(handle.board_projection().unwrap().sheets.is_empty());
 }
 
+// A cell text insert must return the POST-edit caret (spec §8): without it the
+// editor strands the caret at the pre-edit offset and typing piles up reversed.
+#[test]
+fn cell_text_insert_advances_the_caret() {
+  use gpui_flowtext::{DocumentOffset, InsertTextIntent, LocalIntent, LocalWriteAuthority as _, LocalWriteOutcome, TextAnchor};
+  let (handle, sheet) = handle_with_sheet();
+  let cell = add_cell(&handle, sheet, "hello");
+  let projection = handle.cell_projection(cell).expect("cell projection");
+  let paragraph = projection.ids.paragraph_ids[0];
+  let authority = handle.cell_authority(cell);
+  let outcome = authority
+    .apply(LocalIntent::InsertText(InsertTextIntent {
+      at: TextAnchor::new(paragraph, 5), // end of "hello"
+      text: "X".into(),
+      style_override: None,
+    }))
+    .expect("insert applies");
+  let LocalWriteOutcome::CommittedWithRebuild { commit, .. } = outcome else {
+    panic!("cell text commits with a full rebuild");
+  };
+  let selection = commit.selection_after.expect("the commit carries a post-edit caret");
+  assert_eq!(
+    selection.head.offset,
+    DocumentOffset { paragraph: 0, byte: 6 },
+    "the caret lands after the inserted character, not stranded at the start"
+  );
+}
+
 #[test]
 fn rejections_speak_and_leave_state_clean() {
   let (handle, sheet) = handle_with_sheet();
-  let a1 = add_cell(&handle, sheet, CellPlacement::SheetEnd { column_index: 0 }, "A1");
-  let b1 = add_cell(&handle, sheet, CellPlacement::LastChildOf(a1), "B1");
+  let row = append_row(&handle, sheet);
+  let col0 = column(&handle, sheet, 0);
+  let col1 = column(&handle, sheet, 1);
+  let _a1 = add_cell_at(&handle, sheet, row, col0, "A1");
+  let b1 = add_cell_at(&handle, sheet, row, col1, "B1");
   let error = handle
-    .apply(&FlowIntent::MoveCellSubtree {
+    .apply(&FlowIntent::SetCellAddress {
       sheet_id: sheet,
-      cell_id: a1,
-      drop: FlowDropIntent::LastChildOf(b1),
+      cell_id: b1,
+      row_id: row,
+      column_id: col0,
     })
     .unwrap_err();
-  assert!(error.to_string().contains("descendant"), "{error}");
+  assert!(error.to_string().contains("occupied"), "{error}");
   let board = handle.board_projection().unwrap();
-  assert_eq!(board.sheet(sheet).unwrap().cells.len(), 2, "rejected intent must not mutate");
+  assert_eq!(board.sheet(sheet).unwrap().cells().count(), 2, "rejected intent must not mutate");
+  assert_eq!(board.sheet(sheet).unwrap().find_cell(b1).unwrap().column_id, col1);
 }
 
 #[test]
 fn undo_redo_ping_pong_per_class() {
   let (handle, sheet) = handle_with_sheet();
-  let a1 = add_cell(&handle, sheet, CellPlacement::SheetEnd { column_index: 0 }, "A1");
+  let a1 = add_cell(&handle, sheet, "A1");
+  let struck_of = |handle: &FlowDocHandle| {
+    handle
+      .board_projection()
+      .unwrap()
+      .sheet(sheet)
+      .unwrap()
+      .find_cell(a1)
+      .map(|cell| cell.summary.struck)
+  };
   handle
     .apply(&FlowIntent::SetCellStruck {
       sheet_id: sheet,
@@ -125,97 +278,45 @@ fn undo_redo_ping_pong_per_class() {
       struck: true,
     })
     .unwrap();
-  assert!(
-    handle
-      .board_projection()
-      .unwrap()
-      .sheet(sheet)
-      .unwrap()
-      .cells[0]
-      .summary
-      .struck
-  );
+  assert_eq!(struck_of(&handle), Some(true));
   assert!(handle.undo().unwrap());
-  assert!(
-    !handle
-      .board_projection()
-      .unwrap()
-      .sheet(sheet)
-      .unwrap()
-      .cells[0]
-      .summary
-      .struck
-  );
+  assert_eq!(struck_of(&handle), Some(false));
   assert!(handle.redo().unwrap());
-  assert!(
-    handle
-      .board_projection()
-      .unwrap()
-      .sheet(sheet)
-      .unwrap()
-      .cells[0]
-      .summary
-      .struck
-  );
-  // Structural class.
-  assert!(handle.undo().unwrap()); // un-strike
-  assert!(handle.undo().unwrap()); // un-add A1
-  assert!(
-    handle
-      .board_projection()
-      .unwrap()
-      .sheet(sheet)
-      .unwrap()
-      .cells
-      .is_empty()
-  );
+  assert_eq!(struck_of(&handle), Some(true));
+  // Structural class: un-strike, un-add.
+  assert!(handle.undo().unwrap());
+  assert!(handle.undo().unwrap());
+  assert_eq!(cell_count(&handle, sheet), 0);
   assert!(handle.redo().unwrap());
-  assert_eq!(
-    handle
-      .board_projection()
-      .unwrap()
-      .sheet(sheet)
-      .unwrap()
-      .cells
-      .len(),
-    1
-  );
+  assert_eq!(cell_count(&handle, sheet), 1);
 }
 
 #[test]
 fn undo_grouping_is_one_member() {
   let (handle, sheet) = handle_with_sheet();
   handle.undo_group_start().unwrap();
-  let a1 = add_cell(&handle, sheet, CellPlacement::SheetEnd { column_index: 0 }, "A1");
-  let _b1 = add_cell(&handle, sheet, CellPlacement::LastChildOf(a1), "B1");
+  let _a1 = add_cell(&handle, sheet, "A1");
+  let _b1 = add_cell(&handle, sheet, "B1");
   handle.undo_group_end().unwrap();
-  assert_eq!(
-    handle
-      .board_projection()
-      .unwrap()
-      .sheet(sheet)
-      .unwrap()
-      .cells
-      .len(),
-    2
-  );
+  assert_eq!(cell_count(&handle, sheet), 2);
   assert!(handle.undo().unwrap());
+  assert_eq!(cell_count(&handle, sheet), 0, "grouped intents (rows + cells) undo as one member");
   assert!(
     handle
       .board_projection()
       .unwrap()
       .sheet(sheet)
       .unwrap()
-      .cells
+      .rows
       .is_empty(),
-    "grouped intents undo as one member"
+    "the grouped row inserts undo with their cells"
   );
 }
 
 #[test]
 fn publish_queue_carries_local_commits() {
   let (handle, sheet) = handle_with_sheet();
-  let _a1 = add_cell(&handle, sheet, CellPlacement::SheetEnd { column_index: 0 }, "A1");
+  let _a1 = add_cell(&handle, sheet, "A1");
   let published = {
     let mut guard = handle.gate().lock(GateHolder::DocumentService).unwrap();
     guard.take_pending_publish()
@@ -235,67 +336,85 @@ fn two_handles_converge_via_publish_and_import() {
     guard.snapshot_bytes().unwrap()
   };
   let (b, _gate_b) = FlowDocHandle::new(FlowRuntime::from_snapshot(&snapshot).unwrap());
-  // Drain A's backlog up to the fork point.
-  {
-    let mut guard = a.gate().lock(GateHolder::DocumentService).unwrap();
-    let _ = guard.take_pending_publish();
-  }
+  let _ = drain_publish(&a);
 
-  let a1 = add_cell(&a, sheet, CellPlacement::SheetEnd { column_index: 0 }, "from A");
-  let b1 = add_cell(&b, sheet, CellPlacement::SheetEnd { column_index: 0 }, "from B");
+  let a1 = add_cell(&a, sheet, "from A");
+  let b1 = add_cell(&b, sheet, "from B");
 
-  let from_a: Vec<Vec<u8>> = {
-    let mut guard = a.gate().lock(GateHolder::DocumentService).unwrap();
-    guard
-      .take_pending_publish()
-      .into_iter()
-      .map(|FlowPublishEvent::LocalUpdate { bytes, .. }| bytes)
-      .collect()
-  };
-  let from_b: Vec<Vec<u8>> = {
-    let mut guard = b.gate().lock(GateHolder::DocumentService).unwrap();
-    guard
-      .take_pending_publish()
-      .into_iter()
-      .map(|FlowPublishEvent::LocalUpdate { bytes, .. }| bytes)
-      .collect()
-  };
-  a.import_remote_updates(&from_b.iter().map(Vec::as_slice).collect::<Vec<_>>())
-    .unwrap();
-  b.import_remote_updates(&from_a.iter().map(Vec::as_slice).collect::<Vec<_>>())
-    .unwrap();
+  let from_a = drain_publish(&a);
+  let from_b = drain_publish(&b);
+  import_into(&a, &from_b);
+  import_into(&b, &from_a);
+  // Drain the (possibly empty) repair deltas both ways so canonical state
+  // fully converges too.
+  let from_a = drain_publish(&a);
+  let from_b = drain_publish(&b);
+  import_into(&a, &from_b);
+  import_into(&b, &from_a);
 
   let board_a = a.board_projection().unwrap();
   let board_b = b.board_projection().unwrap();
   assert_eq!(board_a, board_b, "publish/import round converges");
-  assert!(
-    board_a
-      .sheet(sheet)
-      .unwrap()
-      .cells
-      .iter()
-      .any(|cell| cell.id == a1)
-  );
-  assert!(
-    board_a
-      .sheet(sheet)
-      .unwrap()
-      .cells
-      .iter()
-      .any(|cell| cell.id == b1)
-  );
+  assert!(board_a.sheet(sheet).unwrap().find_cell(a1).is_some());
+  assert!(board_a.sheet(sheet).unwrap().find_cell(b1).is_some());
 }
 
+/// The D2 law end-to-end through the RUNTIME: concurrent cells on one
+/// address collide after import; the normalizer bumps in projection space;
+/// the repair pass converges CANONICAL state (bump row into `row_order`,
+/// loser's register rewritten) so the defect clears — on both peers,
+/// identically.
 #[test]
-fn import_classification_feeds_per_cell_streams() {
+fn slot_collision_repairs_canonically_on_both_peers() {
   let (a, sheet) = handle_with_sheet();
-  let cell = add_cell(&a, sheet, CellPlacement::SheetEnd { column_index: 0 }, "shared");
+  let row = append_row(&a, sheet);
+  let col0 = column(&a, sheet, 0);
   let snapshot = {
     let guard = a.gate().lock(GateHolder::DocumentService).unwrap();
     guard.snapshot_bytes().unwrap()
   };
   let (b, _gate_b) = FlowDocHandle::new(FlowRuntime::from_snapshot(&snapshot).unwrap());
-  // Clear stream backlogs on A.
+  let _ = drain_publish(&a);
+
+  let cell_a = add_cell_at(&a, sheet, row, col0, "from A");
+  let cell_b = add_cell_at(&b, sheet, row, col0, "from B");
+  let (winner, loser) = if cell_a < cell_b { (cell_a, cell_b) } else { (cell_b, cell_a) };
+
+  let from_a = drain_publish(&a);
+  let from_b = drain_publish(&b);
+  import_into(&a, &from_b);
+  import_into(&b, &from_a);
+  // Cross-import the repair deltas.
+  let from_a = drain_publish(&a);
+  let from_b = drain_publish(&b);
+  import_into(&a, &from_b);
+  import_into(&b, &from_a);
+
+  let board_a = a.board_projection().unwrap();
+  let board_b = b.board_projection().unwrap();
+  assert_eq!(board_a, board_b, "collision resolution converges");
+  let sheet_ref = board_a.sheet(sheet).unwrap();
+  let bump_row = flowstate_flow::bump_row_id(loser, 1);
+  assert_eq!(sheet_ref.slot_by_ids(row, col0).unwrap().id, winner);
+  assert_eq!(sheet_ref.slot_by_ids(bump_row, col0).unwrap().id, loser);
+  for handle in [&a, &b] {
+    let defects = {
+      let guard = handle.gate().lock(GateHolder::DocumentService).unwrap();
+      guard.defects().to_vec()
+    };
+    assert!(defects.is_empty(), "the repair pass converged canonical state; defects must clear: {defects:?}");
+  }
+}
+
+#[test]
+fn import_classification_feeds_per_cell_streams() {
+  let (a, sheet) = handle_with_sheet();
+  let cell = add_cell(&a, sheet, "shared");
+  let snapshot = {
+    let guard = a.gate().lock(GateHolder::DocumentService).unwrap();
+    guard.snapshot_bytes().unwrap()
+  };
+  let (b, _gate_b) = FlowDocHandle::new(FlowRuntime::from_snapshot(&snapshot).unwrap());
   let _ = a.drain_board_stream().unwrap();
   let _ = a.drain_cell_stream(cell).unwrap();
 
@@ -305,23 +424,16 @@ fn import_classification_feeds_per_cell_streams() {
     paragraphs: paragraphs("shared — edited remotely"),
   })
   .unwrap();
-  let updates: Vec<Vec<u8>> = {
-    let mut guard = b.gate().lock(GateHolder::DocumentService).unwrap();
-    guard
-      .take_pending_publish()
-      .into_iter()
-      .map(|FlowPublishEvent::LocalUpdate { bytes, .. }| bytes)
-      .collect()
-  };
-  a.import_remote_updates(&updates.iter().map(Vec::as_slice).collect::<Vec<_>>())
-    .unwrap();
+  let updates = drain_publish(&b);
+  import_into(&a, &updates);
 
   let board_items = a.drain_board_stream().unwrap();
   assert!(
     board_items.iter().any(|FlowStreamItem::Board(board)| {
       board
         .sheet(sheet)
-        .is_some_and(|s| s.cells[0].summary.summary_text.contains("edited remotely"))
+        .and_then(|s| s.find_cell(cell))
+        .is_some_and(|c| c.summary.summary_text.contains("edited remotely"))
     }),
     "board stream carries the remote change"
   );
@@ -333,7 +445,6 @@ fn import_classification_feeds_per_cell_streams() {
 
 mod cell_authority_tests {
   use super::*;
-  use flowstate_flow::CellId;
   use gpui_flowtext::{
     DeleteRangeIntent, DocumentOffset, EditorSelection, FragmentBlock, InsertRichFragmentIntent, InsertTextIntent, JoinParagraphsIntent,
     LocalIntent, LocalWriteAuthority as _, LocalWriteOutcome, ReplaceMatch, ReplaceMatchesIntent, RunStyles, SetMarksIntent,
@@ -342,7 +453,7 @@ mod cell_authority_tests {
 
   fn cell_fixture() -> (FlowDocHandle, SheetId, CellId) {
     let (handle, sheet) = handle_with_sheet();
-    let cell = add_cell(&handle, sheet, CellPlacement::SheetEnd { column_index: 0 }, "seed text");
+    let cell = add_cell(&handle, sheet, "seed text");
     (handle, sheet, cell)
   }
 
@@ -362,10 +473,7 @@ mod cell_authority_tests {
       guard.snapshot_bytes().unwrap()
     };
     let (b, _gb) = FlowDocHandle::new(FlowRuntime::from_snapshot(&snapshot).unwrap());
-    {
-      let mut guard = a.gate().lock(GateHolder::DocumentService).unwrap();
-      let _ = guard.take_pending_publish();
-    }
+    let _ = drain_publish(&a);
 
     // A types at the start; B types at the end — same cell, concurrently.
     let authority_a = a.cell_authority(cell);
@@ -388,26 +496,10 @@ mod cell_authority_tests {
       }))
       .unwrap();
 
-    let from_a: Vec<Vec<u8>> = {
-      let mut guard = a.gate().lock(GateHolder::DocumentService).unwrap();
-      guard
-        .take_pending_publish()
-        .into_iter()
-        .map(|FlowPublishEvent::LocalUpdate { bytes, .. }| bytes)
-        .collect()
-    };
-    let from_b: Vec<Vec<u8>> = {
-      let mut guard = b.gate().lock(GateHolder::DocumentService).unwrap();
-      guard
-        .take_pending_publish()
-        .into_iter()
-        .map(|FlowPublishEvent::LocalUpdate { bytes, .. }| bytes)
-        .collect()
-    };
-    a.import_remote_updates(&from_b.iter().map(Vec::as_slice).collect::<Vec<_>>())
-      .unwrap();
-    b.import_remote_updates(&from_a.iter().map(Vec::as_slice).collect::<Vec<_>>())
-      .unwrap();
+    let from_a = drain_publish(&a);
+    let from_b = drain_publish(&b);
+    import_into(&a, &from_b);
+    import_into(&b, &from_a);
 
     let text_a = projection_of(&a, cell).text.to_string();
     let text_b = projection_of(&b, cell).text.to_string();
@@ -507,7 +599,6 @@ mod cell_authority_tests {
     assert_eq!(pasted.paragraphs[1].style, flowstate_document::PARAGRAPH_ANALYTIC);
     assert!(pasted.text.to_string().contains("seed text tail"));
 
-    // Replace both occurrences of "line"... only one exists; replace "seed".
     authority
       .apply(LocalIntent::ReplaceMatches(ReplaceMatchesIntent {
         matches: vec![ReplaceMatch {
@@ -589,16 +680,8 @@ mod cell_authority_tests {
         style_override: None,
       }))
       .unwrap();
-    let updates: Vec<Vec<u8>> = {
-      let mut guard = b.gate().lock(GateHolder::DocumentService).unwrap();
-      guard
-        .take_pending_publish()
-        .into_iter()
-        .map(|FlowPublishEvent::LocalUpdate { bytes, .. }| bytes)
-        .collect()
-    };
-    a.import_remote_updates(&updates.iter().map(Vec::as_slice).collect::<Vec<_>>())
-      .unwrap();
+    let updates = drain_publish(&b);
+    import_into(&a, &updates);
 
     let (resolved_head, _resolved_anchor) = authority_a
       .resolve_selection_anchor(&head, &anchor)
@@ -694,16 +777,8 @@ mod cell_authority_tests {
         style_override: None,
       }))
       .unwrap();
-    let updates: Vec<Vec<u8>> = {
-      let mut guard = a.gate().lock(GateHolder::DocumentService).unwrap();
-      guard
-        .take_pending_publish()
-        .into_iter()
-        .map(|FlowPublishEvent::LocalUpdate { bytes, .. }| bytes)
-        .collect()
-    };
-    b.import_remote_updates(&updates.iter().map(Vec::as_slice).collect::<Vec<_>>())
-      .unwrap();
+    let updates = drain_publish(&a);
+    import_into(&b, &updates);
     assert_eq!(
       projection_of(&b, cell).text.to_string(),
       "after seed text",
@@ -725,33 +800,43 @@ fn history_scrubber_replays_the_lamport_prefix() {
       sheet_type_id: sheet_type,
     })
     .unwrap();
+  let col0 = column(&handle, sheet, 0);
   for index in 0..6_u128 {
+    let row = Uuid::from_u128(0x1000 + index);
+    handle
+      .apply(&FlowIntent::InsertRows {
+        sheet_id: sheet,
+        before: None,
+        row_ids: vec![row],
+      })
+      .unwrap();
     handle
       .apply(&FlowIntent::AddCell {
         sheet_id: sheet,
         cell_id: Uuid::from_u128(0x100 + index),
-        placement: CellPlacement::SheetEnd { column_index: 0 },
+        row_id: row,
+        column_id: col0,
         seed: CellSeed::Empty,
       })
       .unwrap();
   }
   let live = handle.board_projection().unwrap();
-  assert_eq!(live.sheets[0].cells.len(), 6);
+  assert_eq!(live.sheets[0].cells().count(), 6);
 
   // Full replay equals the live board's structure.
   let (full, shown, total, full_frontier) = handle.history_board_at(1.0).unwrap();
   assert_eq!(shown, total);
   assert_eq!(full.sheets.len(), 1);
-  assert_eq!(full.sheets[0].cells.len(), 6, "fraction 1.0 replays everything");
+  assert_eq!(full.sheets[0].cells().count(), 6, "fraction 1.0 replays everything");
 
   // A mid-timeline replay shows a strict prefix of the cells — and the LIVE
   // board is untouched by the checkout (it ran on a fork).
   let (half, shown_half, _, half_frontier) = handle.history_board_at(0.5).unwrap();
-  let half_cells = half.sheets.first().map_or(0, |sheet| sheet.cells.len());
+  let half_cells = half.sheets.first().map_or(0, |sheet| sheet.cells().count());
   assert!(half_cells < 6, "fraction 0.5 must replay a strict prefix (saw {half_cells} cells)");
   assert!(shown_half < total);
   assert_eq!(
-    handle.board_projection().unwrap().sheets[0].cells.len(),
+    handle.board_projection().unwrap().sheets[0].cells().count(),
     6,
     "the live board is untouched by history checkouts"
   );
@@ -773,16 +858,13 @@ fn history_scrubber_replays_the_lamport_prefix() {
 fn flow_checkpoints_converge_and_restore_pins_then_reverts_undoably() {
   use flowstate_document::RevisionKind;
   let (a, sheet) = handle_with_sheet();
-  let cell = add_cell(&a, sheet, CellPlacement::SheetEnd { column_index: 0 }, "alpha");
+  let cell = add_cell(&a, sheet, "alpha");
   let snapshot = {
     let guard = a.gate().lock(GateHolder::DocumentService).unwrap();
     guard.snapshot_bytes().unwrap()
   };
   let (b, _gate_b) = FlowDocHandle::new(FlowRuntime::from_snapshot(&snapshot).unwrap());
-  {
-    let mut guard = a.gate().lock(GateHolder::DocumentService).unwrap();
-    let _ = guard.take_pending_publish();
-  }
+  let _ = drain_publish(&a);
 
   // Checkpoint at "alpha", then grow the board.
   let (checkpoint_id, historical_frontier) = {
@@ -798,7 +880,7 @@ fn flow_checkpoints_converge_and_restore_pins_then_reverts_undoably() {
     drop(guard);
     (id, frontier)
   };
-  let _second_cell = add_cell(&a, sheet, CellPlacement::SheetEnd { column_index: 0 }, "beta");
+  let _second_cell = add_cell(&a, sheet, "beta");
 
   // Rename PINS.
   let mut rename_guard = a.gate().lock(GateHolder::DocumentService).unwrap();
@@ -809,53 +891,46 @@ fn flow_checkpoints_converge_and_restore_pins_then_reverts_undoably() {
   // first, then a forward op.
   let mut guard = a.gate().lock(GateHolder::DocumentService).unwrap();
   guard.restore_flow_frontier(&historical_frontier).unwrap();
-    let board = guard.board();
-    assert_eq!(board.sheets[0].cells.len(), 1, "the board reads as it did at the checkpoint");
-    assert!(board.sheets[0].cells.iter().any(|c| c.id == cell));
-    let checkpoints = guard.flow_checkpoints();
-    assert!(
-      checkpoints
-        .iter()
-        .any(|checkpoint| checkpoint.kind == RevisionKind::Named && checkpoint.title == "Before restore"),
-      "flow restore is always preceded by a safety checkpoint"
-    );
-    assert!(
-      checkpoints
-        .iter()
-        .any(|checkpoint| checkpoint.checkpoint_id == checkpoint_id
-          && checkpoint.kind == RevisionKind::Named
-          && checkpoint.title == "Before the block"),
-      "rename pins the record"
-    );
+  let board = guard.board();
+  assert_eq!(board.sheets[0].cells().count(), 1, "the board reads as it did at the checkpoint");
+  assert!(board.sheets[0].find_cell(cell).is_some());
+  let checkpoints = guard.flow_checkpoints();
+  assert!(
+    checkpoints
+      .iter()
+      .any(|checkpoint| checkpoint.kind == RevisionKind::Named && checkpoint.title == "Before restore"),
+    "flow restore is always preceded by a safety checkpoint"
+  );
+  assert!(
+    checkpoints
+      .iter()
+      .any(|checkpoint| checkpoint.checkpoint_id == checkpoint_id
+        && checkpoint.kind == RevisionKind::Named
+        && checkpoint.title == "Before the block"),
+    "rename pins the record"
+  );
   drop(guard);
 
   // Convergence: B imports everything and agrees on board + checkpoints.
-  let from_a: Vec<Vec<u8>> = {
-    let mut guard = a.gate().lock(GateHolder::DocumentService).unwrap();
-    guard
-      .take_pending_publish()
-      .into_iter()
-      .map(|FlowPublishEvent::LocalUpdate { bytes, .. }| bytes)
-      .collect()
-  };
+  let from_a = drain_publish(&a);
   let mut guard = b.gate().lock(GateHolder::DocumentService).unwrap();
   let blobs: Vec<&[u8]> = from_a.iter().map(Vec::as_slice).collect();
-    guard.import_remote_updates(&blobs).unwrap();
-    assert_eq!(guard.board().sheets[0].cells.len(), 1, "the restore converges like a normal edit");
-    assert_eq!(
-      guard.flow_checkpoints(),
-      {
-        let guard_a = a.gate().lock(GateHolder::DocumentService).unwrap();
-        guard_a.flow_checkpoints()
-      },
-      "checkpoint records converge"
-    );
+  guard.import_remote_updates(&blobs).unwrap();
+  assert_eq!(guard.board().sheets[0].cells().count(), 1, "the restore converges like a normal edit");
+  assert_eq!(
+    guard.flow_checkpoints(),
+    {
+      let guard_a = a.gate().lock(GateHolder::DocumentService).unwrap();
+      guard_a.flow_checkpoints()
+    },
+    "checkpoint records converge"
+  );
   drop(guard);
 
   // Forward op: one undo on A returns the pre-restore board.
   let mut undo_guard = a.gate().lock(GateHolder::DocumentService).unwrap();
   assert!(undo_guard.undo().unwrap(), "restore is undoable");
-  assert_eq!(undo_guard.board().sheets[0].cells.len(), 2, "undo returns the pre-restore board");
+  assert_eq!(undo_guard.board().sheets[0].cells().count(), 2, "undo returns the pre-restore board");
   drop(undo_guard);
 }
 
@@ -864,16 +939,13 @@ fn flow_checkpoints_converge_and_restore_pins_then_reverts_undoably() {
 #[test]
 fn flow_comments_converge_with_cell_anchors_tombstones_and_frontiers() {
   let (a, sheet) = handle_with_sheet();
-  let cell = add_cell(&a, sheet, CellPlacement::SheetEnd { column_index: 0 }, "warrant here");
+  let cell = add_cell(&a, sheet, "warrant here");
   let snapshot = {
     let guard = a.gate().lock(GateHolder::DocumentService).unwrap();
     guard.snapshot_bytes().unwrap()
   };
   let (b, _gate_b) = FlowDocHandle::new(FlowRuntime::from_snapshot(&snapshot).unwrap());
-  {
-    let mut guard = a.gate().lock(GateHolder::DocumentService).unwrap();
-    let _ = guard.take_pending_publish();
-  }
+  let _ = drain_publish(&a);
 
   // A: one anchored + one general comment; tombstone a reply (author-gated).
   let (anchored_id, general_id, reply_id) = {
@@ -888,14 +960,7 @@ fn flow_comments_converge_with_cell_anchors_tombstones_and_frontiers() {
   };
 
   // Publish A -> import into B.
-  let from_a: Vec<Vec<u8>> = {
-    let mut guard = a.gate().lock(GateHolder::DocumentService).unwrap();
-    guard
-      .take_pending_publish()
-      .into_iter()
-      .map(|FlowPublishEvent::LocalUpdate { bytes, .. }| bytes)
-      .collect()
-  };
+  let from_a = drain_publish(&a);
   let mut import_guard = b.gate().lock(GateHolder::DocumentService).unwrap();
   let blobs: Vec<&[u8]> = from_a.iter().map(Vec::as_slice).collect();
   import_guard.import_remote_updates(&blobs).unwrap();
@@ -913,7 +978,7 @@ fn flow_comments_converge_with_cell_anchors_tombstones_and_frontiers() {
     // H-K0 flow mirror: the birth frontier is checkout-able on both peers.
     let historical = guard.board_at_frontier(&frontier).unwrap();
     drop(guard);
-    assert!(historical.sheets.iter().any(|sheet| sheet.cells.iter().any(|c| c.id == cell)));
+    assert!(historical.sheets.iter().any(|sheet| sheet.find_cell(cell).is_some()));
     let tombstoned = anchored.messages.iter().find(|message| message.message_id == reply_id).expect("reply");
     assert!(tombstoned.deleted);
     let general = threads.iter().find(|thread| thread.comment_id == general_id).expect("general");

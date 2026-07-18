@@ -26,7 +26,7 @@ use flowstate_document::{
   RunStyles, SEMANTIC_CITE,
 };
 use flowstate_document::{InputParagraph, InputRun};
-use flowstate_flow::{CellPlacement, CellSeed, FlowIntent};
+use flowstate_flow::{CellSeed, FlowIntent};
 use gpui_flowtext::{DocumentOffset, EditorSelection};
 
 /// End-append body writer over the runtime's `\n`-boundary body model
@@ -321,17 +321,33 @@ fn build_fl0(path: &std::path::Path) -> Result<()> {
     })
     .map_err(|error| anyhow::anyhow!("creating sheet: {error:?}"))?;
 
-  let add = |column: usize, parent: Option<flowstate_flow::CellId>, text: &str| -> Result<flowstate_flow::CellId> {
+  // The grid: pre-minted rows; answers align horizontally with what they
+  // answer (the excel flow law — adjacency is the argument thread).
+  let rows: Vec<uuid::Uuid> = (0..6).map(|_| uuid::Uuid::new_v4()).collect();
+  handle
+    .apply(&FlowIntent::InsertRows {
+      sheet_id: sheet,
+      before: None,
+      row_ids: rows.clone(),
+    })
+    .map_err(|error| anyhow::anyhow!("seeding rows: {error:?}"))?;
+  let columns: Vec<flowstate_flow::ColumnId> = handle
+    .board_projection()
+    .map_err(|error| anyhow::anyhow!("board unavailable: {error:?}"))?
+    .sheet(sheet)
+    .expect("seeded sheet")
+    .columns
+    .iter()
+    .map(|column| column.id)
+    .collect();
+  let add = |row: usize, column: usize, text: &str| -> Result<flowstate_flow::CellId> {
     let cell_id = uuid::Uuid::new_v4();
-    let placement = match parent {
-      Some(parent) => CellPlacement::LastChildOf(parent),
-      None => CellPlacement::SheetEnd { column_index: column },
-    };
     handle
       .apply(&FlowIntent::AddCell {
         sheet_id: sheet,
         cell_id,
-        placement,
+        row_id: rows[row],
+        column_id: columns[column],
         seed: CellSeed::Paragraphs(flow_paragraphs(text)),
       })
       .map_err(|error| anyhow::anyhow!("adding cell: {error:?}"))?;
@@ -347,29 +363,29 @@ fn build_fl0(path: &std::path::Path) -> Result<()> {
     Ok(())
   };
 
-  // Wave 1: the 1AC lands.
-  let warming = add(0, None, "ADV 1: Warming — extinction via tipping cascades")?;
-  let heg = add(0, None, "ADV 2: Hegemony — arctic posture collapse")?;
-  let solvency = add(0, None, "Solvency — federal icebreaker fleet, 5 year window")?;
+  // Wave 1: the 1AC lands (rows spaced so multi-answer threads have room).
+  let _warming = add(0, 0, "ADV 1: Warming — extinction via tipping cascades")?;
+  let _heg = add(2, 0, "ADV 2: Hegemony — arctic posture collapse")?;
+  let _solvency = add(4, 0, "Solvency — federal icebreaker fleet, 5 year window")?;
   pin(Some("1AC flowed"), RevisionKind::Named)?;
 
-  // Wave 2: the 1NC answers arrive.
-  let adaptation = add(1, Some(warming), "AT: Adaptation solves — tech curve outpaces damages")?;
-  add(1, Some(warming), "AT: No cascade — tipping points overstated")?;
-  let tradeoff = add(1, Some(heg), "DA: Shipbuilding tradeoff — links to sub production")?;
-  add(1, Some(solvency), "AT: Delays — procurement never hits 5 years")?;
+  // Wave 2: the 1NC answers land one column right, aligned by row.
+  add(0, 1, "AT: Adaptation solves — tech curve outpaces damages")?;
+  add(1, 1, "AT: No cascade — tipping points overstated")?;
+  add(2, 1, "DA: Shipbuilding tradeoff — links to sub production")?;
+  add(4, 1, "AT: Delays — procurement never hits 5 years")?;
   pin(None, RevisionKind::Session)?;
   pin(Some("1NC in"), RevisionKind::Named)?;
 
   // Wave 3: 2AC extensions.
-  add(2, Some(adaptation), "2AC: Adaptation fails at scale — Sovacool '26, financing gap")?;
-  add(2, Some(tradeoff), "2AC: No link — different yards, different labor pools")?;
+  add(0, 2, "2AC: Adaptation fails at scale — Sovacool '26, financing gap")?;
+  add(2, 2, "2AC: No link — different yards, different labor pools")?;
   pin(None, RevisionKind::Auto)?;
-  add(2, Some(solvency), "2AC: Normal means solves delays — multi-year procurement authority")?;
+  add(4, 2, "2AC: Normal means solves delays — multi-year procurement authority")?;
   pin(Some("2AC extensions"), RevisionKind::Named)?;
 
   // Wave 4: the block.
-  add(3, Some(adaptation), "2NC: Their ev is aspirational — no adaptation portfolio survives audit")?;
+  add(0, 3, "2NC: Their ev is aspirational — no adaptation portfolio survives audit")?;
   pin(None, RevisionKind::Auto)?;
 
   let snapshot = {
@@ -380,7 +396,7 @@ fn build_fl0(path: &std::path::Path) -> Result<()> {
     guard.snapshot_bytes()?
   };
   flowstate_flow::persistence::save_snapshot_to(path, &snapshot).context("writing the demo flow")?;
-  println!("fl0: {} — 1 sheet, 12 cells over 4 waves, 6 checkpoints (3 named)", path.display());
+  println!("fl0: {} — 1 sheet, 11 cells over 4 waves, 6 checkpoints (3 named)", path.display());
   Ok(())
 }
 

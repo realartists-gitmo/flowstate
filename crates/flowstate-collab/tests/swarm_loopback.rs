@@ -334,7 +334,7 @@ where
 async fn flow_loopback_direct_pull() -> Result<()> {
   use flowstate_collab::SyncIoHandle;
   use flowstate_collab::flow::{FlowDocHandle, FlowIoHandle, FlowRuntime};
-  use flowstate_flow::{CellPlacement, CellSeed, FlowIntent};
+  use flowstate_flow::{CellSeed, FlowIntent};
 
   let session = SessionId::new();
   let lookup = MemoryLookup::new();
@@ -369,11 +369,29 @@ async fn flow_loopback_direct_pull() -> Result<()> {
       sheet_type_id: sheet_type,
     })
     .map_err(|error| anyhow::anyhow!("seed sheet rejected: {error}"))?;
+  let rows = [uuid::Uuid::from_u128(0x5118), uuid::Uuid::from_u128(0x5119)];
+  handle
+    .apply(&FlowIntent::InsertRows {
+      sheet_id: sheet,
+      before: None,
+      row_ids: rows.to_vec(),
+    })
+    .map_err(|error| anyhow::anyhow!("seed rows rejected: {error}"))?;
+  let columns: Vec<flowstate_flow::ColumnId> = handle
+    .board_projection()
+    .map_err(|error| anyhow::anyhow!("board unavailable: {error}"))?
+    .sheet(sheet)
+    .context("seed sheet missing")?
+    .columns
+    .iter()
+    .map(|column| column.id)
+    .collect();
   handle
     .apply(&FlowIntent::AddCell {
       sheet_id: sheet,
       cell_id: uuid::Uuid::from_u128(0x5108),
-      placement: CellPlacement::SheetEnd { column_index: 0 },
+      row_id: rows[0],
+      column_id: columns[0],
       seed: CellSeed::Paragraphs(vec![flowstate_document::InputParagraph {
         style: flowstate_document::PARAGRAPH_TAG,
         runs: vec![flowstate_document::InputRun {
@@ -405,17 +423,15 @@ async fn flow_loopback_direct_pull() -> Result<()> {
     .sheet(sheet)
     .context("pulled snapshot is missing the seeded sheet")?;
   ensure!(
-    joined_sheet.cells.len() == 1,
+    joined_sheet.cells().count() == 1,
     "pulled snapshot has {} cells, expected 1",
-    joined_sheet.cells.len()
+    joined_sheet.cells().count()
   );
+  let joined_cell = joined_sheet.cells().next().context("pulled cell missing")?;
   ensure!(
-    joined_sheet.cells[0]
-      .summary
-      .summary_text
-      .contains("served over loopback"),
+    joined_cell.summary.summary_text.contains("served over loopback"),
     "pulled cell summary lost the seeded text: {:?}",
-    joined_sheet.cells[0].summary.summary_text
+    joined_cell.summary.summary_text
   );
 
   // Incremental pull: A commits another cell after B's snapshot; B pulls
@@ -424,7 +440,8 @@ async fn flow_loopback_direct_pull() -> Result<()> {
     .apply(&FlowIntent::AddCell {
       sheet_id: sheet,
       cell_id: uuid::Uuid::from_u128(0x5109),
-      placement: CellPlacement::SheetEnd { column_index: 1 },
+      row_id: rows[1],
+      column_id: columns[1],
       seed: CellSeed::Empty,
     })
     .map_err(|error| anyhow::anyhow!("post-snapshot cell rejected: {error}"))?;
@@ -451,8 +468,8 @@ async fn flow_loopback_direct_pull() -> Result<()> {
     board
       .sheet(sheet)
       .context("sheet vanished after update pull")?
-      .cells
-      .len()
+      .cells()
+      .count()
       == 2,
     "update pull did not deliver the post-snapshot cell"
   );

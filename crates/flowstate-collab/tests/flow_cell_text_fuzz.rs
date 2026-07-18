@@ -15,7 +15,7 @@ mod tests {
   use flowstate_collab::flow::{FlowDocHandle, FlowPublishEvent, FlowRuntime};
   use flowstate_collab::local_write::GateHolder;
   use flowstate_document::{InputParagraph, InputRun};
-  use flowstate_flow::{CellId, CellPlacement, CellSeed, FlowDropIntent, FlowIntent, SheetId};
+  use flowstate_flow::{CellId, CellSeed, ColumnId, FlowIntent, RowId, SheetId};
   use gpui_flowtext::{
     DeleteRangeIntent, InsertTextIntent, LocalIntent, LocalWriteAuthority as _, ParagraphStyle, RunStyles, SetMarksIntent, SplitParagraphIntent,
     TextAnchor,
@@ -164,7 +164,7 @@ mod tests {
     }
   }
 
-  fn seeded_board(cell_count: usize, rng: &mut Rng) -> (SheetId, Vec<CellId>, Vec<u8>) {
+  fn seeded_board(cell_count: usize, rng: &mut Rng) -> (SheetId, Vec<CellId>, Vec<RowId>, Vec<ColumnId>, Vec<u8>) {
     let seed_runtime = FlowRuntime::new_empty();
     let sheet_type = seed_runtime.board().format.sheet_types[0].id;
     let (seed_handle, _gate) = FlowDocHandle::new(seed_runtime);
@@ -176,13 +176,32 @@ mod tests {
         sheet_type_id: sheet_type,
       })
       .unwrap();
+    // Rows for every cell plus spare empties so random moves usually land.
+    let rows: Vec<RowId> = (0..cell_count + 4).map(|_| rng.uuid()).collect();
+    seed_handle
+      .apply(&FlowIntent::InsertRows {
+        sheet_id: sheet,
+        before: None,
+        row_ids: rows.clone(),
+      })
+      .unwrap();
+    let columns: Vec<ColumnId> = seed_handle
+      .board_projection()
+      .unwrap()
+      .sheet(sheet)
+      .unwrap()
+      .columns
+      .iter()
+      .map(|column| column.id)
+      .collect();
     let cells: Vec<CellId> = (0..cell_count).map(|_| rng.uuid()).collect();
     for (index, &cell_id) in cells.iter().enumerate() {
       seed_handle
         .apply(&FlowIntent::AddCell {
           sheet_id: sheet,
           cell_id,
-          placement: CellPlacement::SheetEnd { column_index: index % 2 },
+          row_id: rows[index],
+          column_id: columns[index % 2],
           seed: CellSeed::Paragraphs(vec![InputParagraph {
             style: flowstate_document::PARAGRAPH_TAG,
             runs: vec![InputRun {
@@ -200,7 +219,7 @@ mod tests {
         .unwrap();
       guard.snapshot_bytes().unwrap()
     };
-    (sheet, cells, snapshot)
+    (sheet, cells, rows, columns, snapshot)
   }
 
   #[test]
@@ -211,7 +230,7 @@ mod tests {
       .unwrap_or(50);
     let mut rng = Rng(0xce11_7e57_5eed);
 
-    let (sheet, cells, snapshot) = seeded_board(4, &mut rng);
+    let (sheet, cells, rows, columns, snapshot) = seeded_board(4, &mut rng);
     let peers: Vec<FlowDocHandle> = (0..3)
       .map(|_| FlowDocHandle::new(FlowRuntime::from_snapshot(&snapshot).unwrap()).0)
       .collect();
@@ -239,20 +258,23 @@ mod tests {
           style_override: None,
         }))
         .unwrap();
-      let target = cells[(hot + 1) % cells.len()];
-      let drop = if rng.below(2) == 0 {
-        FlowDropIntent::BeforeSibling(target)
+      // The structural race: a slot move (two LWW register writes) or a row
+      // reorder, concurrent with the keystroke above. Occupied targets
+      // reject — the race only needs the ATTEMPT to be concurrent.
+      if rng.below(2) == 0 {
+        let _ = peers[1].apply(&FlowIntent::SetCellAddress {
+          sheet_id: sheet,
+          cell_id: cells[hot],
+          row_id: rows[rng.below(rows.len())],
+          column_id: columns[rng.below(columns.len().min(3))],
+        });
       } else {
-        FlowDropIntent::RootInColumn {
-          column_index: rng.below(3),
-          insertion_index: rng.below(cells.len()),
-        }
-      };
-      let _ = peers[1].apply(&FlowIntent::MoveCellSubtree {
-        sheet_id: sheet,
-        cell_id: cells[hot],
-        drop,
-      });
+        let _ = peers[1].apply(&FlowIntent::MoveRows {
+          sheet_id: sheet,
+          row_ids: vec![rows[rng.below(rows.len())]],
+          before: None,
+        });
+      }
       full_mesh_sync(&peers);
       // The reorder must not have cost the keystroke.
       let merged = peers[1]
@@ -303,7 +325,7 @@ mod tests {
   #[test]
   fn same_offset_concurrent_typing_keeps_both_edits() {
     let mut rng = Rng(0x5a3e_0ff5_e7ed);
-    let (_sheet, cells, snapshot) = seeded_board(1, &mut rng);
+    let (_sheet, cells, _rows, _columns, snapshot) = seeded_board(1, &mut rng);
     let cell_id = cells[0];
     let peers: Vec<FlowDocHandle> = (0..2)
       .map(|_| FlowDocHandle::new(FlowRuntime::from_snapshot(&snapshot).unwrap()).0)

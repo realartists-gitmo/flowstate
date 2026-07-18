@@ -1,3 +1,11 @@
+> **⚠ SUPERSEDED (2026-07-17):** this battery tested the Living Grid
+> drag-and-drop system (pads, wires, subtree moves), which was deleted in the
+> excel flow cutover (`Junk/flowstate_excel_flow_spec.md`). The grid's
+> gestures — cell drag = set address, row drag via the gutter, column
+> drag/resize via the header, ghost rows, typing-creates — get a fresh
+> battery when the surface calibrates. `FLOWSTATE_DRAG_LOG` no longer exists;
+> use `FLOWSTATE_INTENT_LOG=1` for the intent overlay.
+
 # Flow drag-and-drop ergonomics test (run straight through)
 
 A fixed battery of drag targets, paired with drag telemetry, to turn "a lot of moves I couldn't get

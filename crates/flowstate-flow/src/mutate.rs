@@ -1,24 +1,25 @@
-//! Intent EXECUTORS (flow architecture spec Part 2.2): resolve a
-//! [`FlowIntent`] against the CURRENT board projection (reject before any
-//! mutation), then write the minimal Loro ops. One implementation, two
-//! entrances: the schema-level [`crate::FlowDocument::apply_intent`]
-//! (solo/fixtures/tests) and the runtime commit path in
-//! `flowstate-collab/src/flow` (gate + undo + streams) both land here, so
-//! their semantics cannot drift.
+//! Intent EXECUTORS (excel flow spec §2): resolve a [`FlowIntent`] against
+//! the CURRENT board projection (reject before any mutation), then write the
+//! minimal Loro ops. One implementation, two entrances: the schema-level
+//! [`crate::FlowDocument::apply_intent`] (solo/fixtures/tests) and the
+//! runtime commit path in `flowstate-collab/src/flow` (gate + undo + streams)
+//! both land here, so their semantics cannot drift.
 //!
-//! Op-shape law: a reorder/move touches ONLY order lists and the moved root's
-//! registers — never any flow container — so it can never clobber a
-//! concurrent text edit.
+//! Op-shape law: a move/reorder touches ONLY order lists or the moved cell's
+//! address registers — never any flow container — so it can never clobber a
+//! concurrent text edit. Occupied-slot rejection happens here at execute
+//! time; concurrent-merge collisions are the normalizer's job (D2), never
+//! the executor's.
 
 use anyhow::{Context as _, bail};
 use loro::LoroDoc;
 
-use crate::board_ops;
-use crate::format::{CellId, SheetId};
-use crate::intents::{AnnotationScope, CellSeed, FlowDropIntent, FlowIntent};
+use crate::format::{CellId, ColumnId, RowId};
+use crate::intents::{AnnotationScope, CellSeed, FlowIntent};
 use crate::loro_schema::{
-  self, annotations_map, cell_flow, cell_paragraph_registry, cell_record, cells_map, ensure_cell_record, ensure_sheet_record, list_strings,
-  map_binary, seed_cell_flow, set_cell_column, set_cell_parent, sheet_cell_order, sheet_order, sheet_record,
+  self, annotations_map, cell_flow, cell_paragraph_registry, cell_record, cells_map, column_record, ensure_cell_record, ensure_column_record,
+  ensure_sheet_record, list_strings, map_binary, set_cell_column, set_cell_row, sheet_column_order, sheet_order, sheet_record, sheet_row_heights,
+  sheet_row_order,
 };
 use crate::projection::{AnnotationOriginator, FlowBoardProjection, Sheet};
 
@@ -40,11 +41,11 @@ pub fn execute_intent(doc: &LoroDoc, board: &FlowBoardProjection, intent: &FlowI
       if board.sheet(*sheet_id).is_some() {
         bail!("sheet {sheet_id} already exists");
       }
-      board
+      let definition = board
         .format
         .sheet_type(*sheet_type_id)
         .context("unknown sheet type")?;
-      ensure_sheet_record(doc, *sheet_id, name, *sheet_type_id)?;
+      ensure_sheet_record(doc, *sheet_id, name, *sheet_type_id, &definition.columns)?;
       sheet_order(doc).insert(sheet_order(doc).len(), sheet_id.to_string())?;
       Ok(MutationReport::default())
     },
@@ -56,14 +57,13 @@ pub fn execute_intent(doc: &LoroDoc, board: &FlowBoardProjection, intent: &FlowI
     FlowIntent::DeleteSheet { sheet_id } => {
       let sheet = board.sheet(*sheet_id).context("unknown sheet")?;
       let cells = cells_map(doc);
-      for cell in &sheet.cells {
+      for cell in sheet.cells() {
         if cells.get(&cell.id.to_string()).is_some() {
           cells.delete(&cell.id.to_string())?;
         }
       }
-      // I-S1: sweep the sheet's ink. Strokes referencing the dead sheet used
-      // to linger in `flow.annotations` forever — unrendered, unreachable, and
-      // only ever collected by an all-sheets clear.
+      // I-S1: sweep the sheet's ink — strokes referencing a dead sheet must
+      // not linger unrendered and unreachable.
       let annotations = annotations_map(doc);
       for key in loro_schema::map_keys(&annotations) {
         let Some(bytes) = map_binary(&annotations, &key) else { continue };
@@ -88,30 +88,225 @@ pub fn execute_intent(doc: &LoroDoc, board: &FlowBoardProjection, intent: &FlowI
     },
     FlowIntent::MoveSheet { sheet_id, before } => {
       let order = sheet_order(doc);
+      move_entry(&order, &sheet_id.to_string(), before.map(|anchor| anchor.to_string()).as_deref())?;
+      Ok(MutationReport::default())
+    },
+    FlowIntent::InsertRows { sheet_id, before, row_ids } => {
+      let sheet = board.sheet(*sheet_id).context("unknown sheet")?;
+      if row_ids.is_empty() {
+        bail!("no rows to insert");
+      }
+      for row_id in row_ids {
+        if sheet.row_index(*row_id).is_some() {
+          bail!("row {row_id} already exists");
+        }
+      }
+      let record = sheet_record(doc, *sheet_id).context("unknown sheet record")?;
+      let order = sheet_row_order(&record)?;
       let entries = list_strings(&order);
-      let from = entries
-        .iter()
-        .position(|entry| entry == &sheet_id.to_string())
-        .context("unknown sheet")?;
-      let mut target = match before {
+      let index = match before {
         Some(anchor) => entries
           .iter()
           .position(|entry| entry == &anchor.to_string())
-          .context("unknown anchor sheet")?,
+          .context("unknown anchor row")?,
         None => entries.len(),
       };
-      if from < target {
-        target -= 1;
+      for (offset, row_id) in row_ids.iter().enumerate() {
+        order.insert((index + offset).min(order.len()), row_id.to_string())?;
       }
-      if from != target {
-        order.mov(from, target)?;
+      Ok(MutationReport::default())
+    },
+    FlowIntent::MoveRows { sheet_id, row_ids, before } => {
+      let sheet = board.sheet(*sheet_id).context("unknown sheet")?;
+      if row_ids.is_empty() {
+        bail!("no rows to move");
       }
+      for row_id in row_ids {
+        sheet
+          .row_index(*row_id)
+          .with_context(|| format!("unknown row {row_id}"))?;
+      }
+      if let Some(anchor) = before
+        && row_ids.contains(anchor)
+      {
+        bail!("anchor row is part of the moved selection");
+      }
+      let record = sheet_record(doc, *sheet_id).context("unknown sheet record")?;
+      let order = sheet_row_order(&record)?;
+      // Desired final order: non-members keep relative order; members land
+      // (in intent order) immediately before the anchor.
+      let moved: Vec<String> = row_ids.iter().map(|row| row.to_string()).collect();
+      let current = list_strings(&order);
+      let mut desired: Vec<String> = Vec::with_capacity(current.len());
+      for entry in &current {
+        if moved.contains(entry) {
+          continue;
+        }
+        if before.is_some_and(|anchor| entry == &anchor.to_string()) {
+          desired.extend(moved.iter().cloned());
+        }
+        desired.push(entry.clone());
+      }
+      if before.is_none() {
+        desired.extend(moved.iter().cloned());
+      }
+      // Transform via `mov` for ONLY the moved members, ascending final
+      // position (non-members keep their relative order, so this converges).
+      for (desired_ix, entry) in desired.iter().enumerate() {
+        if !moved.contains(entry) {
+          continue;
+        }
+        let current = list_strings(&order);
+        let Some(from) = current.iter().position(|candidate| candidate == entry) else {
+          continue;
+        };
+        let to = desired_ix.min(current.len().saturating_sub(1));
+        if from != to {
+          order.mov(from, to)?;
+        }
+      }
+      Ok(MutationReport::default())
+    },
+    FlowIntent::DeleteRows { sheet_id, row_ids } => {
+      let sheet = board.sheet(*sheet_id).context("unknown sheet")?;
+      if row_ids.is_empty() {
+        bail!("no rows to delete");
+      }
+      for row_id in row_ids {
+        sheet
+          .row_index(*row_id)
+          .with_context(|| format!("unknown row {row_id}"))?;
+      }
+      let cells = cells_map(doc);
+      for row_id in row_ids {
+        let Some(row_ix) = sheet.row_index(*row_id) else { continue };
+        for cell in sheet.rows[row_ix].cells.iter().filter_map(Option::as_ref) {
+          if cells.get(&cell.id.to_string()).is_some() {
+            cells.delete(&cell.id.to_string())?;
+          }
+        }
+      }
+      let record = sheet_record(doc, *sheet_id).context("unknown sheet record")?;
+      let order = sheet_row_order(&record)?;
+      for row_id in row_ids {
+        if let Some(index) = list_strings(&order)
+          .iter()
+          .position(|entry| entry == &row_id.to_string())
+        {
+          order.delete(index, 1)?;
+        }
+      }
+      let heights = sheet_row_heights(&record)?;
+      for row_id in row_ids {
+        if heights.get(&row_id.to_string()).is_some() {
+          heights.delete(&row_id.to_string())?;
+        }
+      }
+      Ok(MutationReport::default())
+    },
+    FlowIntent::SetRowHeight { sheet_id, row_id, height } => {
+      let sheet = board.sheet(*sheet_id).context("unknown sheet")?;
+      sheet.row_index(*row_id).context("unknown row")?;
+      let record = sheet_record(doc, *sheet_id).context("unknown sheet record")?;
+      let heights = sheet_row_heights(&record)?;
+      match height {
+        Some(height) => heights.insert(&row_id.to_string(), f64::from(*height))?,
+        None => {
+          if heights.get(&row_id.to_string()).is_some() {
+            heights.delete(&row_id.to_string())?;
+          }
+        },
+      }
+      Ok(MutationReport::default())
+    },
+    FlowIntent::AddColumn {
+      sheet_id,
+      column_id,
+      label,
+      side,
+      before,
+    } => {
+      let sheet = board.sheet(*sheet_id).context("unknown sheet")?;
+      if sheet.column_index(*column_id).is_some() {
+        bail!("column {column_id} already exists");
+      }
+      let record = sheet_record(doc, *sheet_id).context("unknown sheet record")?;
+      ensure_column_record(&record, *column_id, label, *side)?;
+      let order = sheet_column_order(&record)?;
+      let entries = list_strings(&order);
+      let index = match before {
+        Some(anchor) => entries
+          .iter()
+          .position(|entry| entry == &anchor.to_string())
+          .context("unknown anchor column")?,
+        None => entries.len(),
+      };
+      order.insert(index.min(order.len()), column_id.to_string())?;
+      Ok(MutationReport::default())
+    },
+    FlowIntent::RenameColumn { sheet_id, column_id, label } => {
+      let sheet = board.sheet(*sheet_id).context("unknown sheet")?;
+      sheet.column_index(*column_id).context("unknown column")?;
+      let record = sheet_record(doc, *sheet_id).context("unknown sheet record")?;
+      let column = column_record(&record, *column_id).context("unknown column record")?;
+      column.insert("label", label.as_str())?;
+      Ok(MutationReport::default())
+    },
+    FlowIntent::MoveColumn { sheet_id, column_id, before } => {
+      let sheet = board.sheet(*sheet_id).context("unknown sheet")?;
+      sheet.column_index(*column_id).context("unknown column")?;
+      if let Some(anchor) = before {
+        if anchor == column_id {
+          bail!("column cannot anchor on itself");
+        }
+        sheet.column_index(*anchor).context("unknown anchor column")?;
+      }
+      let record = sheet_record(doc, *sheet_id).context("unknown sheet record")?;
+      let order = sheet_column_order(&record)?;
+      move_entry(&order, &column_id.to_string(), before.map(|anchor| anchor.to_string()).as_deref())?;
+      Ok(MutationReport::default())
+    },
+    FlowIntent::DeleteColumn { sheet_id, column_id } => {
+      let sheet = board.sheet(*sheet_id).context("unknown sheet")?;
+      let column_ix = sheet.column_index(*column_id).context("unknown column")?;
+      if sheet.columns.len() == 1 {
+        bail!("a sheet's last column cannot be deleted");
+      }
+      let cells = cells_map(doc);
+      for row in &sheet.rows {
+        if let Some(cell) = row.cells[column_ix].as_ref()
+          && cells.get(&cell.id.to_string()).is_some()
+        {
+          cells.delete(&cell.id.to_string())?;
+        }
+      }
+      let record = sheet_record(doc, *sheet_id).context("unknown sheet record")?;
+      let order = sheet_column_order(&record)?;
+      if let Some(index) = list_strings(&order)
+        .iter()
+        .position(|entry| entry == &column_id.to_string())
+      {
+        order.delete(index, 1)?;
+      }
+      let columns = loro_schema::sheet_columns_map(&record)?;
+      if columns.get(&column_id.to_string()).is_some() {
+        columns.delete(&column_id.to_string())?;
+      }
+      Ok(MutationReport::default())
+    },
+    FlowIntent::SetColumnWidth { sheet_id, column_id, width } => {
+      let sheet = board.sheet(*sheet_id).context("unknown sheet")?;
+      sheet.column_index(*column_id).context("unknown column")?;
+      let record = sheet_record(doc, *sheet_id).context("unknown sheet record")?;
+      let column = column_record(&record, *column_id).context("unknown column record")?;
+      loro_schema::set_column_width(&column, *width)?;
       Ok(MutationReport::default())
     },
     FlowIntent::AddCell {
       sheet_id,
       cell_id,
-      placement,
+      row_id,
+      column_id,
       seed,
     } => {
       // Duplicate-id guard: an id may exist ANYWHERE (another sheet included).
@@ -119,14 +314,10 @@ pub fn execute_intent(doc: &LoroDoc, board: &FlowBoardProjection, intent: &FlowI
         bail!("cell {cell_id} already exists");
       }
       let sheet = board.sheet(*sheet_id).context("unknown sheet")?;
-      let column_ids = board.sheet_column_ids(*sheet_id)?;
-      let (column_ix, flat_ix, parent) = board_ops::resolve_cell_placement(sheet, &column_ids, *placement)?;
-      ensure_cell_record(doc, *cell_id, *sheet_id, column_ids[column_ix], parent)?;
-      let record = sheet_record(doc, *sheet_id).context("unknown sheet record")?;
-      let order = sheet_cell_order(&record)?;
-      order.insert(flat_ix.min(order.len()), cell_id.to_string())?;
+      resolve_empty_slot(sheet, *row_id, *column_id, None)?;
+      ensure_cell_record(doc, *cell_id, *sheet_id, *row_id, *column_id)?;
       match seed {
-        CellSeed::Empty => seed_cell_flow(doc, *cell_id)?,
+        CellSeed::Empty => loro_schema::seed_cell_flow(doc, *cell_id)?,
         CellSeed::Paragraphs(paragraphs) => write_cell_paragraphs(doc, *cell_id, paragraphs.clone())?,
       }
       Ok(MutationReport {
@@ -135,26 +326,8 @@ pub fn execute_intent(doc: &LoroDoc, board: &FlowBoardProjection, intent: &FlowI
     },
     FlowIntent::DeleteCell { sheet_id, cell_id } => {
       let sheet = board.sheet(*sheet_id).context("unknown sheet")?;
-      if !sheet.cells.iter().any(|cell| cell.id == *cell_id) {
+      if sheet.find_cell(*cell_id).is_none() {
         bail!("unknown cell {cell_id}");
-      }
-      // Deleting a parent orphans its direct children (shipped semantics).
-      for child in sheet
-        .cells
-        .iter()
-        .filter(|cell| cell.parent_id == Some(*cell_id))
-      {
-        if let Some(record) = cell_record(doc, child.id) {
-          set_cell_parent(&record, None)?;
-        }
-      }
-      let record = sheet_record(doc, *sheet_id).context("unknown sheet record")?;
-      let order = sheet_cell_order(&record)?;
-      if let Some(index) = list_strings(&order)
-        .iter()
-        .position(|entry| entry == &cell_id.to_string())
-      {
-        order.delete(index, 1)?;
       }
       let cells = cells_map(doc);
       if cells.get(&cell_id.to_string()).is_some() {
@@ -162,13 +335,91 @@ pub fn execute_intent(doc: &LoroDoc, board: &FlowBoardProjection, intent: &FlowI
       }
       Ok(MutationReport::default())
     },
-    FlowIntent::MoveCellSubtree { sheet_id, cell_id, drop } => {
-      execute_move_subtree(doc, board, *sheet_id, *cell_id, *drop)?;
+    FlowIntent::SetCellAddress {
+      sheet_id,
+      cell_id,
+      row_id,
+      column_id,
+    } => {
+      let sheet = board.sheet(*sheet_id).context("unknown sheet")?;
+      let cell = sheet.find_cell(*cell_id).context("unknown cell")?;
+      resolve_empty_slot(sheet, *row_id, *column_id, Some(*cell_id))?;
+      let (previous_row, previous_column) = (cell.row_id, cell.column_id);
+      let record = cell_record(doc, *cell_id).context("unknown cell record")?;
+      if previous_row != *row_id {
+        set_cell_row(&record, *row_id)?;
+      }
+      if previous_column != *column_id {
+        set_cell_column(&record, *column_id)?;
+      }
+      Ok(MutationReport::default())
+    },
+    FlowIntent::SwapCells { sheet_id, a, b } => {
+      let sheet = board.sheet(*sheet_id).context("unknown sheet")?;
+      if a == b {
+        return Ok(MutationReport::default());
+      }
+      let cell_a = sheet.find_cell(*a).context("unknown cell")?;
+      let cell_b = sheet.find_cell(*b).context("unknown cell")?;
+      let (a_row, a_column) = (cell_a.row_id, cell_a.column_id);
+      let (b_row, b_column) = (cell_b.row_id, cell_b.column_id);
+      let record_a = cell_record(doc, *a).context("unknown cell record")?;
+      let record_b = cell_record(doc, *b).context("unknown cell record")?;
+      // Both writes commit under one op set: the intermediate never surfaces,
+      // so the swapped pair never trips the empty-slot guard.
+      if a_row != b_row {
+        set_cell_row(&record_a, b_row)?;
+        set_cell_row(&record_b, a_row)?;
+      }
+      if a_column != b_column {
+        set_cell_column(&record_a, b_column)?;
+        set_cell_column(&record_b, a_column)?;
+      }
+      Ok(MutationReport::default())
+    },
+    FlowIntent::SetCellAddresses { sheet_id, placements } => {
+      let sheet = board.sheet(*sheet_id).context("unknown sheet")?;
+      if placements.is_empty() {
+        return Ok(MutationReport::default());
+      }
+      let moving: std::collections::HashSet<CellId> = placements.iter().map(|(cell_id, _, _)| *cell_id).collect();
+      let mut targets: std::collections::HashSet<(RowId, ColumnId)> = std::collections::HashSet::new();
+      for (cell_id, row_id, column_id) in placements {
+        if sheet.find_cell(*cell_id).is_none() {
+          bail!("unknown cell {cell_id}");
+        }
+        if sheet.row_index(*row_id).is_none() {
+          bail!("unknown row {row_id}");
+        }
+        if sheet.column_index(*column_id).is_none() {
+          bail!("unknown column {column_id}");
+        }
+        if !targets.insert((*row_id, *column_id)) {
+          bail!("two cells placed on one address");
+        }
+        // A target may be occupied only by a cell that is itself moving.
+        if let Some(occupant) = sheet.slot_by_ids(*row_id, *column_id)
+          && !moving.contains(&occupant.id)
+        {
+          bail!("placement collides with cell {} outside the set", occupant.id);
+        }
+      }
+      // All validated: apply every register write under one op set.
+      for (cell_id, row_id, column_id) in placements {
+        let cell = sheet.find_cell(*cell_id).context("unknown cell")?;
+        let record = cell_record(doc, *cell_id).context("unknown cell record")?;
+        if cell.row_id != *row_id {
+          set_cell_row(&record, *row_id)?;
+        }
+        if cell.column_id != *column_id {
+          set_cell_column(&record, *column_id)?;
+        }
+      }
       Ok(MutationReport::default())
     },
     FlowIntent::SetCellStruck { sheet_id, cell_id, struck } => {
       let sheet = board.sheet(*sheet_id).context("unknown sheet")?;
-      if !sheet.cells.iter().any(|cell| cell.id == *cell_id) {
+      if sheet.find_cell(*cell_id).is_none() {
         bail!("unknown cell {cell_id}");
       }
       set_cell_struck(doc, *cell_id, *struck)?;
@@ -178,7 +429,7 @@ pub fn execute_intent(doc: &LoroDoc, board: &FlowBoardProjection, intent: &FlowI
     },
     FlowIntent::EnsureCellEditable { sheet_id, cell_id } => {
       let sheet = board.sheet(*sheet_id).context("unknown sheet")?;
-      if !sheet.cells.iter().any(|cell| cell.id == *cell_id) {
+      if sheet.find_cell(*cell_id).is_none() {
         bail!("unknown cell {cell_id}");
       }
       let record = cell_record(doc, *cell_id).context("unknown cell record")?;
@@ -186,7 +437,7 @@ pub fn execute_intent(doc: &LoroDoc, board: &FlowBoardProjection, intent: &FlowI
       let text = flow.ensure_mergeable_text(flowstate_document::FLOW_TEXT_KEY)?;
       let slot = flowstate_document::paragraph_slot(flowstate_document::PARAGRAPH_TAG).context("TAG style has no slot")?;
       if text.len_unicode() == 0 {
-        seed_cell_flow(doc, *cell_id)?;
+        loro_schema::seed_cell_flow(doc, *cell_id)?;
       } else {
         text.mark(0..1, flowstate_document::MARK_PARAGRAPH_STYLE, i64::from(slot))?;
       }
@@ -200,7 +451,7 @@ pub fn execute_intent(doc: &LoroDoc, board: &FlowBoardProjection, intent: &FlowI
       paragraphs,
     } => {
       let sheet = board.sheet(*sheet_id).context("unknown sheet")?;
-      if !sheet.cells.iter().any(|cell| cell.id == *cell_id) {
+      if sheet.find_cell(*cell_id).is_none() {
         bail!("unknown cell {cell_id}");
       }
       write_cell_paragraphs(doc, *cell_id, paragraphs.clone())?;
@@ -240,7 +491,7 @@ pub fn execute_intent(doc: &LoroDoc, board: &FlowBoardProjection, intent: &FlowI
       Ok(MutationReport::default())
     },
     FlowIntent::ClearAnnotations { scope, originator } => {
-      clear_annotations(doc, board, scope, originator)?;
+      clear_annotations(doc, scope, originator)?;
       Ok(MutationReport::default())
     },
     FlowIntent::CellText { .. } => {
@@ -249,12 +500,48 @@ pub fn execute_intent(doc: &LoroDoc, board: &FlowBoardProjection, intent: &FlowI
   }
 }
 
-fn clear_annotations(
-  doc: &LoroDoc,
-  board: &FlowBoardProjection,
-  scope: &AnnotationScope,
-  originator: &AnnotationOriginator,
-) -> anyhow::Result<()> {
+/// Occupied-slot rejection (executor law): the target address must exist and
+/// be empty (or held by the moving cell itself).
+fn resolve_empty_slot(sheet: &Sheet, row_id: RowId, column_id: ColumnId, moving: Option<CellId>) -> anyhow::Result<()> {
+  if sheet.row_index(row_id).is_none() {
+    bail!("unknown row {row_id}");
+  }
+  if sheet.column_index(column_id).is_none() {
+    bail!("unknown column {column_id}");
+  }
+  if let Some(occupant) = sheet.slot_by_ids(row_id, column_id)
+    && Some(occupant.id) != moving
+  {
+    bail!("slot is occupied by cell {}", occupant.id);
+  }
+  Ok(())
+}
+
+/// Move one entry of a `MovableList` before an anchor entry (`None` = end)
+/// with a single `mov` op.
+fn move_entry(order: &loro::LoroMovableList, entry: &str, before: Option<&str>) -> anyhow::Result<()> {
+  let entries = list_strings(order);
+  let from = entries
+    .iter()
+    .position(|candidate| candidate == entry)
+    .context("unknown order entry")?;
+  let mut target = match before {
+    Some(anchor) => entries
+      .iter()
+      .position(|candidate| candidate == anchor)
+      .context("unknown anchor entry")?,
+    None => entries.len(),
+  };
+  if from < target {
+    target -= 1;
+  }
+  if from != target {
+    order.mov(from, target)?;
+  }
+  Ok(())
+}
+
+fn clear_annotations(doc: &LoroDoc, scope: &AnnotationScope, originator: &AnnotationOriginator) -> anyhow::Result<()> {
   let map = annotations_map(doc);
   for key in loro_schema::map_keys(&map) {
     let Some(bytes) = map_binary(&map, &key) else { continue };
@@ -268,74 +555,8 @@ fn clear_annotations(
       AnnotationScope::AllSheets => true,
       AnnotationScope::Sheet(sheet_id) => stroke.sheet_id == *sheet_id,
     };
-    let _ = board;
     if in_scope {
       map.delete(&key)?;
-    }
-  }
-  Ok(())
-}
-
-/// The move law: validate + derive the final flat order via the SAME pure
-/// [`board_ops::apply_move_subtree`] the previews use, then transform the
-/// order list into it with `mov` ops for ONLY the subtree members, plus
-/// column/parent register writes. Content containers are never touched.
-fn execute_move_subtree(
-  doc: &LoroDoc,
-  board: &FlowBoardProjection,
-  sheet_id: SheetId,
-  cell_id: CellId,
-  drop: FlowDropIntent,
-) -> anyhow::Result<()> {
-  let sheet = board.sheet(sheet_id).context("unknown sheet")?;
-  let column_ids = board.sheet_column_ids(sheet_id)?;
-  let mut preview: Sheet = sheet.clone();
-  board_ops::apply_move_subtree(&mut preview, &column_ids, cell_id, drop)?;
-  if !board_ops::sheet_topology_ok(&preview, &column_ids) {
-    bail!("move would break the sheet topology");
-  }
-  let subtree: Vec<CellId> = board_ops::subtree_cell_ids(sheet, cell_id);
-
-  // Register writes: every subtree member's column may shift; only the moved
-  // root's parent changes.
-  for moved in &preview.cells {
-    if !subtree.contains(&moved.id) {
-      continue;
-    }
-    let record = cell_record(doc, moved.id).context("unknown cell record")?;
-    let before = sheet
-      .cells
-      .iter()
-      .find(|cell| cell.id == moved.id)
-      .context("cell vanished")?;
-    if before.column_id != moved.column_id {
-      set_cell_column(&record, moved.column_id)?;
-    }
-    if moved.id == cell_id && before.parent_id != moved.parent_id {
-      set_cell_parent(&record, moved.parent_id)?;
-    }
-  }
-
-  // Order-list transform via mov, subtree members only, ascending final
-  // position (non-members keep their relative order, so this converges).
-  let record = sheet_record(doc, sheet_id).context("unknown sheet record")?;
-  let order = sheet_cell_order(&record)?;
-  let desired: Vec<String> = preview
-    .cells
-    .iter()
-    .map(|cell| cell.id.to_string())
-    .collect();
-  for (desired_ix, entry) in desired.iter().enumerate() {
-    if !subtree.iter().any(|id| &id.to_string() == entry) {
-      continue;
-    }
-    let current = list_strings(&order);
-    let Some(from) = current.iter().position(|candidate| candidate == entry) else {
-      continue;
-    };
-    let to = desired_ix.min(current.len().saturating_sub(1));
-    if from != to {
-      order.mov(from, to)?;
     }
   }
   Ok(())
@@ -393,7 +614,7 @@ pub fn write_cell_paragraphs(doc: &LoroDoc, cell_id: CellId, paragraphs: Vec<flo
 }
 
 /// Replace a cell's content from a full editor projection (the transitional
-/// solo write-back path until the per-cell authority lands).
+/// solo write-back path until every surface rides the per-cell authority).
 pub fn replace_cell_document(doc: &LoroDoc, cell_id: CellId, document: &flowstate_document::DocumentProjection) -> anyhow::Result<()> {
   let record = cell_record(doc, cell_id).context("unknown cell record")?;
   let flow = cell_flow(&record).context("cell has no flow")?;

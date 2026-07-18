@@ -222,8 +222,12 @@ impl Workspace {
                 .map(|name| name.to_string_lossy().to_string())
                 .unwrap_or_else(|| path.display().to_string());
               let path_text = path.display().to_string();
-              let preview_document = self.recent_document_previews.get(&path).cloned();
-              let preview_unavailable = preview_document.is_none();
+              let is_flow = is_flow_path(&path);
+              let preview_document = if is_flow { None } else { self.recent_document_previews.get(&path).cloned() };
+              let flow_preview = if is_flow { self.recent_flow_previews.get(&path) } else { None };
+              // "Unavailable" only once a preview genuinely can't render — for a
+              // flow that means the board is still loading (or failed to load).
+              let preview_unavailable = preview_document.is_none() && flow_preview.is_none();
               let hover_group = format!("empty-recent-document-hover-{ix}");
               let preview_radius = cx.theme().radius.max(px(1.0)) - px(1.0);
               let open_recent = cx.listener({
@@ -257,6 +261,16 @@ impl Workspace {
                           .overflow_hidden()
                           .bg(document.theme.document_background_color)
                           .child(RichTextDocumentElement::new(document)),
+                      )
+                    })
+                    .when_some(flow_preview, |this, preview| {
+                      this.child(
+                        div()
+                          .size_full()
+                          .rounded(preview_radius)
+                          .overflow_hidden()
+                          .bg(cx.theme().background)
+                          .child(crate::flow::render_flow_board_preview(preview, cx)),
                       )
                     })
                     .when(preview_unavailable, |this| {
@@ -302,8 +316,17 @@ impl Workspace {
                     .justify_between()
                     .gap_2()
                     .child(
+                      // Single-line, ellipsized: without wrap control gpui wraps
+                      // the (space-less) filename at character boundaries, so
+                      // flexbox collapses this to min-content (~1 glyph) and it
+                      // renders as a vertical column — which also makes the row
+                      // tall enough to strand the pin star and the path below.
                       div()
+                        .flex_1()
                         .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
                         .text_sm()
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(cx.theme().foreground)
@@ -484,7 +507,7 @@ impl Workspace {
       let board = flow.read(cx).board();
       match mode % 2 {
         0 => {
-          let cells: usize = board.sheets.iter().map(|sheet| sheet.cells.len()).sum();
+          let cells: usize = board.sheets.iter().map(|sheet| sheet.cells().count()).sum();
           (format!("{cells} cells"), "Cells on this board — click to cycle")
         },
         _ => (

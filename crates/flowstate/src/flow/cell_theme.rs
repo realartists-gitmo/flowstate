@@ -4,7 +4,7 @@ use gpui::{Hsla, transparent_black};
 // D-S2: the color machinery lives in the app-wide visual engine now; this
 // module keeps only the flow-specific pieces (its public shape is frozen
 // while the flow editor WIP is out).
-use crate::visual_engine::{composite_over, contrast_ratio, mix_srgb, transform_color};
+use crate::visual_engine::{composite_over, mix_srgb, transform_color};
 
 pub(super) fn apply_flow_cell_theme(
   document: &mut DocumentProjection,
@@ -64,37 +64,17 @@ fn scale_flow_layout_metrics(theme: &mut DocumentTheme, zoom: f32) {
   }
 }
 
-/// Part 4 visual system: the soft-fill borderless card, DERIVED from the
-/// active theme at paint time (no stored colors anywhere).
-pub(super) struct FlowCardVisuals {
-  /// Composited card fill (side wash over the theme surface).
-  pub fill: Hsla,
-  /// Contrast guard: a 1px `theme().border` hairline when the fill-vs-canvas
-  /// contrast collapses under the active theme.
-  pub hairline: Option<Hsla>,
-  /// Light themes elevate with a shadow; dark themes lift the fill instead.
-  pub shadow: bool,
-}
-
-pub(super) fn flow_card_visuals(
-  side_base: Hsla,
-  background: Hsla,
-  foreground: Hsla,
-  border: Hsla,
-  is_dark: bool,
-  emphasis: f32,
-) -> FlowCardVisuals {
+/// Spreadsheet visual system: an occupied cell is a flat fill (side wash over
+/// the theme surface), DERIVED from the active theme at paint time (no stored
+/// colors anywhere). Separation is the gridline's job — no shadows, no
+/// rounding, no hairlines.
+pub(super) fn flow_cell_fill(side_base: Hsla, background: Hsla, foreground: Hsla, is_dark: bool, emphasis: f32) -> Hsla {
   let mut fill = composite_over(side_base.opacity(0.08 + emphasis), background);
   if is_dark {
-    // Elevation on dark themes: lift the fill ~4% toward the foreground.
+    // Dark themes lift the fill ~4% toward the foreground for legibility.
     fill = mix_srgb(fill, foreground, 0.04);
   }
-  let hairline = (contrast_ratio(fill, background) < 1.02).then_some(border);
-  FlowCardVisuals {
-    fill,
-    hairline,
-    shadow: !is_dark,
-  }
+  fill
 }
 
 

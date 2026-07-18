@@ -1,4 +1,5 @@
-//! Dumps a `.fl0` flow's topology and full cell text (including any notes typed into cells).
+//! Dumps a `.fl0` flow's grid and full cell text (including any notes typed
+//! into cells).
 //!
 //! Run: `cargo run -p flowstate-flow --example dump_flow -- <path.fl0>`
 
@@ -7,41 +8,59 @@ use flowstate_flow::load_flow_document;
 fn main() {
   let path = std::env::args()
     .nth(1)
-    .unwrap_or_else(|| "flow-ergonomics-fixture.fl0".to_string());
+    .expect("usage: dump_flow <path.fl0>");
   let document = load_flow_document(&path).expect("load flow");
   let projection = document.projection();
 
   for sheet in &projection.sheets {
-    let definition = projection.format.sheet_type(sheet.sheet_type_id);
-    let column_name = |id| {
-      definition.and_then(|d: &flowstate_flow::SheetTypeDefinition| {
-        d.columns
-          .iter()
-          .find(|c| c.id == id)
-          .map(|c| c.label.clone())
+    println!(
+      "\n===== SHEET: {} ({} columns × {} rows, {} cells) =====",
+      sheet.name,
+      sheet.columns.len(),
+      sheet.rows.len(),
+      sheet.cells().count()
+    );
+    let header: Vec<String> = sheet
+      .columns
+      .iter()
+      .map(|column| match column.width {
+        Some(width) => format!("{} (w {width:.0})", column.label),
+        None => column.label.clone(),
       })
-    };
-    let label = |id| {
-      sheet
-        .cells
-        .iter()
-        .find(|c| c.id == id)
-        .map(|c| c.summary.summary_text.to_string())
-        .map(|t| t.lines().next().unwrap_or_default().trim().to_string())
-        .unwrap_or_default()
-    };
-    println!("\n===== SHEET: {} ({} cells) =====", sheet.name, sheet.cells.len());
-    for (index, cell) in sheet.cells.iter().enumerate() {
-      let col = column_name(cell.column_id).unwrap_or_else(|| "?".into());
-      let parent = cell.parent_id.map(label).unwrap_or_else(|| "—".into());
-      let text = document
-        .cell_document(cell.id)
-        .map(|d| d.text.to_string())
+      .collect();
+    println!("columns: {}", header.join(" | "));
+    for (row_ix, row) in sheet.rows.iter().enumerate() {
+      let height = row
+        .height_override
+        .map(|height| format!(" [h {height:.0}]"))
         .unwrap_or_default();
-      println!("[{index:2}] col={col:<6} parent={parent}");
-      for line in text.lines() {
-        println!("        | {line}");
+      println!("\n-- row {row_ix}{height} ({})", row.id);
+      for (column_ix, slot) in row.cells.iter().enumerate() {
+        let Some(cell) = slot else { continue };
+        let struck = if cell.summary.struck { " [struck]" } else { "" };
+        println!("  [{}]{} {}", sheet.columns[column_ix].label, struck, cell.id);
+        match document.cell_document(cell.id) {
+          Ok(cell_document) => {
+            for line in cell_document.text.to_string().lines() {
+              let line = line.trim_matches('\u{FEFF}');
+              if !line.trim().is_empty() {
+                println!("      {line}");
+              }
+            }
+          },
+          Err(error) => println!("      <cell text failed to materialize: {error}>"),
+        }
       }
+    }
+    if !sheet.annotations.is_empty() {
+      println!("\n   ink: {} stroke(s)", sheet.annotations.len());
+    }
+  }
+
+  if !document.defects().is_empty() {
+    println!("\n===== DEFECTS =====");
+    for defect in document.defects() {
+      println!("  {defect}");
     }
   }
 }

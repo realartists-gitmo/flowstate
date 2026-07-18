@@ -323,7 +323,14 @@ impl Workspace {
             workspace.tub_files = result.files;
             workspace.rebuild_tub_tree_cache();
             workspace.refresh_tub_file_search(cx);
-            workspace.report_activity("Tub indexed", cx);
+            // No silent caps: unreadable member files are skipped per-file
+            // by the scan — say so instead of reporting a clean index.
+            let unreadable = workspace.tub_files.iter().filter(|file| !file.indexed).count();
+            match unreadable {
+              0 => workspace.report_activity("Tub indexed", cx),
+              1 => workspace.report_activity("Tub indexed — 1 unreadable file skipped", cx),
+              count => workspace.report_activity(format!("Tub indexed — {count} unreadable files skipped"), cx),
+            }
             workspace.toolkit_status = if workspace
               .toolkit_search_input
               .read(cx)

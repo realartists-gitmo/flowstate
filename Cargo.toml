@@ -61,9 +61,14 @@ resvg = "0.45.1"
 rusqlite = { version = "0.40.0", features = ["bundled"] }
 rustc-hash = "2.1.2"
 serde = { version = "1.0.228", features = ["derive"] }
+# Embedded library use only. default-features off drops `pdf` (native pdfium — we
+# import docx ourselves) and Chinese `zh` (we tokenize Folded); `vb` keeps the
+# vector-search result fields for hybrid (D6). Note: hyper/utoipa/tabled are
+# UNCONDITIONAL deps of this crate (lib not cleanly split from the server) — a
+# vendor-and-trim candidate if build weight bites.
+seekstorm = { version = "3.3", default-features = false, features = ["vb"] }
 serde_json = "1.0.150"
 sha2 = "0.10"
-tantivy = "0.26.1"
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 toml = "1.1.2"

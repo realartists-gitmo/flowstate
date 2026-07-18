@@ -1,44 +1,13 @@
-//! The flow's INTENT vocabulary (flow architecture spec Part 2.2): plain-data
-//! descriptions of every mutation, constructed by the app without any runtime
-//! types. The runtime (`flowstate-collab/src/flow`) resolves and executes
-//! them under the write gate; the schema-level `FlowDocument::apply_intent`
-//! executes them directly for solo/fixture/test use — one executor, two
-//! entrances.
+//! The flow's INTENT vocabulary (excel flow spec §2): plain-data descriptions
+//! of every grid mutation, constructed by the app without any runtime types.
+//! The runtime (`flowstate-collab/src/flow`) resolves and executes them under
+//! the write gate; the schema-level `FlowDocument::apply_intent` executes
+//! them directly for solo/fixture/test use — one executor, two entrances.
 
 use flowstate_document::InputParagraph;
 
-use crate::format::{CellId, SheetId, SheetTypeId};
+use crate::format::{ArgumentSide, CellId, ColumnId, RowId, SheetId, SheetTypeId};
 use crate::projection::{AnnotationOriginator, AnnotationStroke};
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RelativePosition {
-  Before,
-  After,
-}
-
-/// Where a moved cell (and its thread) lands. `RootInColumn`'s
-/// `insertion_index` is a POSITIONAL HINT resolved and clamped inside the
-/// executor against the live order — positional-as-hint, identity-anchored
-/// variants preferred (UX spec: pads/keyboard emit the identity forms).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FlowDropIntent {
-  BeforeSibling(CellId),
-  AfterSibling(CellId),
-  FirstChildOf(CellId),
-  LastChildOf(CellId),
-  RootInColumn { column_index: usize, insertion_index: usize },
-}
-
-/// Where a NEW cell lands (collapses the four legacy add_* entry points).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CellPlacement {
-  Before(CellId),
-  After(CellId),
-  FirstChildOf(CellId),
-  LastChildOf(CellId),
-  ColumnTop { column_index: usize },
-  SheetEnd { column_index: usize },
-}
 
 /// Initial rich text for a new cell.
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -74,20 +43,105 @@ pub enum FlowIntent {
     /// Identity anchor: land immediately before this sheet; `None` = end.
     before: Option<SheetId>,
   },
+  /// New rows enter the sheet-global order immediately before `before`
+  /// (`None` = end). Fresh ids are minted by the caller so intents replay
+  /// deterministically.
+  InsertRows {
+    sheet_id: SheetId,
+    before: Option<RowId>,
+    row_ids: Vec<RowId>,
+  },
+  /// Move a (contiguous-in-intent) run of rows before the anchor, preserving
+  /// their relative order. Order-list `mov` ops only — never touches cells.
+  MoveRows {
+    sheet_id: SheetId,
+    row_ids: Vec<RowId>,
+    before: Option<RowId>,
+  },
+  /// Deletes the rows, every cell resident in them, and their height
+  /// overrides.
+  DeleteRows {
+    sheet_id: SheetId,
+    row_ids: Vec<RowId>,
+  },
+  /// D4: manual row height override; `None` clears back to autofit.
+  SetRowHeight {
+    sheet_id: SheetId,
+    row_id: RowId,
+    height: Option<f32>,
+  },
+  AddColumn {
+    sheet_id: SheetId,
+    column_id: ColumnId,
+    label: String,
+    side: ArgumentSide,
+    /// Identity anchor: land immediately before this column; `None` = end.
+    before: Option<ColumnId>,
+  },
+  RenameColumn {
+    sheet_id: SheetId,
+    column_id: ColumnId,
+    label: String,
+  },
+  MoveColumn {
+    sheet_id: SheetId,
+    column_id: ColumnId,
+    before: Option<ColumnId>,
+  },
+  /// Deletes the column and every cell resident in it. The last column of a
+  /// sheet cannot be deleted.
+  DeleteColumn {
+    sheet_id: SheetId,
+    column_id: ColumnId,
+  },
+  SetColumnWidth {
+    sheet_id: SheetId,
+    column_id: ColumnId,
+    /// `None` clears back to automatic width.
+    width: Option<f32>,
+  },
+  /// A cell is born AT an address (D1 placement map). Rejects if the slot is
+  /// occupied at execute time; concurrent-merge collisions are the
+  /// normalizer's job (D2 bump-down), never the executor's.
   AddCell {
     sheet_id: SheetId,
     cell_id: CellId,
-    placement: CellPlacement,
+    row_id: RowId,
+    column_id: ColumnId,
     seed: CellSeed,
   },
   DeleteCell {
     sheet_id: SheetId,
     cell_id: CellId,
   },
-  MoveCellSubtree {
+  /// The move: two LWW register writes on the cell, nothing else. The nested
+  /// text container is never touched, so concurrent typing merges through a
+  /// move (D1). Rejects if the target slot is occupied by another cell.
+  SetCellAddress {
     sheet_id: SheetId,
     cell_id: CellId,
-    drop: FlowDropIntent,
+    row_id: RowId,
+    column_id: ColumnId,
+  },
+  /// Exchange two cells' addresses in ONE commit (drag-onto-occupied). Both
+  /// LWW register writes land atomically, so neither cell transiently sees the
+  /// other's occupied slot — a two-step swap through `SetCellAddress` would be
+  /// rejected by the per-write occupancy guard. Lossless: the occupant takes
+  /// the dragged cell's vacated address.
+  SwapCells {
+    sheet_id: SheetId,
+    a: CellId,
+    b: CellId,
+  },
+  /// Reposition many cells in ONE atomic commit — the block-swap primitive.
+  /// The whole placement set lands together, so a rigid permutation (cells
+  /// moving +Δ while the cards they displace slide −Δ into the vacated slots)
+  /// never trips the per-write occupancy guard. Rejects if the final
+  /// arrangement would put two cells on one address, or collide with a cell
+  /// outside the placement set.
+  SetCellAddresses {
+    sheet_id: SheetId,
+    placements: Vec<(CellId, RowId, ColumnId)>,
   },
   SetCellStruck {
     sheet_id: SheetId,
@@ -136,9 +190,20 @@ impl FlowIntent {
       Self::RenameSheet { .. } => "flow.rename-sheet",
       Self::DeleteSheet { .. } => "flow.delete-sheet",
       Self::MoveSheet { .. } => "flow.move-sheet",
+      Self::InsertRows { .. } => "flow.insert-rows",
+      Self::MoveRows { .. } => "flow.move-rows",
+      Self::DeleteRows { .. } => "flow.delete-rows",
+      Self::SetRowHeight { .. } => "flow.set-row-height",
+      Self::AddColumn { .. } => "flow.add-column",
+      Self::RenameColumn { .. } => "flow.rename-column",
+      Self::MoveColumn { .. } => "flow.move-column",
+      Self::DeleteColumn { .. } => "flow.delete-column",
+      Self::SetColumnWidth { .. } => "flow.set-column-width",
       Self::AddCell { .. } => "flow.add-cell",
       Self::DeleteCell { .. } => "flow.delete-cell",
-      Self::MoveCellSubtree { .. } => "flow.move-cell-subtree",
+      Self::SetCellAddress { .. } => "flow.set-cell-address",
+      Self::SwapCells { .. } => "flow.swap-cells",
+      Self::SetCellAddresses { .. } => "flow.set-cell-addresses",
       Self::SetCellStruck { .. } => "flow.set-cell-struck",
       Self::EnsureCellEditable { .. } => "flow.ensure-cell-editable",
       Self::ReplaceCellContent { .. } => "flow.replace-cell-content",
@@ -149,17 +214,26 @@ impl FlowIntent {
     }
   }
 
-  /// Column ids are per-sheet; `ColumnId` params in intents use indices into the
-  /// sheet type's column list, so intents stay valid across format lookups.
   pub fn sheet_id(&self) -> Option<SheetId> {
     match self {
       Self::CreateSheet { sheet_id, .. }
       | Self::RenameSheet { sheet_id, .. }
       | Self::DeleteSheet { sheet_id }
       | Self::MoveSheet { sheet_id, .. }
+      | Self::InsertRows { sheet_id, .. }
+      | Self::MoveRows { sheet_id, .. }
+      | Self::DeleteRows { sheet_id, .. }
+      | Self::SetRowHeight { sheet_id, .. }
+      | Self::AddColumn { sheet_id, .. }
+      | Self::RenameColumn { sheet_id, .. }
+      | Self::MoveColumn { sheet_id, .. }
+      | Self::DeleteColumn { sheet_id, .. }
+      | Self::SetColumnWidth { sheet_id, .. }
       | Self::AddCell { sheet_id, .. }
       | Self::DeleteCell { sheet_id, .. }
-      | Self::MoveCellSubtree { sheet_id, .. }
+      | Self::SetCellAddress { sheet_id, .. }
+      | Self::SwapCells { sheet_id, .. }
+      | Self::SetCellAddresses { sheet_id, .. }
       | Self::SetCellStruck { sheet_id, .. }
       | Self::EnsureCellEditable { sheet_id, .. }
       | Self::ReplaceCellContent { sheet_id, .. }

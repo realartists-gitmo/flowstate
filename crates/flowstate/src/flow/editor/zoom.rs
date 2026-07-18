@@ -1,8 +1,7 @@
-use flowstate_flow::{BoardPoint, BoardRect};
 use gpui::{Pixels, Point, Size, point, px};
 use gpui_component::PixelsExt as _;
 
-use super::FlowEditor;
+use super::{BoardPoint, FlowEditor};
 
 const MIN_ZOOM_PERCENT: f32 = 25.0;
 const MAX_ZOOM_PERCENT: f32 = 400.0;
@@ -93,19 +92,6 @@ impl FlowEditor {
     self.set_zoom_percent(self.zoom_percent() - ZOOM_STEP_PERCENT, cx);
   }
 
-  pub fn visible_board_rect(&self) -> BoardRect {
-    let bounds = self.board_scroll.bounds();
-    let offset = self.board_scroll.offset();
-    let scroll_x = -offset.x.as_f32() / self.board_zoom;
-    let scroll_y = -offset.y.as_f32() / self.board_zoom;
-    BoardRect {
-      min: BoardPoint { x: scroll_x, y: scroll_y },
-      max: BoardPoint {
-        x: scroll_x + bounds.size.width.as_f32() / self.board_zoom,
-        y: scroll_y + bounds.size.height.as_f32() / self.board_zoom,
-      },
-    }
-  }
 }
 
 fn camera_center_for_offset(offset: Point<Pixels>, viewport: Size<Pixels>, zoom: f32) -> BoardPoint {
@@ -142,16 +128,6 @@ fn camera_center_matches_offset(
 ) -> bool {
   let expected = clamp_scroll_offset(offset_for_camera_center(center, viewport, zoom), max_offset);
   points_are_close(expected, offset, tolerance)
-}
-
-pub(super) fn grid_dot_metrics(zoom: f32, device_scale: f32) -> (Pixels, f32) {
-  let target_size = 1.5 * zoom;
-  let target_device_size = target_size * device_scale;
-  if target_device_size < 1.0 {
-    (px(1.0 / device_scale), target_device_size * target_device_size)
-  } else {
-    (px(target_size), 1.0)
-  }
 }
 
 #[cfg(test)]
@@ -226,16 +202,5 @@ mod tests {
       1.0,
       px(0.5),
     ));
-  }
-
-  #[test]
-  fn subpixel_grid_dots_fade_instead_of_becoming_heavier() {
-    let (small_size, small_opacity) = grid_dot_metrics(0.25, 1.0);
-    let (normal_size, normal_opacity) = grid_dot_metrics(1.0, 1.0);
-
-    assert_eq!(small_size, px(1.0));
-    assert!(small_opacity < normal_opacity);
-    assert_eq!(normal_size, px(1.5));
-    assert_eq!(normal_opacity, 1.0);
   }
 }

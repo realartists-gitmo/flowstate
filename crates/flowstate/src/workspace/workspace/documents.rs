@@ -310,6 +310,7 @@ impl Workspace {
       active_toolkit_tool: None,
       recent_documents: load_recent_documents(),
       recent_document_previews: HashMap::new(),
+      recent_flow_previews: HashMap::new(),
       recent_document_preview_generation: 0,
       temporary_workspace_session_pending: None,
       temporary_workspace_session_persist_scheduled: false,
@@ -1501,20 +1502,29 @@ impl Workspace {
     self
       .recent_document_previews
       .retain(|path, _| self.recent_documents.iter().any(|recent| recent == path));
+    self
+      .recent_flow_previews
+      .retain(|path, _| self.recent_documents.iter().any(|recent| recent == path));
 
-    let paths = self
+    let doc_paths = self
       .recent_documents
       .iter()
-      .filter(|path| !self.recent_document_previews.contains_key(*path) && !is_flow_path(path))
+      .filter(|path| !is_flow_path(path) && !self.recent_document_previews.contains_key(*path))
       .cloned()
       .collect::<Vec<_>>();
-    if paths.is_empty() {
+    let flow_paths = self
+      .recent_documents
+      .iter()
+      .filter(|path| is_flow_path(path) && !self.recent_flow_previews.contains_key(*path))
+      .cloned()
+      .collect::<Vec<_>>();
+    if doc_paths.is_empty() && flow_paths.is_empty() {
       return;
     }
 
     self.recent_document_preview_generation = self.recent_document_preview_generation.wrapping_add(1);
     let generation = self.recent_document_preview_generation;
-    for path in paths {
+    for path in doc_paths {
       cx.spawn(async move |workspace, cx| {
         let preview = cx
           .background_executor()
@@ -1539,6 +1549,52 @@ impl Workspace {
           }
           if let Some(preview) = preview {
             workspace.recent_document_previews.insert(path, preview);
+            cx.notify();
+          }
+        });
+      })
+      .detach();
+    }
+    // Flows can't use the rich-text preview element, so load their materialized
+    // board projection instead — the card renders a mini-board thumbnail from it.
+    for path in flow_paths {
+      cx.spawn(async move |workspace, cx| {
+        let preview = cx
+          .background_executor()
+          .spawn({
+            let path = path.clone();
+            async move {
+              let document = flowstate_flow::load_flow_document(&path).ok()?;
+              let board = document.projection().clone();
+              // Materialize each occupied cell's rich-text projection now (off
+              // the main thread) so the static viewport renders real cell text.
+              let mut cell_documents = std::collections::HashMap::new();
+              for sheet in &board.sheets {
+                for cell in sheet.cells() {
+                  if cell.summary.is_empty {
+                    continue;
+                  }
+                  if let Ok(cell_document) = document.cell_document(cell.id) {
+                    cell_documents.insert(cell.id, cell_document);
+                  }
+                }
+              }
+              Some(crate::flow::FlowPreview { board, cell_documents })
+            }
+          })
+          .await;
+
+        let _ = workspace.update(cx, |workspace, cx| {
+          if workspace.recent_document_preview_generation != generation
+            || !workspace
+              .recent_documents
+              .iter()
+              .any(|recent| recent == &path)
+          {
+            return;
+          }
+          if let Some(preview) = preview {
+            workspace.recent_flow_previews.insert(path, preview);
             cx.notify();
           }
         });

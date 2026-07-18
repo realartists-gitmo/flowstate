@@ -14,5 +14,5 @@ loro = "1.13.1"
 postcard = "1.1.3"
 tracing = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
-uuid = { workspace = true, features = ["serde", "v4"] }
+uuid = { workspace = true, features = ["serde", "v4", "v5"] }
 zstd.workspace = true
