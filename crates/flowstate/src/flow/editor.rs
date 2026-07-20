@@ -17,18 +17,19 @@ use gpui_component::{IconName, Sizable as _};
 
 use crate::{
   app_settings::load_document_theme,
-  flow::{cell_theme::apply_flow_cell_theme, flow_side_palette},
+  flow::{cell_theme::apply_flow_cell_theme, resolve_flow_theme},
   rich_text_element::{RichTextDocumentElement, RichTextEditor},
 };
 
 mod annotation;
 mod cell_editing;
+mod clipboard;
 mod grid_layout;
 mod grid_nav;
 mod preview;
 mod zoom;
 
-pub(crate) use preview::{FlowPreview, render_flow_board_preview};
+pub(crate) use preview::{FlowPreview, preview_cell_ids, render_flow_board_preview, theme_flow_preview};
 
 pub use grid_nav::{GridDirection, RelativePosition};
 
@@ -116,6 +117,11 @@ struct PanDragState {
 pub(super) struct FlowCellDrag {
   pub cell_id: CellId,
 }
+
+/// Drag payload for the selection's fill handle (the source is the current
+/// selection, so it carries no data).
+#[derive(Clone)]
+pub(super) struct FillHandleDrag;
 
 pub(super) struct FlowCellDragPreview {
   label: SharedString,
@@ -263,6 +269,19 @@ pub struct FlowEditor {
   /// W2 range grammar: the (row, column) a shift-extend measures its rectangle
   /// from. Set on plain click / ctrl-toggle; untouched by a shift-extend.
   selection_anchor: Option<(usize, usize)>,
+  /// Excel tab-anchor: the column a run of Tabs started in, so Enter after the
+  /// run drops one row and returns to it. Set on the first Tab of a run,
+  /// consumed by Enter, cleared by any other navigation.
+  tab_anchor_column: Option<usize>,
+  /// Shift-drag marquee: the slot the rubber-band rectangle is anchored at.
+  /// `Some` while a shift-drag is in progress; the moving corner tracks the
+  /// pointer. Bare drag stays panning.
+  marquee_anchor: Option<(usize, usize)>,
+  /// Ctrl+X source cells to delete when the cut is pasted (Excel move). Cleared
+  /// on a fresh copy or after the paste consumes it.
+  cut_pending: Option<Vec<CellId>>,
+  /// The slot the fill handle is being dragged over (the fill's far corner).
+  fill_target: Option<(usize, usize)>,
   refusal: Option<RefusalNotice>,
   /// `FLOWSTATE_INTENT_LOG` debug overlay: the last few intents + outcomes.
   intent_log: std::collections::VecDeque<SharedString>,
@@ -351,6 +370,10 @@ impl FlowEditor {
       column_resize: None,
       selected_cells: HashSet::new(),
       selection_anchor: None,
+      tab_anchor_column: None,
+      marquee_anchor: None,
+      cut_pending: None,
+      fill_target: None,
       refusal: None,
       intent_log: std::collections::VecDeque::new(),
       session_attached: false,
@@ -699,6 +722,7 @@ impl FlowEditor {
       return div().into_any_element();
     };
     let zoom = self.board_zoom;
+    let flow_theme = resolve_flow_theme();
     let sheet = self
       .active_sheet
       .and_then(|sheet_id| {
@@ -720,7 +744,7 @@ impl FlowEditor {
           .columns
           .iter()
           .map(|column| {
-            let side = flow_side_palette(column.side, cx);
+            let side = flow_theme.side(column.side);
             div()
               .w(px(column.width.unwrap_or(280.0) * zoom))
               .flex_none()
@@ -744,8 +768,8 @@ impl FlowEditor {
                   .bg(side.base.opacity(0.08))
                   .text_size(px(12.0 * zoom))
                   .text_color(
-                    cx.theme()
-                      .foreground
+                    flow_theme
+                      .text
                       .opacity(if cell.summary.struck { 0.45 } else { 0.9 }),
                   )
                   .when(cell.summary.struck, |this| this.line_through())
@@ -1293,20 +1317,6 @@ impl FlowEditor {
     self.set_user_scroll_offset(offset);
   }
 
-  /// The accent color for a cell: its column's side palette.
-  fn cell_text_color(&self, cell_id: CellId, cx: &App) -> gpui::Hsla {
-    self
-      .board
-      .sheets
-      .iter()
-      .find_map(|sheet| {
-        let cell = sheet.find_cell(cell_id)?;
-        let column = sheet.columns.iter().find(|column| column.id == cell.column_id)?;
-        Some(flow_side_palette(column.side, cx).base)
-      })
-      .unwrap_or(cx.theme().foreground)
-  }
-
   fn begin_pan(&mut self, position: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
     // A fresh press clears the swallow flag; only real movement re-arms it.
     self.suppress_click = false;
@@ -1442,6 +1452,7 @@ impl FlowEditor {
       .filter_map(|slot| slot.as_ref().map(|cell| cell.id))
       .collect();
     self.cursor = Some((row_ix, 0));
+    self.selection_anchor = Some((row_ix, 0));
     cx.notify();
   }
 
@@ -1545,6 +1556,38 @@ impl FlowEditor {
           label: format!("Col {}", count + 1),
           side,
           before: None,
+        },
+        cx,
+      )
+      .is_ok()
+    {
+      self.changed(self.active_cell, cx);
+    }
+  }
+
+  /// Insert a blank column immediately BEFORE the cursor's column (Excel's
+  /// "insert column"), inheriting that column's side. With no cursor it falls
+  /// back to appending at the end.
+  pub fn insert_column_at_cursor(&mut self, cx: &mut Context<Self>) {
+    let Some(sheet_id) = self.active_sheet else { return };
+    let Some((_, column_ix)) = self.cursor else {
+      self.add_column_end(cx);
+      return;
+    };
+    let anchor = self.active_sheet_ref().and_then(|sheet| sheet.columns.get(column_ix)).map(|column| (column.id, column.side));
+    let Some((before, side)) = anchor else {
+      self.add_column_end(cx);
+      return;
+    };
+    let count = self.active_sheet_ref().map_or(0, |sheet| sheet.columns.len());
+    if self
+      .apply_intent(
+        &FlowIntent::AddColumn {
+          sheet_id,
+          column_id: uuid::Uuid::new_v4(),
+          label: format!("Col {}", count + 1),
+          side,
+          before: Some(before),
         },
         cx,
       )
@@ -1739,18 +1782,40 @@ impl FlowEditor {
     }
   }
 
+  /// Map a pointer position to the (row, column) slot under it.
+  fn slot_at_position(&self, position: gpui::Point<gpui::Pixels>) -> Option<(usize, usize)> {
+    let point = self.model_point(position);
+    let sheet = self.active_sheet_ref()?;
+    let layout = GridLayout::compute_to(sheet, &self.cell_measurements, self.ghost_bottom_model());
+    layout.row_at(point.y).zip(layout.column_at(point.x))
+  }
+
   fn update_cell_drag_target(&mut self, position: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
-    let target = {
-      let point = self.model_point(position);
-      let Some(sheet) = self.active_sheet_ref() else { return };
-      let layout = GridLayout::compute_to(sheet, &self.cell_measurements, self.ghost_bottom_model());
-      layout
-        .row_at(point.y)
-        .zip(layout.column_at(point.x))
-    };
+    let target = self.slot_at_position(position);
     if self.drag_target != target {
       self.drag_target = target;
       cx.notify();
+    }
+  }
+
+  /// Shift-press on the grid starts a rubber-band selection anchored at the
+  /// slot under the pointer (bare press pans instead).
+  fn begin_marquee(&mut self, position: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
+    if let Some(slot) = self.slot_at_position(position) {
+      self.marquee_anchor = Some(slot);
+      self.selection_anchor = Some(slot);
+      self.tab_anchor_column = None;
+      self.select_cell_range(slot.0, slot.1, cx);
+    }
+  }
+
+  /// While shift-dragging: grow the rectangle from the marquee anchor to the
+  /// slot under the pointer.
+  fn update_marquee(&mut self, position: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
+    if self.marquee_anchor.is_some()
+      && let Some((row, column)) = self.slot_at_position(position)
+    {
+      self.select_cell_range(row, column, cx);
     }
   }
 
@@ -1887,14 +1952,20 @@ impl FlowEditor {
     }
   }
 
-  fn clear_autofit_width(&mut self, column_id: ColumnId, cx: &mut Context<Self>) {
+  /// Double-click the column edge = fit width to content (Excel autofit).
+  /// Width is measured from the widest single line across the column's cells
+  /// and its header label, using the same char-per-line model the row-height
+  /// estimator uses (cells are rich text, so this is a content-aware estimate,
+  /// not a pixel-exact layout pass). Clamped to a sane min/max.
+  fn autofit_column(&mut self, column_id: ColumnId, column_ix: usize, cx: &mut Context<Self>) {
     let Some(sheet_id) = self.active_sheet else { return };
+    let width = self.autofit_column_width(column_ix).unwrap_or(grid_layout::DEFAULT_COLUMN_WIDTH);
     if self
       .apply_intent(
         &FlowIntent::SetColumnWidth {
           sheet_id,
           column_id,
-          width: None,
+          width: Some(width),
         },
         cx,
       )
@@ -1902,6 +1973,28 @@ impl FlowEditor {
     {
       self.changed(self.active_cell, cx);
     }
+  }
+
+  /// The content-fit width for a column: the widest line (in chars) across the
+  /// header label and every occupied cell, scaled by the estimator's per-char
+  /// width, plus content padding, clamped to [MIN_COLUMN_WIDTH, 3×DEFAULT].
+  fn autofit_column_width(&self, column_ix: usize) -> Option<f32> {
+    let sheet = self.active_sheet_ref()?;
+    // DEFAULT_COLUMN_WIDTH ≈ 34 chars in the row-height estimator (grid_layout).
+    let per_char = grid_layout::DEFAULT_COLUMN_WIDTH / 34.0;
+    let longest_line = |text: &str| text.lines().map(|line| line.chars().count()).max().unwrap_or(0);
+    let header_chars = sheet.columns.get(column_ix).map_or(0, |column| column.label.chars().count());
+    let content_chars = sheet
+      .rows
+      .iter()
+      .filter_map(|row| row.cells.get(column_ix).and_then(|slot| slot.as_ref()))
+      .map(|cell| longest_line(&cell.summary.summary_text.to_string()))
+      .max()
+      .unwrap_or(0);
+    let chars = header_chars.max(content_chars);
+    let padding = grid_layout::CELL_CONTENT_PADDING * 2.0 + 12.0;
+    let width = chars as f32 * per_char + padding;
+    Some(width.clamp(grid_layout::MIN_COLUMN_WIDTH, grid_layout::DEFAULT_COLUMN_WIDTH * 3.0))
   }
 
   /// D4: gutter-edge drag on a row → manual height override; double-click
@@ -1967,6 +2060,7 @@ impl FlowEditor {
     let cursor = self.cursor;
     let weak_editor = cx.entity().downgrade();
     let client_document_theme = load_document_theme();
+    let flow_theme = resolve_flow_theme();
 
     // Visible window from the scroll offset (O(log rows)).
     let offset = self.board_scroll.offset();
@@ -1981,7 +2075,9 @@ impl FlowEditor {
     // the slots — occupied cells sit 1px inset so the line shows around them.
     // A touch stronger than a hairline so adjacent filled cells stay legibly
     // separate (the gridline is the ONLY separation — cells have no borders).
-    let grid_line_color = cx.theme().border.opacity(0.85);
+    // The gridline is the ONLY separation between cells — its color is an
+    // explicit slot in the flow's own palette, not derived from the app theme.
+    let grid_line_color = flow_theme.gridline;
     let line_xs: Vec<f32> = layout
       .column_lefts
       .iter()
@@ -2041,7 +2137,7 @@ impl FlowEditor {
       let is_ghost = row_ix >= layout.real_rows;
       for column_ix in visible_columns.clone() {
         let column = &sheet.columns[column_ix];
-        let side_palette = flow_side_palette(column.side, cx);
+        let side_palette = flow_theme.side(column.side);
         let side_color = side_palette.base;
         let left = board_content_offset(origin_x, layout.column_lefts[column_ix], zoom);
         let top = board_content_offset(origin_y, row_top, zoom);
@@ -2063,14 +2159,12 @@ impl FlowEditor {
             let uses_summary_projection = cell.summary.uses_summary_projection;
             let mut rendered_document = if active == Some(id) { None } else { self.cell_document(id) };
             if let Some(document) = rendered_document.as_mut() {
-              apply_flow_cell_theme(document, &client_document_theme, side_color, cx.theme().background, zoom);
+              apply_flow_cell_theme(document, &client_document_theme, flow_theme.text, flow_theme.surface, zoom);
             }
             let cell_editor = self.cell_editors.get(&id).cloned();
             let fill = crate::flow::cell_theme::flow_cell_fill(
+              &flow_theme,
               side_color,
-              cx.theme().background,
-              cx.theme().foreground,
-              cx.theme().is_dark(),
               if active == Some(id) { 0.08 } else { 0.0 },
             );
             // S11: a peer's hand on this cell paints its presence border.
@@ -2090,7 +2184,7 @@ impl FlowEditor {
             let ring_color: gpui::Hsla = if dragging_this {
               fill // carried as a faded ghost — no highlight
             } else if is_drag_target && self.dragging_cell.is_some_and(|dragged| dragged != id) {
-              cx.theme().primary
+              flow_theme.selection
             } else if active == Some(id) {
               side_palette.active
             } else if self.selected_cells.contains(&id) {
@@ -2164,8 +2258,8 @@ impl FlowEditor {
                   let drag_weak = weak_editor.clone();
                   let drag_label = label.clone();
                   let drag_fill = fill;
-                  let drag_text_color = side_color;
-                  let dot_color = cx.theme().muted_foreground.opacity(0.75);
+                  let drag_text_color = flow_theme.text;
+                  let dot_color = flow_theme.muted_text.opacity(0.75);
                   let grip_dot = px(2.0 * zoom);
                   let grip_gap = px(2.0 * zoom);
                   let grip_column = move || {
@@ -2187,6 +2281,19 @@ impl FlowEditor {
                           cx.listener(|editor, event: &MouseDownEvent, _, cx| {
                             if editor.annotation_tool != AnnotationTool::None {
                               editor.set_annotation_tool(AnnotationTool::None, cx);
+                            }
+                            // Shift-press starts a rubber-band marquee; Ctrl/Cmd-press
+                            // is a toggle (handled by on_click). Neither pans — a pan's
+                            // 4px threshold would otherwise swallow the click.
+                            let modifiers = event.modifiers;
+                            if modifiers.shift {
+                              editor.begin_marquee(event.position, cx);
+                              cx.stop_propagation();
+                              return;
+                            }
+                            if modifiers.control || modifiers.platform {
+                              cx.stop_propagation();
+                              return;
                             }
                             editor.begin_pan(event.position, cx);
                             cx.stop_propagation();
@@ -2214,6 +2321,7 @@ impl FlowEditor {
                           }
                           editor.clear_selection(cx);
                           editor.selection_anchor = position;
+                          editor.tab_anchor_column = None;
                           editor.activate_cell(id, cx);
                           // Enter with the caret at the end so typing appends.
                           editor.focus_active_cell(window, cx);
@@ -2258,7 +2366,7 @@ impl FlowEditor {
                       .bottom(px(0.0))
                       .right(px(4.0))
                       .text_size(px(10.0 * zoom))
-                      .text_color(cx.theme().muted_foreground)
+                      .text_color(flow_theme.muted_text)
                       .child("⋯"),
                   )
                 })
@@ -2267,17 +2375,11 @@ impl FlowEditor {
           },
           None => {
             let drag_live = self.dragging_cell.is_some();
-            // Empty in-grid slots share the occupied cell's side wash (idle
-            // emphasis) so the sheet reads as one uniform field instead of a
-            // lighter grid of holes. The ghost run below stays bare — that
-            // transparent aether is the cue for where the sheet actually ends.
-            let empty_fill = crate::flow::cell_theme::flow_cell_fill(
-              side_color,
-              cx.theme().background,
-              cx.theme().foreground,
-              cx.theme().is_dark(),
-              0.0,
-            );
+            // Every empty slot — real rows AND the ghost run below — shares the
+            // occupied cell's idle side wash, so the whole grid reads as one
+            // uniform field (Excel-style, effectively endless) with no darker
+            // band appearing right under the last row of content.
+            let empty_fill = crate::flow::cell_theme::flow_cell_fill(&flow_theme, side_color, 0.0);
             slots.push(
               div()
                 .id(("flow-slot", (row_ix as u64) << 16 | column_ix as u64))
@@ -2286,10 +2388,10 @@ impl FlowEditor {
                 .top(top + px(1.0))
                 .w(width - px(1.0))
                 .h(height - px(1.0))
-                .when(!is_ghost, |this| this.bg(empty_fill))
+                .bg(empty_fill)
                 .when(is_cursor, |this| this.border(px(2.0)).border_color(side_palette.active))
                 .when(is_drag_target && drag_live, |this| {
-                  this.border(px(2.0)).border_dashed().border_color(cx.theme().primary)
+                  this.border(px(2.0)).border_dashed().border_color(flow_theme.selection)
                 })
                 .on_mouse_down(
                   MouseButton::Left,
@@ -2297,10 +2399,15 @@ impl FlowEditor {
                     if editor.annotation_tool != AnnotationTool::None {
                       return;
                     }
-                    // Modifier-held press builds a selection — leave it to
-                    // on_click and don't start a pan.
+                    // Shift-press starts a marquee; Ctrl/Cmd-press is left to
+                    // on_click. Neither pans.
                     let modifiers = event.modifiers;
-                    if modifiers.shift || modifiers.control || modifiers.platform {
+                    if modifiers.shift {
+                      editor.begin_marquee(event.position, cx);
+                      cx.stop_propagation();
+                      return;
+                    }
+                    if modifiers.control || modifiers.platform {
                       cx.stop_propagation();
                       return;
                     }
@@ -2340,6 +2447,7 @@ impl FlowEditor {
                   // Plain single click places the grid cursor on this slot.
                   editor.clear_selection(cx);
                   editor.selection_anchor = Some((row_ix, column_ix));
+                  editor.tab_anchor_column = None;
                   editor.set_cursor(row_ix, column_ix, cx);
                   editor.focus_handle.focus(window);
                 }))
@@ -2369,7 +2477,7 @@ impl FlowEditor {
           .w(px(layout.total_width() * zoom))
           .h(px(4.0))
           .rounded_full()
-          .bg(cx.theme().primary)
+          .bg(flow_theme.selection)
           .into_any_element()
       });
     let column_bar = self
@@ -2390,9 +2498,40 @@ impl FlowEditor {
           .w(px(4.0))
           .h(px(layout.total_height() * zoom))
           .rounded_full()
-          .bg(cx.theme().primary)
+          .bg(flow_theme.selection)
           .into_any_element()
       });
+
+    // Fill handle: the small square at the selection's bottom-right corner
+    // (Excel). Dragging it tiles the selection's content into the swept range.
+    let fill_handle: Option<AnyElement> = {
+      let bottom_right = if !self.selected_cells.is_empty() {
+        self
+          .selected_cells
+          .iter()
+          .filter_map(|id| sheet.cell_position(*id))
+          .reduce(|a, b| (a.0.max(b.0), a.1.max(b.1)))
+      } else {
+        self.cursor.filter(|&(row, column)| sheet.slot(row, column).is_some())
+      };
+      bottom_right.map(|(row_ix, column_ix)| {
+        let x = board_content_offset(origin_x, layout.column_lefts[column_ix] + layout.column_widths[column_ix], zoom);
+        let y = board_content_offset(origin_y, layout.row_top(row_ix) + layout.row_height(row_ix), zoom);
+        div()
+          .id("flow-fill-handle")
+          .absolute()
+          .left(x - px(5.0))
+          .top(y - px(5.0))
+          .w(px(9.0))
+          .h(px(9.0))
+          .bg(flow_theme.selection)
+          .border_1()
+          .border_color(flow_theme.surface)
+          .cursor_grab()
+          .on_drag(FillHandleDrag, |_, _, _, cx| cx.new(|_| EmptyDragPreview))
+          .into_any_element()
+      })
+    };
 
     div()
       .id("flow-grid-content")
@@ -2469,9 +2608,24 @@ impl FlowEditor {
         editor.update_column_resize(event.event.position, cx);
       }))
       .on_drop(cx.listener(|editor, _: &ColumnResizeDrag, _, cx| editor.finish_column_resize(cx)))
+      .on_drag_move(cx.listener(|editor, event: &DragMoveEvent<FillHandleDrag>, _, cx| {
+        if event.bounds.contains(&event.event.position) {
+          let target = editor.slot_at_position(event.event.position);
+          if editor.fill_target != target {
+            editor.fill_target = target;
+            cx.notify();
+          }
+        }
+      }))
+      .on_drop(cx.listener(|editor, _: &FillHandleDrag, _, cx| {
+        if let Some((row, column)) = editor.fill_target.take() {
+          editor.fill_handle_drop(row, column, cx);
+        }
+      }))
       .children(slots)
       .children(row_bar)
       .children(column_bar)
+      .children(fill_handle)
       // S11: peer name chips ride their focused cells' top-right corner.
       .children(self.external_presences.iter().filter_map(|presence| {
         let cell = presence.cell.filter(|_| presence.sheet == self.active_sheet)?;
@@ -2547,9 +2701,10 @@ impl FlowEditor {
     let zoom = self.board_zoom;
     let offset = self.board_scroll.offset();
     let header_height = px(HEADER_HEIGHT * zoom);
+    let flow_theme = resolve_flow_theme();
     let mut children: Vec<AnyElement> = Vec::new();
     for (column_ix, column) in sheet.columns.iter().enumerate() {
-      let side = flow_side_palette(column.side, cx);
+      let side = flow_theme.side(column.side);
       // The overlay container already sits at the grid's x origin (the
       // gutter edge) — children position in bare column space.
       let left = px(layout.column_lefts[column_ix] * zoom) + offset.x;
@@ -2570,7 +2725,9 @@ impl FlowEditor {
           .items_center()
           .justify_between()
           .px(px(6.0 * zoom))
-          .bg(side.base.opacity(0.04))
+          // Cells are neutral (C2), so the header band carries the side
+          // identity: a stronger tint plus the accent label and underline.
+          .bg(side.base.opacity(0.14))
           .font_weight(gpui::FontWeight::BOLD)
           .text_size(px(13.0 * zoom))
           .text_color(side.base)
@@ -2584,6 +2741,20 @@ impl FlowEditor {
             });
             cx.new(|_| ColumnDragPreview { label: drag_label.clone() })
           })
+          // Click a header to select the whole column; shift = column span,
+          // ctrl/cmd = add the column to the selection.
+          .on_click(cx.listener(move |editor, event: &gpui::ClickEvent, window, cx| {
+            let m = event.modifiers();
+            if m.shift {
+              let anchor = editor.selection_anchor.map(|(_, column)| column).unwrap_or(column_ix);
+              editor.select_column_span(anchor, column_ix, cx);
+            } else if m.control || m.platform {
+              editor.add_column_to_selection(column_ix, cx);
+            } else {
+              editor.select_column(column_ix, cx);
+            }
+            editor.focus_handle.focus(window);
+          }))
           .child(label)
           .child(
             Button::new(("flow-column-add-cell", column_ix))
@@ -2609,7 +2780,7 @@ impl FlowEditor {
           .top(px(0.0))
           .w(px(1.0))
           .h(header_height)
-          .bg(cx.theme().border.opacity(0.55))
+          .bg(flow_theme.chrome_border)
           .into_any_element(),
       );
       // The resize grip on the column's right edge; double-click = autofit.
@@ -2641,7 +2812,7 @@ impl FlowEditor {
           )
           .on_click(cx.listener(move |editor, event: &gpui::ClickEvent, _, cx| {
             if event.click_count() >= 2 {
-              editor.clear_autofit_width(column_id, cx);
+              editor.autofit_column(column_id, column_ix, cx);
             }
           }))
           .into_any_element(),
@@ -2669,9 +2840,9 @@ impl FlowEditor {
       .right(px(0.0))
       .h(header_height)
       .overflow_hidden()
-      .bg(cx.theme().background.opacity(0.96))
+      .bg(flow_theme.header_bg)
       .border_b_1()
-      .border_color(cx.theme().border.opacity(0.5))
+      .border_color(flow_theme.chrome_border)
       .children(children)
       .into_any_element()
   }
@@ -2682,6 +2853,7 @@ impl FlowEditor {
       return div().into_any_element();
     };
     let zoom = self.board_zoom;
+    let flow_theme = resolve_flow_theme();
     let offset = self.board_scroll.offset();
     let (_, origin_y) = grid_origin_model();
     let viewport = self.board_scroll.bounds().size;
@@ -2710,15 +2882,15 @@ impl FlowEditor {
           .items_center()
           .justify_center()
           .border_b(px(1.0))
-          .border_color(cx.theme().border.opacity(0.55))
+          .border_color(flow_theme.chrome_border)
           .text_size(px(10.5 * zoom))
           .text_color(if selected_row {
-            cx.theme().foreground
+            flow_theme.text
           } else {
-            cx.theme().muted_foreground.opacity(if is_ghost { 0.35 } else { 0.8 })
+            flow_theme.muted_text.opacity(if is_ghost { 0.45 } else { 0.9 })
           })
-          .when(selected_row, |this| this.bg(cx.theme().primary.opacity(0.12)))
-          .hover(|style| style.bg(cx.theme().primary.opacity(0.08)))
+          .when(selected_row, |this| this.bg(flow_theme.selection.opacity(0.12)))
+          .hover(|style| style.bg(flow_theme.selection.opacity(0.08)))
           .cursor_grab()
           .child(SharedString::from(format!("{}", row_ix + 1)))
           .when_some(row_id, |this, row_id| {
@@ -2735,6 +2907,15 @@ impl FlowEditor {
               .on_click(cx.listener(move |editor, event: &gpui::ClickEvent, _, cx| {
                 if event.click_count() >= 2 {
                   editor.clear_row_height_override(row_id, cx);
+                  return;
+                }
+                // Shift = row span, ctrl/cmd = add the row to the selection.
+                let m = event.modifiers();
+                if m.shift {
+                  let anchor = editor.selection_anchor.map(|(row, _)| row).unwrap_or(row_ix);
+                  editor.select_row_span(anchor, row_ix, cx);
+                } else if m.control || m.platform {
+                  editor.add_row_to_selection(row_ix, cx);
                 } else {
                   editor.select_row(row_ix, cx);
                 }
@@ -2750,9 +2931,9 @@ impl FlowEditor {
       .bottom(px(0.0))
       .w(px(GUTTER_WIDTH * zoom))
       .overflow_hidden()
-      .bg(cx.theme().background.opacity(0.96))
+      .bg(flow_theme.gutter_bg)
       .border_r_1()
-      .border_color(cx.theme().border.opacity(0.5))
+      .border_color(flow_theme.chrome_border)
       .children(children)
       .into_any_element()
   }
@@ -2786,7 +2967,17 @@ impl Focusable for FlowEditor {
 impl Render for FlowEditor {
   fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     self.apply_pending_camera_center();
+    // gpui's native scroll accumulates the wheel delta UNCLAMPED and only clamps
+    // it at paint — but this render reads `board_scroll.offset()` during element
+    // construction (frozen gutter/header, grid window), i.e. before that clamp.
+    // Scrolling up at the top would otherwise let every reader observe a
+    // transient overscrolled offset, desyncing the frozen chrome and perturbing
+    // row-0 cell measurement (the gutter "1" ballooning until prefetch resettles
+    // ~1-2s later). Re-clamp up front so this frame's readers see an in-range
+    // offset.
+    self.clamp_board_scroll_offset();
     self.refresh_active_cell_theme(cx);
+    let flow_theme = resolve_flow_theme();
     // Refusal voice: keep frames coming while the toast/shake animates.
     let refusal_toast = self.refusal_toast();
     if self.refusal.is_some() {
@@ -2822,7 +3013,9 @@ impl Render for FlowEditor {
     self.built_scroll_offset.set(self.board_scroll.offset());
     // Part 4: column washes belong to the aether — each side's tint starts
     // under the header and runs to the bottom of the viewport.
-    let wash_columns: Vec<(f32, f32, gpui::Hsla)> = if self.scrubber.is_some() {
+    // The column washes only exist when the palette opts into a side tint
+    // (`cell_wash > 0`); C2's neutral grid paints no band.
+    let wash_columns: Vec<(f32, f32, gpui::Hsla)> = if self.scrubber.is_some() || flow_theme.cell_wash <= 0.0 {
       Vec::new()
     } else {
       self
@@ -2836,13 +3029,16 @@ impl Render for FlowEditor {
               (
                 layout.column_lefts[column_ix],
                 layout.column_widths[column_ix],
-                flow_side_palette(column.side, cx).base,
+                flow_theme.side(column.side).base,
               )
             })
             .collect()
         })
         .unwrap_or_default()
     };
+    // The band is a fraction of the cell wash (historically 3.5% vs the 8%
+    // cell wash → ~0.44), so it stays subtler than the cells themselves.
+    let column_wash_alpha = flow_theme.cell_wash * 0.44;
     let scroll_sync = {
       let weak = cx.entity().downgrade();
       let handle = self.board_scroll.clone();
@@ -2878,70 +3074,184 @@ impl Render for FlowEditor {
           return;
         }
         let board_focused = editor.focus_handle.is_focused(window);
+        let key = event.keystroke.key.as_str();
+        let m = event.keystroke.modifiers;
+        // Cmd is treated like Ctrl for grid shortcuts. Alt is reserved (never a
+        // grid verb) so alt-letter accented input still reaches the type path.
+        let ctrl = m.control || m.platform;
         // Escape from a focused cell editor returns to cell-select mode.
-        if event.keystroke.key == "escape" && !board_focused && editor.active_cell.is_some() {
+        if key == "escape" && !board_focused && editor.active_cell.is_some() {
           editor.focus_handle.focus(window);
           cx.stop_propagation();
           return;
         }
-        if board_focused {
-          let modifiers = event.keystroke.modifiers;
-          if !modifiers.control && !modifiers.alt && !modifiers.platform {
-            match event.keystroke.key.as_str() {
-              "up" => {
-                editor.navigate(GridDirection::Up, cx);
-                cx.stop_propagation();
-                return;
-              },
-              "down" | "enter" => {
-                editor.navigate(GridDirection::Down, cx);
-                cx.stop_propagation();
-                return;
-              },
-              "left" => {
-                editor.navigate(GridDirection::Left, cx);
-                cx.stop_propagation();
-                return;
-              },
-              "right" | "tab" => {
-                editor.navigate(GridDirection::Right, cx);
-                cx.stop_propagation();
-                return;
-              },
-              _ => {},
-            }
-            // D5: typing on an empty slot IS creation — the keystroke seeds
-            // the new cell so nothing is lost.
-            if editor.annotation_tool == AnnotationTool::None
-              && editor.active_cell.is_none()
-              && editor.cursor.is_some()
-              && let Some(key_char) = event.keystroke.key_char.clone()
-              && !key_char.is_empty()
-              && !key_char.chars().any(char::is_control)
-            {
-              if editor.type_into_cursor(&key_char, cx).is_some() {
-                cx.on_next_frame(window, |flow, window, cx| {
-                  let Some(editor) = flow
-                    .active_cell
-                    .and_then(|cell| flow.cell_editors.get(&cell))
-                    .cloned()
-                  else {
-                    return;
-                  };
-                  editor.update(cx, |editor, cx| editor.move_document_end(cx));
-                  editor.read(cx).focus_handle(cx).focus(window);
-                });
+        // Enter/Tab WHILE EDITING a cell commit (cells commit live) and advance
+        // the grid cursor, then hand focus back to the board. Excel: Enter =
+        // down, Tab = right, Shift+Tab = left. Shift+Enter and Alt+Enter fall
+        // through to the cell editor (soft line break / in-cell newline).
+        if !board_focused && editor.active_cell.is_some() && !ctrl && !m.alt {
+          let advanced = match key {
+            "enter" if !m.shift => {
+              editor.focus_handle.focus(window);
+              editor.enter_navigate(false, cx);
+              true
+            },
+            "tab" => {
+              editor.focus_handle.focus(window);
+              editor.tab_navigate(m.shift, cx);
+              true
+            },
+            _ => false,
+          };
+          if advanced {
+            cx.stop_propagation();
+            return;
+          }
+        }
+        if !board_focused {
+          return;
+        }
+        if !m.alt {
+          match key {
+            "up" | "down" | "left" | "right" => {
+              editor.tab_anchor_column = None; // any arrow breaks a Tab run
+              let dir = match key {
+                "up" => GridDirection::Up,
+                "down" => GridDirection::Down,
+                "left" => GridDirection::Left,
+                _ => GridDirection::Right,
+              };
+              if ctrl {
+                editor.jump_to_edge(dir, m.shift, cx); // Ctrl(+Shift) = jump to data edge
+              } else if m.shift {
+                editor.extend_selection(dir, cx);
+              } else {
+                editor.navigate(dir, cx);
               }
               cx.stop_propagation();
               return;
-            }
+            },
+            // Excel: Enter = down (returning to the Tab-run column), Shift+Enter
+            // = up, Ctrl+Enter = new family.
+            "enter" => {
+              if ctrl {
+                editor.add_new_family(cx);
+              } else if !editor.cycle_within_selection(!m.shift, cx) {
+                editor.enter_navigate(m.shift, cx);
+              }
+              cx.stop_propagation();
+              return;
+            },
+            // Excel: Tab = right, Shift+Tab = left (remembers the run's column).
+            "tab" => {
+              if !editor.cycle_within_selection(!m.shift, cx) {
+                editor.tab_navigate(m.shift, cx);
+              }
+              cx.stop_propagation();
+              return;
+            },
+            "f2" => {
+              editor.edit_cursor_cell(window, cx);
+              cx.stop_propagation();
+              return;
+            },
+            "delete" | "backspace" => {
+              editor.delete_selected(window, cx);
+              cx.stop_propagation();
+              return;
+            },
+            "home" | "end" => {
+              editor.tab_anchor_column = None;
+              editor.cursor_to_extreme(key, ctrl, cx);
+              cx.stop_propagation();
+              return;
+            },
+            "pageup" | "pagedown" => {
+              editor.tab_anchor_column = None;
+              editor.page(key == "pagedown", cx);
+              cx.stop_propagation();
+              return;
+            },
+            "a" if ctrl => {
+              editor.select_all(cx);
+              cx.stop_propagation();
+              return;
+            },
+            "c" if ctrl => {
+              editor.copy_selection(cx);
+              cx.stop_propagation();
+              return;
+            },
+            "x" if ctrl => {
+              editor.cut_selection(cx);
+              cx.stop_propagation();
+              return;
+            },
+            "v" if ctrl => {
+              editor.paste(cx);
+              cx.stop_propagation();
+              return;
+            },
+            "d" if ctrl => {
+              editor.fill_down(cx);
+              cx.stop_propagation();
+              return;
+            },
+            "r" if ctrl => {
+              editor.fill_right(cx);
+              cx.stop_propagation();
+              return;
+            },
+            // Ctrl+Shift++ inserts a column before the cursor (Excel insert).
+            "=" | "+" if ctrl && m.shift => {
+              editor.insert_column_at_cursor(cx);
+              cx.stop_propagation();
+              return;
+            },
+            // Shift+Space = select row, Ctrl+Space = select column, bare = pan-arm.
+            "space" => {
+              if m.shift {
+                if let Some((row, _)) = editor.cursor {
+                  editor.select_row(row, cx);
+                }
+              } else if ctrl {
+                if let Some((_, column)) = editor.cursor {
+                  editor.select_column(column, cx);
+                }
+              } else {
+                editor.space_pan_armed = true;
+                cx.notify();
+              }
+              cx.stop_propagation();
+              return;
+            },
+            _ => {},
           }
         }
-        // Space arms panning only when the board itself holds focus.
-        if event.keystroke.key == "space" && board_focused {
-          editor.space_pan_armed = true;
+        // D5: a printable key on the cursor's slot creates (empty) or overwrites
+        // (occupied), seeded with the keystroke, then drops focus into the cell.
+        if !ctrl
+          && editor.annotation_tool == AnnotationTool::None
+          && editor.cursor.is_some()
+          && let Some(key_char) = event.keystroke.key_char.clone()
+          && !key_char.is_empty()
+          && !key_char.chars().any(char::is_control)
+        {
+          if editor.overwrite_cursor(&key_char, cx).is_some() {
+            cx.on_next_frame(window, |flow, window, cx| {
+              let Some(editor) = flow
+                .active_cell
+                .and_then(|cell| flow.cell_editors.get(&cell))
+                .cloned()
+              else {
+                return;
+              };
+              editor.update(cx, |editor, cx| editor.move_document_end(cx));
+              editor.read(cx).focus_handle(cx).focus(window);
+            });
+          }
           cx.stop_propagation();
-          cx.notify();
+          return;
         }
       }))
       .on_key_up(cx.listener(|editor, event: &KeyUpEvent, _, cx| {
@@ -2990,11 +3300,18 @@ impl Render for FlowEditor {
         if editor.right_inking {
           editor.continue_annotation(event.position, cx);
         }
+        if editor.marquee_anchor.is_some() {
+          editor.update_marquee(event.position, cx);
+          return;
+        }
         editor.queue_pan(event.position, window, cx);
       }))
       .on_mouse_up(
         MouseButton::Left,
-        cx.listener(|editor, _: &MouseUpEvent, _, cx| editor.finish_space_pan(cx)),
+        cx.listener(|editor, _: &MouseUpEvent, _, cx| {
+          editor.marquee_anchor = None;
+          editor.finish_space_pan(cx);
+        }),
       )
       .child(
         canvas(
@@ -3018,7 +3335,7 @@ impl Render for FlowEditor {
               if wash.size.width <= px(0.0) || wash.size.height <= px(0.0) {
                 continue;
               }
-              window.paint_quad(gpui::fill(wash, side_color.opacity(0.035)));
+              window.paint_quad(gpui::fill(wash, side_color.opacity(column_wash_alpha)));
             }
           },
         )
@@ -3090,15 +3407,22 @@ impl Render for FlowEditor {
           .child(self.render_gutter_overlay(cx))
           .child(
             div()
+              .id("flow-corner-select-all")
               .absolute()
               .top(px(0.0))
               .left(px(0.0))
               .w(px(GUTTER_WIDTH * self.board_zoom))
               .h(px(HEADER_HEIGHT * self.board_zoom))
-              .bg(cx.theme().background)
+              .bg(flow_theme.gutter_bg)
               .border_b_1()
               .border_r_1()
-              .border_color(cx.theme().border.opacity(0.5)),
+              .border_color(flow_theme.chrome_border)
+              .cursor_pointer()
+              // Excel: the corner box selects the whole sheet.
+              .on_click(cx.listener(|editor, _: &gpui::ClickEvent, window, cx| {
+                editor.select_all(cx);
+                editor.focus_handle.focus(window);
+              })),
           )
       })
       .child(scroll_sync)

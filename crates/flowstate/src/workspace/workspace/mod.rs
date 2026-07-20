@@ -37,13 +37,14 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use uuid::Uuid;
 
 use crate::app_settings::{
-  load_autosave, load_document_theme, load_local_user_identity, load_recent_documents, load_send_custom_directory,
-  load_send_to_document_directory, load_smart_word_selection, load_tub_root, save_autosave, save_document_theme, save_recent_documents,
-  save_send_custom_directory, save_send_to_document_directory, save_smart_word_selection, save_theme_name,
+  load_autosave, load_document_theme, load_flow_theme, load_local_user_identity, load_recent_documents, load_send_custom_directory,
+  load_send_to_document_directory, load_smart_word_selection, load_tub_root, reset_flow_theme, save_autosave, save_document_theme,
+  save_flow_theme, save_recent_documents, save_send_custom_directory, save_send_to_document_directory, save_smart_word_selection,
+  save_theme_name,
 };
 use crate::commands::{CommandId, context_for};
 use crate::docx_conversion::{convert_docx_to_document, import_docx_to_loro};
-use crate::flow::{FlowEditor, FlowPanel};
+use crate::flow::{FlowEditor, FlowPanel, FlowTheme};
 use crate::rich_text_element::{
   CustomParagraphBorder, DocumentProjection, DocumentTheme, InputParagraph, InputRun, ParagraphStyle, RichTextDocumentElement,
   RichTextEditor, Save, SectionKind, ThemeUnderline, ZoomIn, ZoomOut, document_from_input, document_text_slice, flowstate_document_theme,

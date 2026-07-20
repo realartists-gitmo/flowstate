@@ -56,6 +56,7 @@ pub fn board_from_loro(doc: &LoroDoc) -> anyhow::Result<MaterializedBoard> {
   clippy::implicit_hasher,
   reason = "the cache is the runtime's plain HashMap; generalizing the hasher buys nothing at this call count"
 )]
+#[hotpath::measure]
 pub fn board_from_loro_cached(
   doc: &LoroDoc,
   summary_cache: &HashMap<CellId, CellSummary>,
@@ -431,11 +432,13 @@ fn sheet_annotations(doc: &LoroDoc, sheet_id: SheetId) -> Vec<AnnotationStroke> 
 /// Materialize ONE cell's rich text into a full editor projection, with
 /// durable ids from the cell's scoped registry (never fabricated fresh — the
 /// intent-resolution law anchors on them).
+#[hotpath::measure]
 pub fn cell_document(doc: &LoroDoc, cell_id: CellId) -> anyhow::Result<flowstate_document::DocumentProjection> {
   let record = loro_schema::cell_record(doc, cell_id).ok_or_else(|| anyhow::anyhow!("unknown cell {cell_id}"))?;
   cell_document_from_record(doc, &record)
 }
 
+#[hotpath::measure]
 fn cell_document_from_record(doc: &LoroDoc, record: &LoroMap) -> anyhow::Result<flowstate_document::DocumentProjection> {
   let flow = cell_flow(record).ok_or_else(|| anyhow::anyhow!("cell record has no flow"))?;
   let registry = cell_paragraph_registry(&flow);
@@ -456,6 +459,7 @@ fn cell_document_from_record(doc: &LoroDoc, record: &LoroMap) -> anyhow::Result<
 
 /// The board-level read model of a cell's rich text (the old `Cell::summary_*`
 /// law, ported onto a materialized projection).
+#[hotpath::measure]
 pub fn derive_cell_summary(document: &flowstate_document::DocumentProjection) -> CellSummary {
   let mut projection: Vec<String> = Vec::new();
   let mut uses_summary = false;

@@ -3,11 +3,11 @@ use std::path::PathBuf;
 use gpui::{App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, Render, SharedString, WeakEntity, Window, div, prelude::*};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::dock::{Panel, PanelControl, PanelEvent, PanelInfo, PanelState};
-use gpui_component::{ActiveTheme as _, IconName, Sizable};
+use gpui_component::{IconName, Sizable};
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::flow::{FlowEditor, FlowRibbon, FlowSheetStrip};
+use crate::flow::{FlowEditor, FlowRibbon, FlowSheetStrip, resolve_flow_theme};
 use crate::workspace::Workspace;
 
 pub struct FlowPanel {
@@ -180,13 +180,14 @@ impl Panel for FlowPanel {
 }
 
 impl Render for FlowPanel {
-  fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+  fn render(&mut self, _: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
     // I-S3: the sheet strip rides the board's bottom edge.
     div()
       .size_full()
       .flex()
       .flex_col()
-      .bg(cx.theme().background)
+      // The board sits on the flow's own surface, not the app background.
+      .bg(resolve_flow_theme().surface)
       .child(div().flex_1().min_h_0().child(self.editor.clone()))
       .child(self.sheet_strip.clone())
   }

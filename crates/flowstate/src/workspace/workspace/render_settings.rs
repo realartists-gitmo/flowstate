@@ -635,6 +635,37 @@ impl Workspace {
             .description("Applies immediately.")
             .item(theme_picker_item(workspace.clone())),
         ),
+      SettingPage::new("Flow")
+        .description("The flow board's own palette — Excel-like and independent of the app theme (light or dark is your choice, not the app's). Applies to this machine; never saved into a .fl0.")
+        .group(reset_flow_theme_group(workspace.clone()))
+        .group(
+          SettingGroup::new()
+            .title("Presets")
+            .item(flow_preset_item(workspace.clone())),
+        )
+        .group(
+          SettingGroup::new()
+            .title("Grid")
+            .item(flow_color_item(workspace.clone(), "Sheet surface", |theme| theme.surface, |theme, value| theme.surface = value))
+            .item(flow_color_item(workspace.clone(), "Gridline", |theme| theme.gridline, |theme, value| theme.gridline = value))
+            .item(flow_color_item(workspace.clone(), "Chrome border", |theme| theme.chrome_border, |theme, value| theme.chrome_border = value))
+            .item(flow_color_item(workspace.clone(), "Cell text", |theme| theme.text, |theme, value| theme.text = value))
+            .item(flow_color_item(workspace.clone(), "Muted text", |theme| theme.muted_text, |theme, value| theme.muted_text = value)),
+        )
+        .group(
+          SettingGroup::new()
+            .title("Chrome")
+            .item(flow_color_item(workspace.clone(), "Header band", |theme| theme.header_bg, |theme, value| theme.header_bg = value))
+            .item(flow_color_item(workspace.clone(), "Gutter band", |theme| theme.gutter_bg, |theme, value| theme.gutter_bg = value))
+            .item(flow_color_item(workspace.clone(), "Selection accent", |theme| theme.selection, |theme, value| theme.selection = value)),
+        )
+        .group(
+          SettingGroup::new()
+            .title("Sides")
+            .description("Affirmative and negative identity — carried in the column header (C2 cells are neutral).")
+            .item(flow_color_item(workspace.clone(), "Affirmative", |theme| theme.aff.base, |theme, value| set_side_from_base(value, &mut theme.aff)))
+            .item(flow_color_item(workspace.clone(), "Negative", |theme| theme.neg.base, |theme, value| set_side_from_base(value, &mut theme.neg))),
+        ),
       SettingPage::new("Collaboration")
         .description("Applies to this machine — identity, trust, and transports.")
         .group(reset_workspace_settings_section_group(
@@ -695,6 +726,13 @@ fn reset_workspace_settings_section_group(workspace: WeakEntity<Workspace>, sect
 }
 
 #[hotpath::measure]
+fn reset_flow_theme_group(workspace: WeakEntity<Workspace>) -> SettingGroup {
+  reset_section_delegate_group(move |cx| {
+    save_setting_reporting(workspace.clone(), "flow palette", reset_flow_theme, cx);
+    cx.refresh_windows();
+  })
+}
+
 fn reset_section_delegate_group(reset: impl Fn(&mut App) + 'static) -> SettingGroup {
   SettingGroup::new()
     .h_0()

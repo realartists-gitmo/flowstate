@@ -16,9 +16,9 @@ loro.workspace = true
 postcard.workspace = true
 
 [features]
-hotpath = ["hotpath/hotpath", "flowstate-collab/hotpath", "flowstate-docx/hotpath", "flowstate-document/hotpath"]
-hotpath-cpu = ["hotpath", "hotpath/hotpath-cpu", "flowstate-collab/hotpath-cpu", "flowstate-docx/hotpath-cpu", "flowstate-document/hotpath-cpu"]
-hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc", "flowstate-collab/hotpath-alloc", "flowstate-docx/hotpath-alloc", "flowstate-document/hotpath-alloc"]
+hotpath = ["hotpath/hotpath", "flowstate-collab/hotpath", "flowstate-flow/hotpath", "flowstate-docx/hotpath", "flowstate-document/hotpath"]
+hotpath-cpu = ["hotpath", "hotpath/hotpath-cpu", "flowstate-collab/hotpath-cpu", "flowstate-flow/hotpath-cpu", "flowstate-docx/hotpath-cpu", "flowstate-document/hotpath-cpu"]
+hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc", "flowstate-collab/hotpath-alloc", "flowstate-flow/hotpath-alloc", "flowstate-docx/hotpath-alloc", "flowstate-document/hotpath-alloc"]
 
 [lints]
 workspace = true

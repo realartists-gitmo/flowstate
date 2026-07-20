@@ -441,6 +441,188 @@ fn import_classification_feeds_per_cell_streams() {
   assert!(!cell_items.is_empty(), "the edited cell's stream must receive a Replace");
 }
 
+/// The incremental structural paths (local AddCell / DeleteCell patch the
+/// retained board instead of rematerializing it) must produce a board and
+/// routing index IDENTICAL to a fresh full materialization at every step —
+/// `verify_board_equivalence` asserts exactly that. Covers the deterministic
+/// cases the soak's randomized fuzz may not hit (explicit delete, move
+/// fallback, re-add into a vacated slot).
+#[test]
+fn incremental_structural_matches_full_materialization() {
+  let (handle, sheet) = handle_with_sheet();
+  let verify = |handle: &FlowDocHandle| {
+    handle.gate().lock(GateHolder::DocumentService).unwrap().verify_board_equivalence();
+  };
+
+  let row1 = append_row(&handle, sheet);
+  verify(&handle);
+  let row2 = append_row(&handle, sheet);
+  verify(&handle);
+  let col0 = column(&handle, sheet, 0);
+  let col1 = column(&handle, sheet, 1);
+
+  // AddCell — incremental patch on a clean board.
+  let a1 = add_cell_at(&handle, sheet, row1, col0, "A1");
+  verify(&handle);
+  let b1 = add_cell_at(&handle, sheet, row1, col1, "B1");
+  verify(&handle);
+  let a2 = add_cell_at(&handle, sheet, row2, col0, "A2");
+  verify(&handle);
+
+  // Strike — content-only patch (a text mark).
+  handle
+    .apply(&FlowIntent::SetCellStruck {
+      sheet_id: sheet,
+      cell_id: a1,
+      struck: true,
+    })
+    .unwrap();
+  verify(&handle);
+
+  // Move — placement change, takes the full-refresh fallback.
+  handle
+    .apply(&FlowIntent::SetCellAddress {
+      sheet_id: sheet,
+      cell_id: b1,
+      row_id: row2,
+      column_id: col1,
+    })
+    .unwrap();
+  verify(&handle);
+
+  // DeleteCell — incremental patch, then re-add a fresh cell into the vacated
+  // slot (also incremental), then delete another.
+  handle.apply(&FlowIntent::DeleteCell { sheet_id: sheet, cell_id: a1 }).unwrap();
+  verify(&handle);
+  let a1b = add_cell_at(&handle, sheet, row1, col0, "A1 again");
+  verify(&handle);
+
+  // Metadata patches — O(1), no cell touched.
+  handle.apply(&FlowIntent::SetRowHeight { sheet_id: sheet, row_id: row1, height: Some(88.0) }).unwrap();
+  verify(&handle);
+  handle.apply(&FlowIntent::SetColumnWidth { sheet_id: sheet, column_id: col0, width: Some(240.0) }).unwrap();
+  verify(&handle);
+  handle.apply(&FlowIntent::RenameColumn { sheet_id: sheet, column_id: col1, label: "Renamed".into() }).unwrap();
+  verify(&handle);
+  handle.apply(&FlowIntent::RenameSheet { sheet_id: sheet, name: "Sheet Renamed".into() }).unwrap();
+  verify(&handle);
+  handle
+    .apply(&FlowIntent::AddColumn {
+      sheet_id: sheet,
+      column_id: Uuid::new_v4(),
+      label: "New Speech".into(),
+      side: flowstate_flow::ArgumentSide::Two,
+      before: None,
+    })
+    .unwrap();
+  verify(&handle);
+
+  // Swap two live cells (a1b @ row1/col0, b1 @ row2/col1) — they exchange slots.
+  handle.apply(&FlowIntent::SwapCells { sheet_id: sheet, a: a1b, b: b1 }).unwrap();
+  verify(&handle);
+
+  handle.apply(&FlowIntent::DeleteCell { sheet_id: sheet, cell_id: a2 }).unwrap();
+  verify(&handle);
+}
+
+/// `FlowRuntime::from_flow_document` REUSES the document's already-materialized
+/// board (the cold-open dedup) instead of rematerializing. The seeded board must
+/// still equal a fresh materialization of the runtime's own doc.
+#[test]
+fn from_flow_document_seeds_board_equal_to_materialization() {
+  let mut document = flowstate_flow::FlowDocument::new();
+  let sheet_type = document.projection().format.sheet_types[0].id;
+  let sheet = Uuid::new_v4();
+  document
+    .apply_intent(&FlowIntent::CreateSheet {
+      sheet_id: sheet,
+      name: "s".into(),
+      sheet_type_id: sheet_type,
+    })
+    .unwrap();
+  let rows: Vec<RowId> = (0..3).map(|_| Uuid::new_v4()).collect();
+  document
+    .apply_intent(&FlowIntent::InsertRows {
+      sheet_id: sheet,
+      before: None,
+      row_ids: rows.clone(),
+    })
+    .unwrap();
+  let col = document.projection().sheet(sheet).unwrap().columns[0].id;
+  document
+    .apply_intent(&FlowIntent::AddCell {
+      sheet_id: sheet,
+      cell_id: Uuid::new_v4(),
+      row_id: rows[1],
+      column_id: col,
+      seed: CellSeed::Paragraphs(paragraphs("seeded")),
+    })
+    .unwrap();
+
+  let runtime = FlowRuntime::from_flow_document(&document).unwrap();
+  // Panics if the seeded board or index diverges from a fresh materialization.
+  runtime.verify_board_equivalence();
+  assert_eq!(runtime.board(), document.projection());
+}
+
+/// The forked doc `from_flow_document` builds must be fully WRITABLE — the fork
+/// has to carry the text-style config so cell keystrokes and structural edits
+/// commit, and the board must stay equal to a fresh materialization after.
+#[test]
+fn from_flow_document_runtime_is_writable() {
+  use gpui_flowtext::{InsertTextIntent, LocalIntent, LocalWriteAuthority as _, TextAnchor};
+
+  let mut document = flowstate_flow::FlowDocument::new();
+  let sheet_type = document.projection().format.sheet_types[0].id;
+  let sheet = Uuid::new_v4();
+  document
+    .apply_intent(&FlowIntent::CreateSheet {
+      sheet_id: sheet,
+      name: "s".into(),
+      sheet_type_id: sheet_type,
+    })
+    .unwrap();
+  let rows: Vec<RowId> = (0..2).map(|_| Uuid::new_v4()).collect();
+  document
+    .apply_intent(&FlowIntent::InsertRows {
+      sheet_id: sheet,
+      before: None,
+      row_ids: rows.clone(),
+    })
+    .unwrap();
+  let col = document.projection().sheet(sheet).unwrap().columns[0].id;
+  let c0 = Uuid::new_v4();
+  document
+    .apply_intent(&FlowIntent::AddCell {
+      sheet_id: sheet,
+      cell_id: c0,
+      row_id: rows[0],
+      column_id: col,
+      seed: CellSeed::Paragraphs(paragraphs("start ")),
+    })
+    .unwrap();
+
+  let (handle, _gate) = FlowDocHandle::new(FlowRuntime::from_flow_document(&document).unwrap());
+
+  // Text write on the forked doc.
+  let paragraph = handle.cell_projection(c0).unwrap().ids.paragraph_ids[0];
+  handle
+    .cell_authority(c0)
+    .apply(LocalIntent::InsertText(InsertTextIntent {
+      at: TextAnchor::new(paragraph, 0),
+      text: "X".into(),
+      style_override: None,
+    }))
+    .unwrap();
+  // Structural write.
+  let c1 = add_cell_at(&handle, sheet, rows[1], col, "second");
+
+  handle.gate().lock(GateHolder::DocumentService).unwrap().verify_board_equivalence();
+  let board = handle.board_projection().unwrap();
+  assert!(board.sheet(sheet).unwrap().find_cell(c1).is_some());
+  assert!(board.sheet(sheet).unwrap().find_cell(c0).unwrap().summary.summary_text.starts_with('X'));
+}
+
 // ------------------------------------------------------- cell authority ----
 
 mod cell_authority_tests {

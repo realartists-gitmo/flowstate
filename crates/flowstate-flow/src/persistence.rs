@@ -13,7 +13,18 @@ const VERSION: u32 = 3;
 const MAX_FL0_BYTES: u64 = 64 * 1024 * 1024;
 
 pub fn load_flow_document(path: impl AsRef<Path>) -> anyhow::Result<FlowDocument> {
-  let path = path.as_ref();
+  decode(&read_fl0_bytes(path.as_ref())?)
+}
+
+/// Read a `.fl0` and unframe it to the raw Loro snapshot WITHOUT materializing a
+/// `FlowDocument` — for building a `FlowRuntime` directly on open. Opening via a
+/// `FlowDocument` would import + materialize the board, then the runtime does it
+/// a SECOND time; this path skips the throwaway first build.
+pub fn load_flow_snapshot(path: impl AsRef<Path>) -> anyhow::Result<Vec<u8>> {
+  decode_snapshot(&read_fl0_bytes(path.as_ref())?)
+}
+
+fn read_fl0_bytes(path: &Path) -> anyhow::Result<Vec<u8>> {
   let metadata = fs::metadata(path).with_context(|| format!("failed to stat {}", path.display()))?;
   if metadata.len() > MAX_FL0_BYTES {
     bail!(
@@ -23,7 +34,7 @@ pub fn load_flow_document(path: impl AsRef<Path>) -> anyhow::Result<FlowDocument
       MAX_FL0_BYTES
     );
   }
-  decode(&fs::read(path)?)
+  Ok(fs::read(path)?)
 }
 
 pub fn save_flow_document(path: impl AsRef<Path>, document: &FlowDocument) -> anyhow::Result<()> {

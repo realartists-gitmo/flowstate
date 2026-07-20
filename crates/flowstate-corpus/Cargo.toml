@@ -29,9 +29,9 @@ tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
 # so `flowstate-corpus` (the sweep) and `perf_probe` build without any hotpath cost.
 # Enable one for the profiler tables: `cargo run --release --features hotpath-alloc --bin hotpath_bench -- <file>`.
 [features]
-hotpath = ["hotpath/hotpath", "flowstate-document/hotpath", "flowstate-docx/hotpath", "flowstate-collab/hotpath", "gpui-flowtext/hotpath"]
-hotpath-cpu = ["hotpath", "hotpath/hotpath-cpu", "flowstate-document/hotpath-cpu", "flowstate-docx/hotpath-cpu", "flowstate-collab/hotpath-cpu", "gpui-flowtext/hotpath-cpu"]
-hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc", "flowstate-document/hotpath-alloc", "flowstate-docx/hotpath-alloc", "flowstate-collab/hotpath-alloc", "gpui-flowtext/hotpath-alloc"]
+hotpath = ["hotpath/hotpath", "flowstate-document/hotpath", "flowstate-docx/hotpath", "flowstate-collab/hotpath", "flowstate-flow/hotpath", "gpui-flowtext/hotpath"]
+hotpath-cpu = ["hotpath", "hotpath/hotpath-cpu", "flowstate-document/hotpath-cpu", "flowstate-docx/hotpath-cpu", "flowstate-collab/hotpath-cpu", "flowstate-flow/hotpath-cpu", "gpui-flowtext/hotpath-cpu"]
+hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc", "flowstate-document/hotpath-alloc", "flowstate-docx/hotpath-alloc", "flowstate-collab/hotpath-alloc", "flowstate-flow/hotpath-alloc", "gpui-flowtext/hotpath-alloc"]
 
 [lints]
 workspace = true

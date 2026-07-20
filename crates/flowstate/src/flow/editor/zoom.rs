@@ -61,6 +61,18 @@ impl FlowEditor {
     self.sync_camera_center_from_scroll();
   }
 
+  /// Pull `board_scroll` back into range if gpui's native (unclamped, clamped
+  /// only at paint) wheel accumulation has pushed it into an overscroll — so the
+  /// render readers that run before paint never see an out-of-range offset. A
+  /// no-op for any in-range scroll position.
+  pub(super) fn clamp_board_scroll_offset(&mut self) {
+    let offset = self.board_scroll.offset();
+    let clamped = clamp_scroll_offset(offset, self.board_scroll.max_offset());
+    if clamped != offset {
+      self.board_scroll.set_offset(clamped);
+    }
+  }
+
   fn camera_center_is_current(&self, center: BoardPoint) -> bool {
     let viewport = self.board_scroll.bounds().size;
     if viewport.width <= px(1.0) || viewport.height <= px(1.0) {

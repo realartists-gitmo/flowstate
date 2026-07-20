@@ -38,6 +38,10 @@ pub struct AppSettings {
   pub dropbox_collaboration: DropboxCollaborationSettings,
   pub dropbox_documents: Vec<DropboxDocumentBinding>,
   pub document_theme: Option<DocumentThemeSettings>,
+  /// The flow board's own color schema (Excel-like), independent of the app UI
+  /// theme AND of the `.fl0` document — visual info attaches to the client
+  /// only. Unset = the mode-aware Excel default.
+  pub flow_theme: Option<FlowThemeSettings>,
   pub editor: EditorSettings,
   pub toolkit: ToolkitSettings,
   pub recent_documents: Vec<PathBuf>,
@@ -336,5 +340,35 @@ pub enum ThemeUnderlineSetting {
 impl Default for DocumentThemeSettings {
   fn default() -> Self {
     Self::from(&flowstate_document_theme())
+  }
+}
+
+/// Persisted form of the flow board palette (`crate::flow::FlowTheme`). Stored
+/// per-install in app settings, never in the `.fl0`.
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(default)]
+pub struct FlowThemeSettings {
+  pub surface: StoredHsla,
+  pub gridline: StoredHsla,
+  pub chrome_border: StoredHsla,
+  pub text: StoredHsla,
+  pub muted_text: StoredHsla,
+  pub header_bg: StoredHsla,
+  pub gutter_bg: StoredHsla,
+  pub selection: StoredHsla,
+  pub aff_base: StoredHsla,
+  pub aff_foreground: StoredHsla,
+  pub aff_hover: StoredHsla,
+  pub aff_active: StoredHsla,
+  pub neg_base: StoredHsla,
+  pub neg_foreground: StoredHsla,
+  pub neg_hover: StoredHsla,
+  pub neg_active: StoredHsla,
+  pub cell_wash: f32,
+}
+
+impl Default for FlowThemeSettings {
+  fn default() -> Self {
+    Self::from(&crate::flow::FlowTheme::excel_light())
   }
 }

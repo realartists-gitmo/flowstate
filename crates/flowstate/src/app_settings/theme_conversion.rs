@@ -380,6 +380,60 @@ fn update_semantic_style(
 }
 
 #[hotpath::measure_all]
+impl From<&crate::flow::FlowTheme> for FlowThemeSettings {
+  fn from(theme: &crate::flow::FlowTheme) -> Self {
+    Self {
+      surface: theme.surface.into(),
+      gridline: theme.gridline.into(),
+      chrome_border: theme.chrome_border.into(),
+      text: theme.text.into(),
+      muted_text: theme.muted_text.into(),
+      header_bg: theme.header_bg.into(),
+      gutter_bg: theme.gutter_bg.into(),
+      selection: theme.selection.into(),
+      aff_base: theme.aff.base.into(),
+      aff_foreground: theme.aff.foreground.into(),
+      aff_hover: theme.aff.hover.into(),
+      aff_active: theme.aff.active.into(),
+      neg_base: theme.neg.base.into(),
+      neg_foreground: theme.neg.foreground.into(),
+      neg_hover: theme.neg.hover.into(),
+      neg_active: theme.neg.active.into(),
+      cell_wash: theme.cell_wash,
+    }
+  }
+}
+
+#[hotpath::measure_all]
+impl From<FlowThemeSettings> for crate::flow::FlowTheme {
+  fn from(settings: FlowThemeSettings) -> Self {
+    Self {
+      surface: settings.surface.into(),
+      gridline: settings.gridline.into(),
+      chrome_border: settings.chrome_border.into(),
+      text: settings.text.into(),
+      muted_text: settings.muted_text.into(),
+      header_bg: settings.header_bg.into(),
+      gutter_bg: settings.gutter_bg.into(),
+      selection: settings.selection.into(),
+      aff: crate::flow::FlowSidePalette {
+        base: settings.aff_base.into(),
+        foreground: settings.aff_foreground.into(),
+        hover: settings.aff_hover.into(),
+        active: settings.aff_active.into(),
+      },
+      neg: crate::flow::FlowSidePalette {
+        base: settings.neg_base.into(),
+        foreground: settings.neg_foreground.into(),
+        hover: settings.neg_hover.into(),
+        active: settings.neg_active.into(),
+      },
+      cell_wash: settings.cell_wash,
+    }
+  }
+}
+
+#[hotpath::measure_all]
 impl From<Hsla> for StoredHsla {
   fn from(color: Hsla) -> Self {
     Self {

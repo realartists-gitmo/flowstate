@@ -3381,6 +3381,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "flowstate-document",
+ "hotpath",
  "loro",
  "postcard",
  "serde",

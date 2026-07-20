@@ -270,7 +270,7 @@ impl Workspace {
                           .rounded(preview_radius)
                           .overflow_hidden()
                           .bg(cx.theme().background)
-                          .child(crate::flow::render_flow_board_preview(preview, cx)),
+                          .child(crate::flow::render_flow_board_preview(preview)),
                       )
                     })
                     .when(preview_unavailable, |this| {

@@ -4,7 +4,7 @@ use gpui::{Hsla, transparent_black};
 // D-S2: the color machinery lives in the app-wide visual engine now; this
 // module keeps only the flow-specific pieces (its public shape is frozen
 // while the flow editor WIP is out).
-use crate::visual_engine::{composite_over, mix_srgb, transform_color};
+use crate::visual_engine::{composite_over, transform_color};
 
 pub(super) fn apply_flow_cell_theme(
   document: &mut DocumentProjection,
@@ -64,17 +64,18 @@ fn scale_flow_layout_metrics(theme: &mut DocumentTheme, zoom: f32) {
   }
 }
 
-/// Spreadsheet visual system: an occupied cell is a flat fill (side wash over
-/// the theme surface), DERIVED from the active theme at paint time (no stored
-/// colors anywhere). Separation is the gridline's job — no shadows, no
-/// rounding, no hairlines.
-pub(super) fn flow_cell_fill(side_base: Hsla, background: Hsla, foreground: Hsla, is_dark: bool, emphasis: f32) -> Hsla {
-  let mut fill = composite_over(side_base.opacity(0.08 + emphasis), background);
-  if is_dark {
-    // Dark themes lift the fill ~4% toward the foreground for legibility.
-    fill = mix_srgb(fill, foreground, 0.04);
+/// Spreadsheet visual system. Under C2 (`cell_wash == 0`) a cell is a FLAT
+/// neutral surface — its aff/neg identity lives in the column header, not the
+/// body, exactly like an Excel sheet. Separation is the gridline's job.
+///
+/// The side-wash the flow shipped with is preserved as machinery: set
+/// `theme.cell_wash > 0` and every cell picks up its side hue again (`emphasis`
+/// deepens the active cell). Off by default.
+pub(super) fn flow_cell_fill(theme: &super::FlowTheme, side_base: Hsla, emphasis: f32) -> Hsla {
+  if theme.cell_wash <= 0.0 {
+    return theme.surface;
   }
-  fill
+  composite_over(side_base.opacity(theme.cell_wash + emphasis), theme.surface)
 }
 
 

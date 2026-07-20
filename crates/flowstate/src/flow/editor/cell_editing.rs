@@ -1,10 +1,9 @@
 use flowstate_flow::CellId;
 use gpui::{AppContext as _, Context, px};
-use gpui_component::ActiveTheme as _;
 
 use crate::{
   app_settings::load_document_theme,
-  flow::cell_theme::apply_flow_cell_theme,
+  flow::{cell_theme::apply_flow_cell_theme, resolve_flow_theme},
   rich_text_element::{EditorEvent, RichTextEditor},
 };
 
@@ -43,12 +42,13 @@ impl FlowEditor {
     let Ok(mut document) = self.handle.cell_projection(cell_id) else {
       return;
     };
-    let text_color = self.cell_text_color(cell_id, cx);
+    let flow_theme = resolve_flow_theme();
+    let text_color = flow_theme.text;
     apply_flow_cell_theme(
       &mut document,
       &load_document_theme(),
       text_color,
-      cx.theme().background,
+      flow_theme.surface,
       self.board_zoom(),
     );
     let authority = self.handle.cell_authority(cell_id);
@@ -86,7 +86,7 @@ impl FlowEditor {
     self.cell_editors.insert(cell_id, editor);
     self
       .cell_editor_themes
-      .insert(cell_id, (text_color, cx.theme().background, self.board_zoom().to_bits()));
+      .insert(cell_id, (text_color, flow_theme.surface, self.board_zoom().to_bits()));
     self.cell_editor_subscriptions.insert(cell_id, subscription);
   }
 
@@ -100,8 +100,9 @@ impl FlowEditor {
     let Some(editor) = self.cell_editors.get(&cell_id) else {
       return;
     };
-    let text_color = self.cell_text_color(cell_id, cx);
-    let signature = (text_color, cx.theme().background, self.board_zoom().to_bits());
+    let flow_theme = resolve_flow_theme();
+    let text_color = flow_theme.text;
+    let signature = (text_color, flow_theme.surface, self.board_zoom().to_bits());
     if self.cell_editor_themes.get(&cell_id) == Some(&signature) {
       return;
     }
@@ -112,7 +113,7 @@ impl FlowEditor {
       &mut document,
       &load_document_theme(),
       text_color,
-      cx.theme().background,
+      flow_theme.surface,
       self.board_zoom(),
     );
     editor.update(cx, |editor, cx| editor.install_canonical_projection(document, cx));

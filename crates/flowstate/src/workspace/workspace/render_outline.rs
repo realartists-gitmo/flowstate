@@ -183,7 +183,7 @@ impl Workspace {
       let sheet_id = sheet.id;
       let sheet_expanded = editor.read(cx).outline_item_expanded(sheet_id);
       let sheet_palette = projection.format.sheet_type(sheet.sheet_type_id).and_then(|definition| definition.columns.first()).map(|column| {
-        let side = crate::flow::flow_side_palette(column.side, cx);
+        let side = crate::flow::flow_side_palette(column.side);
         crate::flow::FlowSidePalette {
           base: sheet_type_color(side.base, cx.theme().sidebar),
           foreground: cx.theme().sidebar_accent_foreground,
@@ -239,7 +239,7 @@ impl Workspace {
           continue;
         };
         let column = &sheet.columns[column_ix];
-        let side_palette = crate::flow::flow_side_palette(column.side, cx);
+        let side_palette = crate::flow::flow_side_palette(column.side);
         let side_color = side_palette.base;
         let cell_id = cell.id;
         let label = {

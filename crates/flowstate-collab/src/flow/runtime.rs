@@ -17,7 +17,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use flowstate_flow::{
-  CellId, CellSummary, FlowBoardProjection, FlowDefect, FlowDocument, FlowIntent, MaterializedBoard, board_from_loro_cached, loro_schema, mutate,
+  Cell, CellId, CellSummary, ColumnId, FlowBoardProjection, FlowDefect, FlowDocument, FlowIntent, GridRow, MaterializedBoard, RowId, SheetId, board_from_loro,
+  board_from_loro_cached, derive_cell_summary, loro_schema, mutate,
 };
 use loro::{ContainerID, ContainerTrait as _, ExportMode, Frontiers, LoroDoc, Subscription, UndoManager, VersionVector};
 use rustc_hash::FxHashMap;
@@ -58,6 +59,11 @@ pub struct FlowRuntime {
   /// Reverse index: a cell flow's TEXT container id → owning cell, for O(1)
   /// import classification.
   text_containers: HashMap<ContainerID, CellId>,
+  /// A cell's position in `board.sheets[s].rows[r].cells[c]`, so a local cell
+  /// keystroke can patch that ONE cell's summary in place instead of
+  /// rematerializing the whole board. Rebuilt on every structural refresh (the
+  /// only thing that moves cells); a keystroke never moves a cell.
+  cell_locations: HashMap<CellId, (usize, usize, usize)>,
   board_stream: Vec<FlowStreamItem>,
   cell_streams: FxHashMap<CellId, Vec<gpui_flowtext::ProjectionStreamItem>>,
   pending_publish: Vec<FlowPublishEvent>,
@@ -79,6 +85,36 @@ pub struct FlowRuntime {
   _root_subscription: Subscription,
 }
 
+/// Does this local intent add or remove CELLS (the only thing that changes the
+/// text-container index)? Cell moves/swaps/strikes/renames/resizes and
+/// row/column inserts keep every existing cell and its text container, so they
+/// leave the index untouched. Conservative: anything not listed here rebuilds
+/// the index (imports/undo take the always-rebuild path separately).
+fn intent_changes_cell_set(intent: &FlowIntent) -> bool {
+  matches!(
+    intent,
+    FlowIntent::AddCell { .. }
+      | FlowIntent::DeleteCell { .. }
+      | FlowIntent::DeleteRows { .. }
+      | FlowIntent::DeleteColumn { .. }
+      | FlowIntent::DeleteSheet { .. }
+  )
+}
+
+/// Does this intent change ONLY cell content (a cell's summary), leaving the
+/// grid structure — placements, rows, columns — untouched? A strike toggles a
+/// text mark, so its whole effect is the struck flag in the cell's summary;
+/// such intents patch the affected cells in place instead of rematerializing
+/// the board (same fast path as a keystroke).
+fn intent_is_cell_content_only(intent: &FlowIntent) -> bool {
+  matches!(intent, FlowIntent::SetCellStruck { .. })
+}
+
+/// The incremental-path equivalence net switch (see `verify_board_equivalence`).
+fn flow_verify_enabled() -> bool {
+  std::env::var_os("FLOWSTATE_FLOW_VERIFY").is_some()
+}
+
 impl FlowRuntime {
   pub fn new_empty() -> Self {
     let document = FlowDocument::new();
@@ -93,6 +129,15 @@ impl FlowRuntime {
     let doc = LoroDoc::new();
     loro_schema::configure_flow_doc(&doc);
     doc.import(snapshot)?;
+    let mut runtime = Self::around_doc(doc)?;
+    runtime.refresh(None, true)?;
+    Ok(runtime)
+  }
+
+  /// Wire the undo manager + touch subscription around a CONFIGURED doc that
+  /// already carries the flow content (imported or forked), leaving the
+  /// board/indices for the caller to `refresh` or seed.
+  fn around_doc(doc: LoroDoc) -> anyhow::Result<Self> {
     match loro_schema::schema_version(&doc) {
       Some(loro_schema::SCHEMA_VERSION) => {},
       Some(version) => anyhow::bail!("unsupported flow schema version {version}"),
@@ -115,12 +160,13 @@ impl FlowRuntime {
       }
     }));
 
-    let mut runtime = Self {
+    Ok(Self {
       doc,
       board: FlowBoardProjection::default(),
       defects: Vec::new(),
       summaries: HashMap::new(),
       text_containers: HashMap::new(),
+      cell_locations: HashMap::new(),
       board_stream: Vec::new(),
       cell_streams: FxHashMap::default(),
       pending_publish: Vec::new(),
@@ -130,9 +176,7 @@ impl FlowRuntime {
       import_batches_served: 0,
       undo_group_active: false,
       _root_subscription: root_subscription,
-    };
-    runtime.refresh(None)?;
-    Ok(runtime)
+    })
   }
 
   pub fn doc(&self) -> &LoroDoc {
@@ -282,6 +326,7 @@ impl FlowRuntime {
 
   /// Resolve → mutate → ONE commit (origin `local`, message = class) →
   /// classified refresh → streams → publish. Mirrors `local_write/commit.rs`.
+  #[hotpath::measure]
   pub fn apply_intent(&mut self, intent: &FlowIntent) -> anyhow::Result<FlowLocalOutcome> {
     if let FlowIntent::CellText { cell_id, intent } = intent {
       self
@@ -306,7 +351,7 @@ impl FlowRuntime {
           let _ = self.doc.revert_to(&frontier_before);
           self.doc.set_next_commit_origin("repair");
           self.doc.commit();
-          let _ = self.refresh(None);
+          let _ = self.refresh(None, true);
           // The partial + revert ops entered the oplog; later exports start
           // AFTER them, so an unpublished compensation is a permanent causal
           // gap on every peer. Publish it like any local commit.
@@ -329,7 +374,17 @@ impl FlowRuntime {
     }
 
     let dirty: HashSet<CellId> = report.content_cells.iter().copied().collect();
-    self.refresh(Some(&dirty))?;
+    // Fast paths, each falling back to a full rematerialize if it can't service
+    // the change: content-only intents (a strike) patch summaries in place, and
+    // local cell add/delete on a clean board patch the grid in place. Everything
+    // else rematerializes; only cell add/remove additionally rebuilds the index.
+    let serviced = (intent_is_cell_content_only(intent) && self.refresh_content_cells(&dirty)) || self.try_incremental_structural(intent);
+    if !serviced {
+      self.refresh(Some(&dirty), intent_changes_cell_set(intent))?;
+    }
+    if flow_verify_enabled() {
+      self.verify_board_equivalence();
+    }
     self.push_board_stream();
     for cell in &report.content_cells {
       self.push_cell_replace(*cell);
@@ -343,6 +398,7 @@ impl FlowRuntime {
 
   /// A cell-text intent: minimal ops on the cell's flow (char-level remote
   /// merging), one commit, compensation via revert on mid-apply failure.
+  #[hotpath::measure]
   pub fn apply_cell_text(
     &mut self,
     cell_id: CellId,
@@ -360,7 +416,7 @@ impl FlowRuntime {
           let _ = self.doc.revert_to(&frontier_before);
           self.doc.set_next_commit_origin("repair");
           self.doc.commit();
-          let _ = self.refresh(None);
+          let _ = self.refresh(None, true);
           // Publish the compensation: later exports start after these ops, so
           // leaving them unpublished is a permanent causal gap on every peer.
           let _ = self.queue_local_update(&vv_before);
@@ -374,21 +430,36 @@ impl FlowRuntime {
       .set_next_commit_message(&format!("cell.{}", intent.class()));
     self.doc.commit();
 
-    let mut dirty = HashSet::new();
-    dirty.insert(cell_id);
-    self
-      .refresh(Some(&dirty))
-      .map_err(|_| gpui_flowtext::WriteRejected::StructureViolation("flow refresh failed"))?;
-    self.push_board_stream();
-    // The authority receives the replace synchronously; OTHER consumers (a
-    // second editor on the same cell) still get the stream item.
-    self.push_cell_replace(cell_id);
-    self
-      .queue_local_update(&vv_before)
-      .map_err(|_| gpui_flowtext::WriteRejected::StructureViolation("flow publish failed"))?;
+    // Incremental keystroke refresh: a cell edit changes only this cell's text,
+    // so materialize it ONCE and patch that single cell's summary into the
+    // retained board (O(cell text)) — not the whole-board `board_from_loro_cached`
+    // rebuild. The cell set is unchanged, so the text-container index is untouched
+    // too. (Previously the cell was materialized 3× per keystroke and the whole
+    // board rebuilt — O(total cells).)
     let projection = self
       .cell_projection(cell_id)
       .map_err(|_| gpui_flowtext::WriteRejected::StructureViolation("flow cell projection unavailable"))?;
+    let summary = derive_cell_summary(&projection);
+    if !self.patch_cell_summary(cell_id, summary) {
+      // Location unknown (should not happen for an editable cell): fall back to a
+      // full text-only refresh so the board can never silently go stale.
+      let mut dirty = HashSet::new();
+      dirty.insert(cell_id);
+      self
+        .refresh(Some(&dirty), false)
+        .map_err(|_| gpui_flowtext::WriteRejected::StructureViolation("flow refresh failed"))?;
+    }
+    if flow_verify_enabled() {
+      self.verify_board_equivalence();
+    }
+    self.push_board_stream();
+    // The authority receives the replace synchronously; OTHER consumers (a
+    // second editor on the same cell) still get the stream item — reuse the
+    // projection we just materialized.
+    self.push_cell_replace_projection(cell_id, projection.clone());
+    self
+      .queue_local_update(&vv_before)
+      .map_err(|_| gpui_flowtext::WriteRejected::StructureViolation("flow publish failed"))?;
     // Anchor the post-edit caret on a Loro cursor so it survives concurrent
     // remote edits exactly (spec §8), mirroring the body's `selection_after`.
     let caret = caret_pos.and_then(|flow_pos| {
@@ -438,14 +509,14 @@ impl FlowRuntime {
     if self.repair_cell_registries(&dirty) {
       self.queue_local_update(&vv_pre_repair)?;
     }
-    self.refresh(Some(&dirty))?;
+    self.refresh(Some(&dirty), true)?;
     // Merge artifacts the normalizer repaired in projection space (phantom
     // rows, D2 bumps) converge canonically here; the repair delta publishes
     // its own window like any local commit.
     let vv_pre_grid_repair = self.doc.oplog_vv();
     if self.repair_grid_structure() {
       self.queue_local_update(&vv_pre_grid_repair)?;
-      self.refresh(Some(&HashSet::new()))?;
+      self.refresh(Some(&HashSet::new()), true)?;
     }
     self.push_board_stream();
     for cell in dirty {
@@ -631,11 +702,11 @@ impl FlowRuntime {
     // still point at the tombstones. Re-mint before materializing; the
     // repair delta rides the `vv_before` export below (no separate publish).
     self.repair_cell_registries(&dirty);
-    self.refresh(Some(&dirty))?;
+    self.refresh(Some(&dirty), true)?;
     // Undo can resurrect states the normalizer had to repair; converge them
     // canonically inside the same publish window (`vv_before` export below).
     if self.repair_grid_structure() {
-      self.refresh(Some(&HashSet::new()))?;
+      self.refresh(Some(&HashSet::new()), true)?;
     }
     self.push_board_stream();
     for cell in dirty {
@@ -705,12 +776,18 @@ impl FlowRuntime {
 
   fn push_cell_replace(&mut self, cell_id: CellId) {
     if let Ok(projection) = self.cell_projection(cell_id) {
-      self
-        .cell_streams
-        .entry(cell_id)
-        .or_default()
-        .push(gpui_flowtext::ProjectionStreamItem::Replace(Box::new(projection)));
+      self.push_cell_replace_projection(cell_id, projection);
     }
+  }
+
+  /// Push an already-materialized projection to the cell stream (the keystroke
+  /// path reuses the one projection it materialized, avoiding a re-derive).
+  fn push_cell_replace_projection(&mut self, cell_id: CellId, projection: flowstate_document::DocumentProjection) {
+    self
+      .cell_streams
+      .entry(cell_id)
+      .or_default()
+      .push(gpui_flowtext::ProjectionStreamItem::Replace(Box::new(projection)));
   }
 
   // ---- internals -----------------------------------------------------------
@@ -726,7 +803,15 @@ impl FlowRuntime {
   /// Rematerialize the board, reusing cached summaries for clean cells.
   /// `dirty = None` invalidates everything (constructor, unknown blast
   /// radius).
-  fn refresh(&mut self, dirty: Option<&HashSet<CellId>>) -> anyhow::Result<()> {
+  ///
+  /// `cell_set_may_have_changed` gates the text-container index rebuild — an
+  /// O(total cells) pass of Loro container lookups. It is only needed when the
+  /// set of cells (not their text) changed: structural intents, imports, undo.
+  /// A local cell keystroke leaves the cell set untouched, so it passes `false`
+  /// and skips the whole pass — otherwise EVERY keystroke is O(total cells)
+  /// (measured: ~7ms/keystroke at 840 cells before this).
+  #[hotpath::measure]
+  fn refresh(&mut self, dirty: Option<&HashSet<CellId>>, cell_set_may_have_changed: bool) -> anyhow::Result<()> {
     let MaterializedBoard { board, defects } = board_from_loro_cached(&self.doc, &self.summaries, dirty)?;
     self.board = board;
     self.defects = defects;
@@ -736,13 +821,358 @@ impl FlowRuntime {
       .iter()
       .flat_map(|sheet| sheet.cells().map(|cell| (cell.id, cell.summary.clone())))
       .collect();
-    self.rebuild_text_container_index();
+    self.rebuild_cell_locations();
     // Local intents must never trigger a hidden whole-board content rebuild:
     // the summary cache makes clean cells free, and this rebuild is metadata
     // plus O(dirty) content — asserted by the runtime tests.
+    if cell_set_may_have_changed {
+      self.rebuild_text_container_index();
+    }
     Ok(())
   }
 
+  fn rebuild_cell_locations(&mut self) {
+    self.cell_locations.clear();
+    for (sheet_ix, sheet) in self.board.sheets.iter().enumerate() {
+      for (row_ix, row) in sheet.rows.iter().enumerate() {
+        for (column_ix, slot) in row.cells.iter().enumerate() {
+          if let Some(cell) = slot {
+            self.cell_locations.insert(cell.id, (sheet_ix, row_ix, column_ix));
+          }
+        }
+      }
+    }
+  }
+
+  /// Patch ONE cell's summary into the retained board — the incremental keystroke
+  /// path. A cell keystroke changes only that cell's text (never the grid
+  /// structure), so we recompute just its summary and drop it in place, instead
+  /// of the whole-board `board_from_loro_cached` rebuild. Returns false if the
+  /// cell's location is unknown/stale, so the caller can fall back to a full
+  /// refresh (should never happen — a cell is located when it's added/opened).
+  #[hotpath::measure]
+  fn patch_cell_summary(&mut self, cell_id: CellId, summary: CellSummary) -> bool {
+    let Some(&(sheet_ix, row_ix, column_ix)) = self.cell_locations.get(&cell_id) else {
+      return false;
+    };
+    let Some(Some(cell)) = self
+      .board
+      .sheets
+      .get_mut(sheet_ix)
+      .and_then(|sheet| sheet.rows.get_mut(row_ix))
+      .and_then(|row| row.cells.get_mut(column_ix))
+    else {
+      return false;
+    };
+    if cell.id != cell_id {
+      return false;
+    }
+    cell.summary = summary.clone();
+    self.summaries.insert(cell_id, summary);
+    true
+  }
+
+  /// Patch every dirty cell's summary in place (the content-only intent path).
+  /// Returns false the moment a cell can't be materialized or located, so the
+  /// caller falls back to a full rematerialize.
+  fn refresh_content_cells(&mut self, dirty: &HashSet<CellId>) -> bool {
+    for &cell_id in dirty {
+      let Ok(projection) = self.cell_projection(cell_id) else {
+        return false;
+      };
+      let summary = derive_cell_summary(&projection);
+      if !self.patch_cell_summary(cell_id, summary) {
+        return false;
+      }
+    }
+    true
+  }
+
+  /// Try to service a structural intent by patching the retained board instead
+  /// of rematerializing it. Returns false (→ full refresh) for anything not
+  /// handled, or whenever the board carries normalizer defects (bump/phantom
+  /// rows from a concurrent merge) — a delete/add on a normalized board can
+  /// cascade, and only the total materializer gets that right. LOCAL cell
+  /// add/delete on a CLEAN board are collision-free (the executor rejects
+  /// occupied-slot ops), so the patch equals a full materialization — asserted
+  /// by `verify_board_equivalence` under the soak.
+  fn try_incremental_structural(&mut self, intent: &FlowIntent) -> bool {
+    if !self.defects.is_empty() {
+      return false;
+    }
+    match intent {
+      FlowIntent::AddCell {
+        sheet_id,
+        cell_id,
+        row_id,
+        column_id,
+        ..
+      } => self.incremental_add_cell(*sheet_id, *cell_id, *row_id, *column_id),
+      FlowIntent::DeleteCell { cell_id, .. } => self.incremental_delete_cell(*cell_id),
+      // Appending rows (the ghost-row materialization, `before = None`) shifts no
+      // existing cell — it just extends the row list. A middle insert shifts row
+      // indices, so it takes the full path.
+      FlowIntent::InsertRows { sheet_id, before: None, row_ids } => self.incremental_append_rows(*sheet_id, row_ids),
+      // A cell move to an (executor-guaranteed empty) slot moves one cell; no
+      // other cell shifts, its text container is unchanged.
+      FlowIntent::SetCellAddress {
+        sheet_id,
+        cell_id,
+        row_id,
+        column_id,
+      } => self.incremental_move_cell(*sheet_id, *cell_id, *row_id, *column_id),
+      // Swap two cells' addresses (drag-onto-occupied) — the pair exchange slots
+      // and address fields; no other cell moves, text containers unchanged.
+      FlowIntent::SwapCells { a, b, .. } => self.incremental_swap_cells(*a, *b),
+      // Appending a column (`before = None`) adds one empty slot to the END of
+      // every row — no existing cell's column index shifts. A middle insert
+      // shifts them, so it takes the full path.
+      FlowIntent::AddColumn {
+        sheet_id,
+        column_id,
+        label,
+        side,
+        before: None,
+      } => self.incremental_append_column(*sheet_id, *column_id, label.clone(), *side),
+      // Pure metadata: one field on one row/column/sheet, no cell touched.
+      FlowIntent::SetRowHeight { sheet_id, row_id, height } => self.incremental_patch_row(*sheet_id, *row_id, |row| row.height_override = *height),
+      FlowIntent::SetColumnWidth { sheet_id, column_id, width } => self.incremental_patch_column(*sheet_id, *column_id, |column| column.width = *width),
+      FlowIntent::RenameColumn { sheet_id, column_id, label } => {
+        self.incremental_patch_column(*sheet_id, *column_id, |column| column.label = label.clone())
+      },
+      FlowIntent::RenameSheet { sheet_id, name } => {
+        if let Some(sheet) = self.board.sheets.iter_mut().find(|sheet| sheet.id == *sheet_id) {
+          sheet.name = name.clone();
+          true
+        } else {
+          false
+        }
+      },
+      _ => false,
+    }
+  }
+
+  fn incremental_append_column(&mut self, sheet_id: SheetId, column_id: ColumnId, label: String, side: flowstate_flow::ArgumentSide) -> bool {
+    let Some(sheet) = self.board.sheets.iter_mut().find(|sheet| sheet.id == sheet_id) else {
+      return false;
+    };
+    if sheet.columns.iter().any(|column| column.id == column_id) {
+      return false;
+    }
+    sheet.columns.push(flowstate_flow::GridColumn {
+      id: column_id,
+      label,
+      side,
+      width: None,
+    });
+    for row in &mut sheet.rows {
+      row.cells.push(None);
+    }
+    true
+  }
+
+  fn incremental_patch_row(&mut self, sheet_id: SheetId, row_id: RowId, patch: impl FnOnce(&mut GridRow)) -> bool {
+    let Some(row) = self
+      .board
+      .sheets
+      .iter_mut()
+      .find(|sheet| sheet.id == sheet_id)
+      .and_then(|sheet| sheet.rows.iter_mut().find(|row| row.id == row_id))
+    else {
+      return false;
+    };
+    patch(row);
+    true
+  }
+
+  fn incremental_patch_column(&mut self, sheet_id: SheetId, column_id: ColumnId, patch: impl FnOnce(&mut flowstate_flow::GridColumn)) -> bool {
+    let Some(column) = self
+      .board
+      .sheets
+      .iter_mut()
+      .find(|sheet| sheet.id == sheet_id)
+      .and_then(|sheet| sheet.columns.iter_mut().find(|column| column.id == column_id))
+    else {
+      return false;
+    };
+    patch(column);
+    true
+  }
+
+  /// Swap two cells' slots + address fields (both in the same sheet). Bails to
+  /// the full path for a cross-sheet swap or a stale index.
+  fn incremental_swap_cells(&mut self, a: CellId, b: CellId) -> bool {
+    let (Some(&(sa, ra, ca)), Some(&(sb, rb, cb))) = (self.cell_locations.get(&a), self.cell_locations.get(&b)) else {
+      return false;
+    };
+    if sa != sb {
+      return false;
+    }
+    let sheet = &self.board.sheets[sa];
+    let (a_row_id, a_column_id) = (sheet.rows[ra].id, sheet.columns[ca].id);
+    let (b_row_id, b_column_id) = (sheet.rows[rb].id, sheet.columns[cb].id);
+    let mut cell_a = self.board.sheets[sa].rows[ra].cells[ca].take();
+    let mut cell_b = self.board.sheets[sa].rows[rb].cells[cb].take();
+    if cell_a.as_ref().map(|cell| cell.id) != Some(a) || cell_b.as_ref().map(|cell| cell.id) != Some(b) {
+      self.board.sheets[sa].rows[ra].cells[ca] = cell_a;
+      self.board.sheets[sa].rows[rb].cells[cb] = cell_b;
+      return false;
+    }
+    if let Some(cell) = cell_a.as_mut() {
+      cell.row_id = b_row_id;
+      cell.column_id = b_column_id;
+    }
+    if let Some(cell) = cell_b.as_mut() {
+      cell.row_id = a_row_id;
+      cell.column_id = a_column_id;
+    }
+    self.board.sheets[sa].rows[rb].cells[cb] = cell_a;
+    self.board.sheets[sa].rows[ra].cells[ca] = cell_b;
+    self.cell_locations.insert(a, (sa, rb, cb));
+    self.cell_locations.insert(b, (sa, ra, ca));
+    true
+  }
+
+  fn incremental_append_rows(&mut self, sheet_id: SheetId, row_ids: &[RowId]) -> bool {
+    let Some(sheet_ix) = self.board.sheets.iter().position(|sheet| sheet.id == sheet_id) else {
+      return false;
+    };
+    let column_count = self.board.sheets[sheet_ix].columns.len();
+    // A row id that already exists would mean this isn't a clean append.
+    if row_ids.iter().any(|row_id| self.board.sheets[sheet_ix].rows.iter().any(|row| row.id == *row_id)) {
+      return false;
+    }
+    for &row_id in row_ids {
+      self.board.sheets[sheet_ix].rows.push(GridRow {
+        id: row_id,
+        height_override: None,
+        cells: vec![None; column_count],
+      });
+    }
+    // Existing cells keep their positions (append only); nothing else to update.
+    true
+  }
+
+  fn incremental_move_cell(&mut self, sheet_id: SheetId, cell_id: CellId, row_id: RowId, column_id: ColumnId) -> bool {
+    let Some(&(sheet_ix, old_row, old_column)) = self.cell_locations.get(&cell_id) else {
+      return false;
+    };
+    if self.board.sheets.get(sheet_ix).map(|sheet| sheet.id) != Some(sheet_id) {
+      return false;
+    }
+    let sheet = &self.board.sheets[sheet_ix];
+    let (Some(new_row), Some(new_column)) = (
+      sheet.rows.iter().position(|row| row.id == row_id),
+      sheet.columns.iter().position(|column| column.id == column_id),
+    ) else {
+      return false;
+    };
+    // The target must be empty (a local move is executor-guarded; a merged board
+    // could disagree, so bail to the full path).
+    if self.board.sheets[sheet_ix].rows[new_row].cells[new_column].is_some() {
+      return false;
+    }
+    let mut cell = self.board.sheets[sheet_ix].rows[old_row].cells[old_column].take();
+    match cell.as_mut() {
+      Some(cell) if cell.id == cell_id => {
+        cell.row_id = row_id;
+        cell.column_id = column_id;
+      },
+      _ => {
+        // Stale location — restore and bail.
+        self.board.sheets[sheet_ix].rows[old_row].cells[old_column] = cell;
+        return false;
+      },
+    }
+    self.board.sheets[sheet_ix].rows[new_row].cells[new_column] = cell;
+    self.cell_locations.insert(cell_id, (sheet_ix, new_row, new_column));
+    true
+  }
+
+  fn incremental_add_cell(&mut self, sheet_id: flowstate_flow::SheetId, cell_id: CellId, row_id: flowstate_flow::RowId, column_id: flowstate_flow::ColumnId) -> bool {
+    let Some(sheet_ix) = self.board.sheets.iter().position(|sheet| sheet.id == sheet_id) else {
+      return false;
+    };
+    let sheet = &self.board.sheets[sheet_ix];
+    let (Some(row_ix), Some(column_ix)) = (
+      sheet.rows.iter().position(|row| row.id == row_id),
+      sheet.columns.iter().position(|column| column.id == column_id),
+    ) else {
+      return false;
+    };
+    // The slot must be empty (a local AddCell is executor-guarded, but a merged
+    // board could disagree — bail to the full path if so).
+    if self.board.sheets[sheet_ix].rows[row_ix].cells[column_ix].is_some() {
+      return false;
+    }
+    let Ok(projection) = self.cell_projection(cell_id) else {
+      return false;
+    };
+    let summary = derive_cell_summary(&projection);
+    self.board.sheets[sheet_ix].rows[row_ix].cells[column_ix] = Some(Cell {
+      id: cell_id,
+      row_id,
+      column_id,
+      summary: summary.clone(),
+    });
+    self.summaries.insert(cell_id, summary);
+    self.cell_locations.insert(cell_id, (sheet_ix, row_ix, column_ix));
+    if let Some(record) = loro_schema::cell_record(&self.doc, cell_id)
+      && let Some(flow) = loro_schema::cell_flow(&record)
+      && let Ok(text) = flow.ensure_mergeable_text(flowstate_document::FLOW_TEXT_KEY)
+    {
+      self.text_containers.insert(text.id(), cell_id);
+    }
+    true
+  }
+
+  fn incremental_delete_cell(&mut self, cell_id: CellId) -> bool {
+    let Some(&(sheet_ix, row_ix, column_ix)) = self.cell_locations.get(&cell_id) else {
+      return false;
+    };
+    let Some(slot) = self
+      .board
+      .sheets
+      .get_mut(sheet_ix)
+      .and_then(|sheet| sheet.rows.get_mut(row_ix))
+      .and_then(|row| row.cells.get_mut(column_ix))
+    else {
+      return false;
+    };
+    if slot.as_ref().map(|cell| cell.id) != Some(cell_id) {
+      return false;
+    }
+    *slot = None;
+    self.summaries.remove(&cell_id);
+    self.cell_locations.remove(&cell_id);
+    self.text_containers.retain(|_, mapped| *mapped != cell_id);
+    true
+  }
+
+  /// Debug net (gated by `FLOWSTATE_FLOW_VERIFY`): the incrementally maintained
+  /// board and the text-container routing index must ALWAYS equal a fresh full
+  /// materialization. The soak drives thousands of mixed intents (incl. remote
+  /// merges) through this, fuzzing every incremental path.
+  pub(super) fn verify_board_equivalence(&self) {
+    let fresh = board_from_loro(&self.doc).expect("verify: materialize").board;
+    assert_eq!(self.board, fresh, "flow incremental board diverged from full materialization");
+    for sheet in &self.board.sheets {
+      for cell in sheet.cells() {
+        if let Some(record) = loro_schema::cell_record(&self.doc, cell.id)
+          && let Some(flow) = loro_schema::cell_flow(&record)
+          && let Ok(text) = flow.ensure_mergeable_text(flowstate_document::FLOW_TEXT_KEY)
+        {
+          assert_eq!(
+            self.text_containers.get(&text.id()),
+            Some(&cell.id),
+            "text-container index lost a live cell after an incremental patch"
+          );
+        }
+      }
+    }
+  }
+
+  #[hotpath::measure]
   fn rebuild_text_container_index(&mut self) {
     self.text_containers.clear();
     for sheet in &self.board.sheets {
@@ -1148,11 +1578,11 @@ impl FlowRuntime {
     self.create_flow_checkpoint_at(pre_restore_frontier, Some("Before restore"), flowstate_document::RevisionKind::Named)?;
     self.touch_modified_meta();
     self.queue_local_update(&vv_before)?;
-    self.refresh(None)?;
+    self.refresh(None, true)?;
     let vv_pre_grid_repair = self.doc.oplog_vv();
     if self.repair_grid_structure() {
       self.queue_local_update(&vv_pre_grid_repair)?;
-      self.refresh(Some(&HashSet::new()))?;
+      self.refresh(Some(&HashSet::new()), true)?;
     }
     self.push_board_stream();
     let cells: Vec<CellId> = self

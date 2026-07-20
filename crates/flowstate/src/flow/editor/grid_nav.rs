@@ -5,6 +5,7 @@
 
 use flowstate_flow::{CellId, CellSeed, FlowIntent, RowId, Sheet};
 use gpui::Context;
+use gpui_component::PixelsExt as _;
 
 use super::FlowEditor;
 use super::grid_layout::GHOST_ROWS;
@@ -493,6 +494,354 @@ impl FlowEditor {
     let column_ix = self.cursor.map(|(_, column)| column).unwrap_or(0);
     let row_ix = sheet.rows.len();
     self.add_cell_at_slot(row_ix, column_ix, CellSeed::Empty, cx);
+  }
+
+  /// The extended grid bounds: `(max_row_index, column_count)`. `max_row`
+  /// includes the ghost run, matching `set_cursor`'s clamp.
+  fn grid_bounds(&self) -> Option<(usize, usize)> {
+    let sheet = self.active_sheet_ref()?;
+    let columns = sheet.columns.len();
+    if columns == 0 {
+      return None;
+    }
+    Some((sheet.rows.len() + GHOST_ROWS - 1, columns))
+  }
+
+  /// Tab (or Shift+Tab): move one column and remember where the run began, so
+  /// a following Enter can return to it. Used by both board and edit modes.
+  pub fn tab_navigate(&mut self, reverse: bool, cx: &mut Context<Self>) {
+    if self.tab_anchor_column.is_none() {
+      self.tab_anchor_column = self.cursor.map(|(_, column)| column);
+    }
+    self.navigate(if reverse { GridDirection::Left } else { GridDirection::Right }, cx);
+  }
+
+  /// Enter (or Shift+Enter): move one row. After a Tab-run, plain Enter drops a
+  /// row and returns to the run's start column (Excel); otherwise it's a plain
+  /// vertical move. Any move consumes the tab anchor.
+  pub fn enter_navigate(&mut self, up: bool, cx: &mut Context<Self>) {
+    match self.tab_anchor_column.take() {
+      Some(anchor_column) if !up => {
+        let row = self.cursor.map(|(row, _)| row).unwrap_or(0);
+        self.set_cursor(row + 1, anchor_column, cx);
+        self.scroll_cursor_into_view();
+      },
+      _ => self.navigate(if up { GridDirection::Up } else { GridDirection::Down }, cx),
+    }
+  }
+
+  /// Excel: when a multi-cell selection is active, Enter/Tab CYCLE the active
+  /// cell within the selection (reading order, wrapping) instead of navigating
+  /// the whole grid. Returns `false` (do a normal move) when ≤1 cell is
+  /// selected. `forward` = Enter/Tab; `!forward` = Shift+Enter/Shift+Tab.
+  pub fn cycle_within_selection(&mut self, forward: bool, cx: &mut Context<Self>) -> bool {
+    if self.selected_cells.len() <= 1 {
+      return false;
+    }
+    let Some(sheet) = self.active_sheet_ref() else {
+      return false;
+    };
+    let mut positions: Vec<(usize, usize)> = self
+      .selected_cells
+      .iter()
+      .filter_map(|id| sheet.cell_position(*id))
+      .collect();
+    positions.sort_unstable();
+    if positions.is_empty() {
+      return false;
+    }
+    let here = self.cursor.and_then(|cursor| positions.iter().position(|&slot| slot == cursor));
+    let next = match here {
+      Some(index) if forward => (index + 1) % positions.len(),
+      Some(index) => (index + positions.len() - 1) % positions.len(),
+      None => 0,
+    };
+    let (row, column) = positions[next];
+    let cell = sheet.slot(row, column).map(|cell| cell.id);
+    self.cursor = Some((row, column));
+    if let Some(cell) = cell {
+      self.activate_cell(cell, cx);
+    }
+    self.scroll_cursor_into_view();
+    cx.notify();
+    true
+  }
+
+  /// Shift+Arrow: grow/shrink the selection rectangle from the anchor (set to
+  /// the current cursor on the first extend). The moving end becomes the cursor.
+  pub fn extend_selection(&mut self, direction: GridDirection, cx: &mut Context<Self>) {
+    let Some((max_row, columns)) = self.grid_bounds() else {
+      return;
+    };
+    let (row, col) = self.cursor.unwrap_or((0, 0));
+    if self.selection_anchor.is_none() {
+      self.selection_anchor = Some((row, col));
+    }
+    let (nr, nc) = match direction {
+      GridDirection::Up => (row.saturating_sub(1), col),
+      GridDirection::Down => ((row + 1).min(max_row), col),
+      GridDirection::Left => (row, col.saturating_sub(1)),
+      GridDirection::Right => (row, (col + 1).min(columns - 1)),
+    };
+    self.select_cell_range(nr, nc, cx);
+    self.scroll_cursor_into_view();
+  }
+
+  /// Ctrl+Arrow target: jump to the edge of the current data block (Excel
+  /// rules). `None` = can't move (already at the sheet edge in that direction).
+  fn edge_target(&self, direction: GridDirection) -> Option<(usize, usize)> {
+    let sheet = self.active_sheet_ref()?;
+    let columns = sheet.columns.len();
+    if columns == 0 {
+      return None;
+    }
+    let max_row = sheet.rows.len() + GHOST_ROWS - 1;
+    let (row, col) = self.cursor?;
+    let (dr, dc): (isize, isize) = match direction {
+      GridDirection::Up => (-1, 0),
+      GridDirection::Down => (1, 0),
+      GridDirection::Left => (0, -1),
+      GridDirection::Right => (0, 1),
+    };
+    let step = |(r, c): (usize, usize)| -> Option<(usize, usize)> {
+      let nr = r as isize + dr;
+      let nc = c as isize + dc;
+      if nr < 0 || nc < 0 {
+        return None;
+      }
+      let (nr, nc) = (nr as usize, nc as usize);
+      if nr > max_row || nc >= columns {
+        return None;
+      }
+      Some((nr, nc))
+    };
+    let occ = |(r, c): (usize, usize)| sheet.slot(r, c).is_some();
+    let first = step((row, col))?;
+    let mut cur = first;
+    if !occ((row, col)) {
+      // From a blank cell: advance to the first cell with data (or the edge).
+      while !occ(cur) {
+        match step(cur) {
+          Some(next) => cur = next,
+          None => break,
+        }
+      }
+    } else if occ(first) {
+      // In data, next has data: ride to the last cell before a blank/edge.
+      while let Some(next) = step(cur) {
+        if occ(next) {
+          cur = next;
+        } else {
+          break;
+        }
+      }
+    } else {
+      // In data, next is blank: cross the gap to the next cell with data.
+      loop {
+        match step(cur) {
+          Some(next) if occ(next) => {
+            cur = next;
+            break;
+          },
+          Some(next) => cur = next,
+          None => break,
+        }
+      }
+    }
+    Some(cur)
+  }
+
+  /// Ctrl+Arrow: jump to the data-block edge. `extend` = Ctrl+Shift+Arrow.
+  pub fn jump_to_edge(&mut self, direction: GridDirection, extend: bool, cx: &mut Context<Self>) {
+    let Some((row, col)) = self.edge_target(direction) else {
+      return;
+    };
+    if extend {
+      if self.selection_anchor.is_none() {
+        self.selection_anchor = self.cursor;
+      }
+      self.select_cell_range(row, col, cx);
+    } else {
+      self.set_cursor(row, col, cx);
+    }
+    self.scroll_cursor_into_view();
+  }
+
+  /// The bottom-right corner of the used range (highest row/column holding a
+  /// cell), `(0, 0)` on an empty sheet.
+  fn used_extent(&self) -> (usize, usize) {
+    let Some(sheet) = self.active_sheet_ref() else {
+      return (0, 0);
+    };
+    let mut max_row = 0;
+    let mut max_col = 0;
+    for (row_ix, row) in sheet.rows.iter().enumerate() {
+      for (column_ix, slot) in row.cells.iter().enumerate() {
+        if slot.is_some() {
+          max_row = max_row.max(row_ix);
+          max_col = max_col.max(column_ix);
+        }
+      }
+    }
+    (max_row, max_col)
+  }
+
+  /// Home / End / Ctrl+Home / Ctrl+End.
+  pub fn cursor_to_extreme(&mut self, key: &str, ctrl: bool, cx: &mut Context<Self>) {
+    let Some((row, _col)) = self.cursor else { return };
+    let (r, c) = match (key, ctrl) {
+      ("home", true) => (0, 0),
+      ("end", true) => self.used_extent(),
+      ("home", false) => (row, 0),
+      ("end", false) => {
+        let sheet = match self.active_sheet_ref() {
+          Some(sheet) => sheet,
+          None => return,
+        };
+        let last = (0..sheet.columns.len()).rev().find(|&c| sheet.slot(row, c).is_some());
+        (row, last.unwrap_or(sheet.columns.len().saturating_sub(1)))
+      },
+      _ => return,
+    };
+    self.set_cursor(r, c, cx);
+    self.scroll_cursor_into_view();
+  }
+
+  /// PageUp / PageDown: move the cursor by one viewport of rows.
+  pub fn page(&mut self, down: bool, cx: &mut Context<Self>) {
+    let Some((max_row, _)) = self.grid_bounds() else { return };
+    let step = self.page_rows().max(1);
+    let (row, col) = self.cursor.unwrap_or((0, 0));
+    let target = if down { (row + step).min(max_row) } else { row.saturating_sub(step) };
+    self.set_cursor(target, col, cx);
+    self.scroll_cursor_into_view();
+  }
+
+  /// Rows that fit in the current viewport (for paging), floored to ≥1.
+  fn page_rows(&self) -> usize {
+    let Some((layout, _)) = self.active_layout() else { return 10 };
+    let rows = layout.total_rows().max(1);
+    let avg = (layout.total_height() / rows as f32).max(1.0);
+    let viewport = self.board_scroll.bounds().size.height.as_f32().max(1.0) / self.board_zoom.max(0.01);
+    ((viewport / avg).floor() as usize).max(1)
+  }
+
+  /// Ctrl+Space (and the column-header click): select every cell in a column.
+  pub fn select_column(&mut self, column_ix: usize, cx: &mut Context<Self>) {
+    let Some(sheet) = self.active_sheet_ref() else { return };
+    let set: std::collections::HashSet<CellId> = sheet
+      .rows
+      .iter()
+      .filter_map(|row| row.cells.get(column_ix).and_then(|slot| slot.as_ref()).map(|cell| cell.id))
+      .collect();
+    self.selected_cells = set;
+    let row = self.cursor.map(|(row, _)| row).unwrap_or(0);
+    self.cursor = Some((row, column_ix));
+    self.selection_anchor = Some((row, column_ix));
+    cx.notify();
+  }
+
+  /// Header shift-click: select every cell across a span of columns.
+  pub fn select_column_span(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+    let (c0, c1) = (from.min(to), from.max(to));
+    let Some(sheet) = self.active_sheet_ref() else { return };
+    let set: std::collections::HashSet<CellId> = sheet
+      .rows
+      .iter()
+      .flat_map(|row| (c0..=c1).filter_map(|c| row.cells.get(c).and_then(|slot| slot.as_ref()).map(|cell| cell.id)))
+      .collect();
+    self.selected_cells = set;
+    cx.notify();
+  }
+
+  /// Header ctrl-click: add a whole column's cells to the current selection.
+  pub fn add_column_to_selection(&mut self, column_ix: usize, cx: &mut Context<Self>) {
+    let Some(sheet) = self.active_sheet_ref() else { return };
+    let ids: Vec<CellId> = sheet
+      .rows
+      .iter()
+      .filter_map(|row| row.cells.get(column_ix).and_then(|slot| slot.as_ref()).map(|cell| cell.id))
+      .collect();
+    self.selected_cells.extend(ids);
+    self.selection_anchor = Some((0, column_ix));
+    cx.notify();
+  }
+
+  /// Gutter shift-click: select every cell across a span of rows.
+  pub fn select_row_span(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+    let (r0, r1) = (from.min(to), from.max(to));
+    let Some(sheet) = self.active_sheet_ref() else { return };
+    let set: std::collections::HashSet<CellId> = (r0..=r1)
+      .filter_map(|r| sheet.rows.get(r))
+      .flat_map(|row| row.cells.iter().filter_map(|slot| slot.as_ref().map(|cell| cell.id)))
+      .collect();
+    self.selected_cells = set;
+    self.cursor = Some((r1, 0));
+    cx.notify();
+  }
+
+  /// Gutter ctrl-click: add a whole row's cells to the current selection.
+  pub fn add_row_to_selection(&mut self, row_ix: usize, cx: &mut Context<Self>) {
+    let Some(sheet) = self.active_sheet_ref() else { return };
+    let ids: Vec<CellId> = sheet
+      .rows
+      .get(row_ix)
+      .into_iter()
+      .flat_map(|row| row.cells.iter().filter_map(|slot| slot.as_ref().map(|cell| cell.id)))
+      .collect();
+    self.selected_cells.extend(ids);
+    self.selection_anchor = Some((row_ix, 0));
+    cx.notify();
+  }
+
+  /// Ctrl+A (and the top-left corner box): select every cell in the sheet.
+  pub fn select_all(&mut self, cx: &mut Context<Self>) {
+    let Some(sheet) = self.active_sheet_ref() else { return };
+    let set: std::collections::HashSet<CellId> = sheet
+      .rows
+      .iter()
+      .flat_map(|row| row.cells.iter().filter_map(|slot| slot.as_ref().map(|cell| cell.id)))
+      .collect();
+    self.selected_cells = set;
+    cx.notify();
+  }
+
+  /// F2 / Enter-to-edit: drop keyboard focus into the cursor's occupied cell,
+  /// caret at the end (the keyboard twin of a single click).
+  pub fn edit_cursor_cell(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) {
+    let Some((row_ix, column_ix)) = self.cursor else { return };
+    let Some(cell_id) = self.active_sheet_ref().and_then(|sheet| sheet.slot(row_ix, column_ix)).map(|cell| cell.id) else {
+      return;
+    };
+    self.activate_cell(cell_id, cx);
+    self.ensure_cell_editor(cell_id, cx);
+    self.focus_active_cell(window, cx);
+  }
+
+  /// Type-to-overwrite (Excel): a printable key on an occupied cell REPLACES
+  /// its content, seeded with that key; on an empty slot it creates (the
+  /// existing `type_into_cursor` path). One undo group either way.
+  pub fn overwrite_cursor(&mut self, text: &str, cx: &mut Context<Self>) -> Option<CellId> {
+    let (row_ix, column_ix) = self.cursor?;
+    let sheet_id = self.active_sheet?;
+    let occupant = self.active_sheet_ref()?.slot(row_ix, column_ix).map(|cell| cell.id);
+    match occupant {
+      None => self.type_into_cursor(text, cx),
+      Some(cell_id) => {
+        let seed = CellSeed::Paragraphs(vec![flowstate_document::InputParagraph {
+          style: flowstate_document::PARAGRAPH_TAG,
+          runs: vec![flowstate_document::InputRun {
+            text: text.to_string(),
+            styles: flowstate_document::RunStyles::default(),
+          }],
+        }]);
+        let _ = self.handle.undo_group_start();
+        let _ = self.apply_intent(&FlowIntent::DeleteCell { sheet_id, cell_id }, cx);
+        let created = self.add_cell_at_slot(row_ix, column_ix, seed, cx);
+        let _ = self.handle.undo_group_end();
+        created
+      },
+    }
   }
 
   /// Column-header "+": the first empty slot from the top of that column

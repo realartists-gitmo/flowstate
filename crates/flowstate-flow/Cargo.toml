@@ -10,9 +10,17 @@ workspace = true
 [dependencies]
 anyhow = { workspace = true }
 flowstate-document.workspace = true
+hotpath.workspace = true
 loro = "1.13.1"
 postcard = "1.1.3"
 tracing = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 uuid = { workspace = true, features = ["serde", "v4", "v5"] }
 zstd.workspace = true
+
+[features]
+# `#[hotpath::measure]` is a no-op unless one of these turns the hotpath crate on
+# (the collab_bench / soak `--features hotpath-cpu` treatment, now reaching flow).
+hotpath = ["hotpath/hotpath", "flowstate-document/hotpath"]
+hotpath-cpu = ["hotpath", "hotpath/hotpath-cpu", "flowstate-document/hotpath-cpu"]
+hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc", "flowstate-document/hotpath-alloc"]

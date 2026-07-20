@@ -435,7 +435,11 @@ impl RichTextEditor {
         )
       });
     }
-    let hide_until_viewport_measured = self.scroll_handle.bounds().size.width <= px(1.0);
+    // A flow cell is seeded with its real content width and was already showing
+    // its summary before activation, so hiding it until the viewport is
+    // measured (one frame) just makes its text flash out-and-in on first focus.
+    // Skip that guard for flow cells — they render immediately at the seed width.
+    let hide_until_viewport_measured = !self.config.flow_cell_surface && self.scroll_handle.bounds().size.width <= px(1.0);
     let mut item_sizes = self.paragraph_item_sizes(window, cx);
     self.apply_pending_zoom_anchor();
     let has_startup_layout_width = self.measured_item_width.is_some() || self.document.paragraphs.is_empty();

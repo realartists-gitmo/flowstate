@@ -457,6 +457,109 @@ fn active_style_picker_revision(cx: &App, workspace: &WeakEntity<Workspace>) -> 
     .unwrap_or_default()
 }
 
+/// A labeled color picker bound to one field of the flow palette (`FlowTheme`).
+/// Mirrors `style_color_item`, but the flow palette is a single app-wide value
+/// resolved from settings (not a per-editor `DocumentTheme`), so it reads/writes
+/// through `load_flow_theme`/`save_flow_theme`.
+fn flow_color_item(
+  workspace: WeakEntity<Workspace>,
+  title: &'static str,
+  get: fn(&FlowTheme) -> Hsla,
+  set: fn(&mut FlowTheme, Hsla),
+) -> SettingItem {
+  SettingItem::render(move |_, window, cx| {
+    let key = title.to_ascii_lowercase().replace(' ', "-");
+    let active_value = get(&load_flow_theme());
+    // Keyed by the live value so an external change (or a reset) re-seeds it.
+    let picker_state = window.use_keyed_state(
+      SharedString::from(format!(
+        "flow-color-picker-{key}-{:.6}-{:.6}-{:.6}-{:.6}",
+        active_value.h, active_value.s, active_value.l, active_value.a
+      )),
+      cx,
+      |window, cx| ColorPickerState::new(window, cx).default_value(active_value),
+    );
+    let picker_state = picker_state.clone();
+    let pending_value = picker_state.read(cx).value();
+    let has_pending_change = pending_value.is_some_and(|value| value != active_value);
+    h_flex()
+      .w_full()
+      .items_center()
+      .gap_2()
+      .child(div().w_48().text_sm().child(title))
+      .child(ColorPicker::new(&picker_state).small().anchor(Corner::TopRight))
+      .when(has_pending_change, |this| {
+        this.child(
+          Button::new(SharedString::from(format!("flow-apply-color-{key}")))
+            .icon(IconName::Check)
+            .small()
+            .ghost()
+            .tooltip("Apply color")
+            .on_click({
+              let workspace = workspace.clone();
+              move |_, _, cx| {
+                if let Some(color) = picker_state.read(cx).value() {
+                  update_flow_theme(cx, &workspace, move |theme| set(theme, color));
+                }
+              }
+            }),
+        )
+      })
+      .into_any_element()
+  })
+}
+
+fn update_flow_theme(cx: &mut App, workspace: &WeakEntity<Workspace>, update: impl FnOnce(&mut FlowTheme)) {
+  let mut theme = load_flow_theme();
+  update(&mut theme);
+  // Copy into the save closure; every open flow re-resolves the palette on its
+  // next frame (settings cache is updated synchronously by the save).
+  save_setting_reporting(workspace.clone(), "flow palette", move || save_flow_theme(&theme), cx);
+  cx.refresh_windows();
+}
+
+/// Preset row: load a whole built-in palette (Excel light/dark) in one click.
+/// The dark palette is a PRESET, not an automatic default — the flow never
+/// picks a palette from the app's light/dark mode.
+fn flow_preset_item(workspace: WeakEntity<Workspace>) -> SettingItem {
+  SettingItem::render(move |_, _, _| {
+    let light = workspace.clone();
+    let dark = workspace.clone();
+    h_flex()
+      .w_full()
+      .items_center()
+      .gap_2()
+      .child(div().w_48().text_sm().child("Preset"))
+      .child(
+        Button::new("flow-preset-light")
+          .label("Excel Light")
+          .small()
+          .ghost()
+          .on_click(move |_, _, cx| update_flow_theme(cx, &light, |theme| *theme = FlowTheme::excel_light())),
+      )
+      .child(
+        Button::new("flow-preset-dark")
+          .label("Excel Dark")
+          .small()
+          .ghost()
+          .on_click(move |_, _, cx| update_flow_theme(cx, &dark, |theme| *theme = FlowTheme::excel_dark())),
+      )
+      .into_any_element()
+  })
+}
+
+/// Set a side's base color and re-derive its hover/active ramp + a legible
+/// foreground, so editing just the base keeps the accent states in tune.
+fn set_side_from_base(base: Hsla, target: &mut crate::flow::FlowSidePalette) {
+  let darken = |color: Hsla, amount: f32| Hsla { l: (color.l - amount).clamp(0.0, 1.0), ..color };
+  *target = crate::flow::FlowSidePalette {
+    base,
+    foreground: if base.l > 0.6 { gpui::black() } else { gpui::white() },
+    hover: darken(base, 0.06),
+    active: darken(base, 0.12),
+  };
+}
+
 fn update_active_document_theme(cx: &mut App, workspace: &WeakEntity<Workspace>, update: impl FnOnce(&mut DocumentTheme)) {
   let _ = workspace.update(cx, |workspace, cx| {
     let mut theme = workspace

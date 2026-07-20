@@ -2,6 +2,9 @@
 /// loaded/new `FlowDocument`, or attached pre-built (the S10 join handoff).
 pub(crate) enum FlowRuntimeSource {
   FromDocument(Box<flowstate_flow::FlowDocument>),
+  /// A raw Loro snapshot from a `.fl0` — the runtime imports + materializes it
+  /// ONCE (opening via a `FlowDocument` would do it twice).
+  FromSnapshot(Vec<u8>),
   #[allow(dead_code, reason = "constructed by the S10 join handoff")]
   Attachment {
     handle: std::sync::Arc<flowstate_collab::flow::FlowDocHandle>,
@@ -954,7 +957,7 @@ impl Workspace {
   }
 
   pub fn new_flow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-    self.add_flow_panel(flowstate_flow::FlowDocument::new(), None, window, cx);
+    self.add_flow_panel(FlowRuntimeSource::FromDocument(Box::new(flowstate_flow::FlowDocument::new())), None, window, cx);
   }
 
   pub fn open_demo_document(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1195,11 +1198,11 @@ impl Workspace {
             });
           });
         },
-        Ok(LoadedWorkspaceDocument::Flow { document, path }) => {
+        Ok(LoadedWorkspaceDocument::Flow { snapshot, path }) => {
           let _ = window_handle.update(cx, |_, window, cx| {
             let _ = workspace.update(cx, |workspace, cx| {
               workspace.record_recent_document(path.clone(), cx);
-              workspace.add_flow_panel(document, Some(path), window, cx);
+              workspace.add_flow_panel(FlowRuntimeSource::FromSnapshot(snapshot), Some(path), window, cx);
             });
           });
         },
@@ -1365,10 +1368,10 @@ impl Workspace {
         continue;
       }
       let loaded = if matches!(entry.kind, TemporaryWorkspaceSessionEntryKind::Flow) && is_flow_path(&entry.path) {
-        flowstate_flow::load_flow_document(&entry.path)
+        flowstate_flow::load_flow_snapshot(&entry.path)
           .ok()
-          .map(|document| LoadedWorkspaceDocument::Flow {
-            document,
+          .map(|snapshot| LoadedWorkspaceDocument::Flow {
+            snapshot,
             path: entry.path,
           })
       } else {
@@ -1406,8 +1409,8 @@ impl Workspace {
           viewport_scrolls.push((panel_id, entry.viewport_paragraph));
           panel_id
         },
-        LoadedWorkspaceDocument::Flow { document, path } => {
-          let panel = self.create_flow_panel(FlowRuntimeSource::FromDocument(Box::new(document)), Some(path), window, cx);
+        LoadedWorkspaceDocument::Flow { snapshot, path } => {
+          let panel = self.create_flow_panel(FlowRuntimeSource::FromSnapshot(snapshot), Some(path), window, cx);
           is_flow_panel = true;
           // I-S1: land on the sheet (and ink-visibility state) you left.
           let active_sheet = entry.flow_active_sheet.as_deref().and_then(|id| id.parse::<Uuid>().ok());
@@ -1566,17 +1569,13 @@ impl Workspace {
             async move {
               let document = flowstate_flow::load_flow_document(&path).ok()?;
               let board = document.projection().clone();
-              // Materialize each occupied cell's rich-text projection now (off
-              // the main thread) so the static viewport renders real cell text.
+              // Materialize only the cells the preview VIEWPORT shows (bounded by
+              // the card, not the flow size) — off the main thread — so the static
+              // viewport renders real cell text without materializing a whole flow.
               let mut cell_documents = std::collections::HashMap::new();
-              for sheet in &board.sheets {
-                for cell in sheet.cells() {
-                  if cell.summary.is_empty {
-                    continue;
-                  }
-                  if let Ok(cell_document) = document.cell_document(cell.id) {
-                    cell_documents.insert(cell.id, cell_document);
-                  }
+              for cell_id in crate::flow::preview_cell_ids(&board) {
+                if let Ok(cell_document) = document.cell_document(cell_id) {
+                  cell_documents.insert(cell_id, cell_document);
                 }
               }
               Some(crate::flow::FlowPreview { board, cell_documents })
@@ -1593,7 +1592,10 @@ impl Workspace {
           {
             return;
           }
-          if let Some(preview) = preview {
+          if let Some(mut preview) = preview {
+            // Theme every cell's projection ONCE here (main thread has the UI
+            // theme) so the per-frame preview render does zero theme work.
+            crate::flow::theme_flow_preview(&mut preview);
             workspace.recent_flow_previews.insert(path, preview);
             cx.notify();
           }
@@ -1716,6 +1718,15 @@ impl Workspace {
         let io = flowstate_collab::flow::FlowIoHandle::spawn(gate).expect("flow I/O service spawns");
         (std::sync::Arc::new(handle), io)
       },
+      FlowRuntimeSource::FromSnapshot(snapshot) => {
+        let runtime = flowstate_collab::flow::FlowRuntime::from_snapshot(&snapshot).unwrap_or_else(|error| {
+          tracing::error!(%error, "flow runtime build from snapshot failed; opening an empty flow");
+          flowstate_collab::flow::FlowRuntime::new_empty()
+        });
+        let (handle, gate) = flowstate_collab::flow::FlowDocHandle::new(runtime);
+        let io = flowstate_collab::flow::FlowIoHandle::spawn(gate).expect("flow I/O service spawns");
+        (std::sync::Arc::new(handle), io)
+      },
       FlowRuntimeSource::Attachment { handle, io } => (handle, io),
     };
     let editor = cx.new(|cx| FlowEditor::new_with_runtime(handle, io.clone(), path.clone(), window, cx));
@@ -1749,8 +1760,8 @@ impl Workspace {
     panel
   }
 
-  fn add_flow_panel(&mut self, document: flowstate_flow::FlowDocument, path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
-    self.create_flow_panel(FlowRuntimeSource::FromDocument(Box::new(document)), path, window, cx);
+  fn add_flow_panel(&mut self, source: FlowRuntimeSource, path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+    self.create_flow_panel(source, path, window, cx);
     self.persist_temporary_workspace_session(cx);
     cx.notify();
   }
@@ -2560,7 +2571,7 @@ enum LoadedWorkspaceDocument {
     title: Option<String>,
   },
   Flow {
-    document: flowstate_flow::FlowDocument,
+    snapshot: Vec<u8>,
     path: PathBuf,
   },
 }
@@ -2568,8 +2579,8 @@ enum LoadedWorkspaceDocument {
 #[hotpath::measure]
 fn load_workspace_document(path: PathBuf) -> Result<LoadedWorkspaceDocument, String> {
   if is_flow_path(&path) {
-    let document = flowstate_flow::load_flow_document(&path).map_err(|error| error.to_string())?;
-    return Ok(LoadedWorkspaceDocument::Flow { document, path });
+    let snapshot = flowstate_flow::load_flow_snapshot(&path).map_err(|error| error.to_string())?;
+    return Ok(LoadedWorkspaceDocument::Flow { snapshot, path });
   }
   load_document_for_open(&path)
     .map(|loaded| LoadedWorkspaceDocument::Document {

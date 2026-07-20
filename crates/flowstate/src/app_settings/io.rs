@@ -178,6 +178,35 @@ pub fn load_document_theme() -> DocumentTheme {
     .unwrap_or_else(flowstate_document_theme)
 }
 
+/// The flow board palette. Reads ONLY the cached `flow_theme` field (not a full
+/// `AppSettings` clone), so it's cheap enough to call per render. Fully
+/// independent of the app light/dark mode — the unset default is a single fixed
+/// palette (`FlowTheme::default()` = Excel light), exactly like
+/// `load_document_theme` falls back to `flowstate_document_theme`.
+#[hotpath::measure]
+pub(crate) fn load_flow_theme() -> crate::flow::FlowTheme {
+  load_cached_app_settings()
+    .settings
+    .flow_theme
+    .map(crate::flow::FlowTheme::from)
+    .unwrap_or_default()
+}
+
+#[hotpath::measure]
+pub(crate) fn save_flow_theme(theme: &crate::flow::FlowTheme) -> io::Result<()> {
+  let mut settings = load_app_settings();
+  settings.flow_theme = Some(FlowThemeSettings::from(theme));
+  save_app_settings(settings)
+}
+
+/// Clear the saved flow palette, returning to the mode-aware Excel default.
+#[hotpath::measure]
+pub(crate) fn reset_flow_theme() -> io::Result<()> {
+  let mut settings = load_app_settings();
+  settings.flow_theme = None;
+  save_app_settings(settings)
+}
+
 #[hotpath::measure]
 #[hotpath::measure]
 pub fn load_smart_word_selection() -> bool {

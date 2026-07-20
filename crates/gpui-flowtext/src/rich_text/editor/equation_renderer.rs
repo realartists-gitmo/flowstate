@@ -222,10 +222,10 @@ impl World for EquationWorld {
   }
 }
 
-#[hotpath::measure]
 /// Raster oversampling factor — headroom for zoomed display without re-render.
 const EQUATION_RASTER_SCALE: f32 = 4.0;
 
+#[hotpath::measure]
 fn rasterize_svg_to_png(svg: &[u8]) -> Result<Vec<u8>, String> {
   let tree = resvg::usvg::Tree::from_data(svg, &resvg::usvg::Options::default()).map_err(|error| error.to_string())?;
   let svg_size = tree.size();
