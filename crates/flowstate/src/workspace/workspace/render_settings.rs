@@ -664,7 +664,8 @@ impl Workspace {
             .title("Sides")
             .description("Affirmative and negative identity — carried in the column header (C2 cells are neutral).")
             .item(flow_color_item(workspace.clone(), "Affirmative", |theme| theme.aff.base, |theme, value| set_side_from_base(value, &mut theme.aff)))
-            .item(flow_color_item(workspace.clone(), "Negative", |theme| theme.neg.base, |theme, value| set_side_from_base(value, &mut theme.neg))),
+            .item(flow_color_item(workspace.clone(), "Negative", |theme| theme.neg.base, |theme, value| set_side_from_base(value, &mut theme.neg)))
+            .item(flow_cell_wash_item(workspace.clone())),
         ),
       SettingPage::new("Collaboration")
         .description("Applies to this machine — identity, trust, and transports.")

@@ -292,6 +292,56 @@ fn column_lifecycle_add_rename_move_resize_delete() {
 }
 
 #[test]
+fn concurrent_column_width_writes_converge() {
+  // Regression (found by the convergence soak): column width used to be a
+  // read-before-write (`if get().is_some() { delete }`), which is not a clean
+  // LWW register and diverged under concurrent width writes. It is now an
+  // unconditional register with `0.0` = auto.
+  let (base, sheet) = document_with_sheet();
+  let column = column_id(&base, sheet, 0);
+  let snapshot = base.snapshot().unwrap();
+  let mut a = FlowDocument::from_snapshot(&snapshot).unwrap();
+  let mut b = FlowDocument::from_snapshot(&snapshot).unwrap();
+  a.apply_intent(&FlowIntent::SetColumnWidth {
+    sheet_id: sheet,
+    column_id: column,
+    width: Some(250.0),
+  })
+  .unwrap();
+  b.apply_intent(&FlowIntent::SetColumnWidth {
+    sheet_id: sheet,
+    column_id: column,
+    width: None, // clear-to-auto racing a set
+  })
+  .unwrap();
+  sync(&mut a, &mut b);
+  assert_converged(&a, &b);
+}
+
+#[test]
+fn ensure_cell_editable_keeps_the_canonical_tag_style() {
+  // Regression: EnsureCellEditable marked the raw paragraph SLOT, off-by-one
+  // from the canonical `paragraph_style_value` (= slot + 1) the writer/reader
+  // agree on, corrupting the paragraph style. A TAG cell must stay TAG (summary
+  // projection) after EnsureCellEditable.
+  let (mut document, sheet) = document_with_sheet();
+  let row = document.append_row(sheet).unwrap();
+  let column = column_id(&document, sheet, 0);
+  let cell = add_cell_with_text(&mut document, sheet, row, column, "body");
+  assert!(
+    document.projection().sheet(sheet).unwrap().find_cell(cell).unwrap().summary.uses_summary_projection,
+    "a TAG-seeded cell is a summary projection"
+  );
+  document
+    .apply_intent(&FlowIntent::EnsureCellEditable { sheet_id: sheet, cell_id: cell })
+    .unwrap();
+  assert!(
+    document.projection().sheet(sheet).unwrap().find_cell(cell).unwrap().summary.uses_summary_projection,
+    "EnsureCellEditable must preserve the TAG paragraph style (canonical encoding)"
+  );
+}
+
+#[test]
 fn the_last_column_cannot_be_deleted() {
   let mut document = FlowDocument::new();
   let sheet_type = document.projection().format.sheet_types[0].id;
@@ -784,7 +834,7 @@ fn random_intent(rng: &mut Lcg, document: &FlowDocument) -> Option<FlowIntent> {
   } else {
     Some(&board.sheets[rng.pick(board.sheets.len())])
   };
-  let action = rng.pick(16);
+  let action = rng.pick(22);
   match action {
     0 => Some(FlowIntent::CreateSheet {
       sheet_id: rng.uuid(),
@@ -923,6 +973,76 @@ fn random_intent(rng: &mut Lcg, document: &FlowDocument) -> Option<FlowIntent> {
       stroke.id = rng.uuid();
       Some(FlowIntent::AddAnnotation { stroke })
     }),
+    15 => sheet.and_then(|sheet| {
+      let cells: Vec<CellId> = sheet.cells().map(|cell| cell.id).collect();
+      if cells.len() < 2 {
+        return None;
+      }
+      let a = cells[rng.pick(cells.len())];
+      let b = cells[rng.pick(cells.len())];
+      (a != b).then_some(FlowIntent::SwapCells { sheet_id: sheet.id, a, b })
+    }),
+    16 => sheet.and_then(|sheet| {
+      let cells: Vec<CellId> = sheet.cells().map(|cell| cell.id).collect();
+      if cells.is_empty() || sheet.rows.is_empty() || sheet.columns.is_empty() {
+        return None;
+      }
+      let count = 1 + rng.pick(3.min(cells.len()));
+      let placements = (0..count)
+        .map(|_| {
+          (
+            cells[rng.pick(cells.len())],
+            sheet.rows[rng.pick(sheet.rows.len())].id,
+            sheet.columns[rng.pick(sheet.columns.len())].id,
+          )
+        })
+        .collect();
+      Some(FlowIntent::SetCellAddresses { sheet_id: sheet.id, placements })
+    }),
+    17 => sheet.and_then(|sheet| {
+      let cells: Vec<CellId> = sheet.cells().map(|cell| cell.id).collect();
+      if cells.is_empty() {
+        return None;
+      }
+      Some(FlowIntent::EnsureCellEditable {
+        sheet_id: sheet.id,
+        cell_id: cells[rng.pick(cells.len())],
+      })
+    }),
+    18 => sheet.and_then(|sheet| {
+      if sheet.columns.is_empty() {
+        return None;
+      }
+      Some(FlowIntent::RenameColumn {
+        sheet_id: sheet.id,
+        column_id: sheet.columns[rng.pick(sheet.columns.len())].id,
+        label: format!("Col {}", rng.pick(1000)),
+      })
+    }),
+    19 => sheet.and_then(|sheet| {
+      if sheet.columns.is_empty() {
+        return None;
+      }
+      Some(FlowIntent::MoveColumn {
+        sheet_id: sheet.id,
+        column_id: sheet.columns[rng.pick(sheet.columns.len())].id,
+        before: if rng.pick(2) == 0 {
+          None
+        } else {
+          Some(sheet.columns[rng.pick(sheet.columns.len())].id)
+        },
+      })
+    }),
+    20 => sheet.and_then(|sheet| {
+      if sheet.columns.is_empty() {
+        return None;
+      }
+      Some(FlowIntent::SetColumnWidth {
+        sheet_id: sheet.id,
+        column_id: sheet.columns[rng.pick(sheet.columns.len())].id,
+        width: (rng.pick(2) == 0).then(|| 90.0 + rng.pick(400) as f32),
+      })
+    }),
     _ => sheet.and_then(|sheet| {
       (!sheet.rows.is_empty() && rng.pick(3) == 0).then_some(FlowIntent::DeleteSheet { sheet_id: sheet.id })
     }),
@@ -984,5 +1104,78 @@ fn seeded_multi_peer_determinism() {
       .projection()
       .validate()
       .unwrap_or_else(|error| panic!("seed {seed}: normalized board must validate: {error}"));
+  }
+}
+
+/// A synthetic flow of `rows` rows × (base + `extra_cols`) columns, cells filled
+/// sparsely with varied content (some struck, some tall rows, an annotation
+/// stream) — the fixture generator for the round-trip sweep.
+fn synthetic_flow(rows: usize, extra_cols: usize, seed: u64) -> (FlowDocument, SheetId) {
+  let (mut document, sheet) = document_with_sheet();
+  let mut rng = Lcg(seed);
+  for i in 0..extra_cols {
+    document
+      .add_column(
+        sheet,
+        &format!("Extra {i}"),
+        if i % 2 == 0 { ArgumentSide::One } else { ArgumentSide::Two },
+        None,
+      )
+      .unwrap();
+  }
+  let columns: Vec<ColumnId> = document.projection().sheet(sheet).unwrap().columns.iter().map(|column| column.id).collect();
+  for r in 0..rows {
+    let row = document.append_row(sheet).unwrap();
+    for (ci, &column) in columns.iter().enumerate() {
+      if rng.pick(3) == 0 {
+        continue; // sparse — not every slot is filled
+      }
+      let cell = add_cell_with_text(&mut document, sheet, row, column, &format!("r{r}c{ci} n{}", rng.pick(1000)));
+      if rng.pick(4) == 0 {
+        document
+          .apply_intent(&FlowIntent::SetCellStruck { sheet_id: sheet, cell_id: cell, struck: true })
+          .unwrap();
+      }
+    }
+    if rng.pick(5) == 0 {
+      document
+        .apply_intent(&FlowIntent::SetRowHeight { sheet_id: sheet, row_id: row, height: Some(60.0 + rng.pick(120) as f32) })
+        .unwrap();
+    }
+    if rng.pick(6) == 0 && !columns.is_empty() {
+      let mut stroke = test_stroke(sheet, row, columns[rng.pick(columns.len())], "synthetic", rng.pick(80) as f32);
+      stroke.id = Uuid::from_u128(u128::from(rng.pick(u32::MAX as usize) as u64));
+      document.apply_intent(&FlowIntent::AddAnnotation { stroke }).unwrap();
+    }
+  }
+  (document, sheet)
+}
+
+/// Soak object #5: the flow answer to the .docx corpus sweep (flow is
+/// native-only, so the fixtures are generated). Over a size sweep, a synthetic
+/// flow must materialize DEFECT-FREE, and a snapshot round-trip (and a double
+/// round-trip) must reproduce the identical board.
+#[test]
+fn synthetic_flows_round_trip_and_are_defect_free() {
+  // Sizes kept modest so the default (debug) suite stays fast; the shape is
+  // what matters (sparse cells, struck, tall rows, annotations, multi-column).
+  for &(rows, extra_cols, seed) in &[(8usize, 0usize, 1u64), (25, 2, 7), (60, 3, 424_242)] {
+    let (document, _sheet) = synthetic_flow(rows, extra_cols, seed);
+    let board = document.projection();
+    board
+      .validate()
+      .unwrap_or_else(|error| panic!("seed {seed}: generated board must validate: {error}"));
+    assert!(document.defects().is_empty(), "seed {seed}: generation is defect-free, got {:?}", document.defects());
+
+    // Snapshot round-trip preserves the board and stays defect-free.
+    let snapshot = document.snapshot().unwrap();
+    let reloaded = FlowDocument::from_snapshot(&snapshot).unwrap();
+    assert_eq!(board, reloaded.projection(), "seed {seed}: snapshot round-trip must reproduce the identical board");
+    assert!(reloaded.defects().is_empty(), "seed {seed}: reload is defect-free");
+
+    // Double round-trip is stable (no drift on re-save).
+    let snapshot2 = reloaded.snapshot().unwrap();
+    let reloaded2 = FlowDocument::from_snapshot(&snapshot2).unwrap();
+    assert_eq!(board, reloaded2.projection(), "seed {seed}: double round-trip must stay byte-identical");
   }
 }

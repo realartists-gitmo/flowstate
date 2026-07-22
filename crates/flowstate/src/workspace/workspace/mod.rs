@@ -22,6 +22,7 @@ use gpui_component::color_picker::{ColorPicker, ColorPickerState};
 use gpui_component::input::{Input, InputEvent, InputState, NumberInput, NumberInputEvent, StepAction};
 use gpui_component::list::ListItem;
 use gpui_component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
+use gpui_component::notification::Notification;
 use gpui_component::resizable::{ResizableState, h_resizable, resizable_panel, v_resizable};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::select::{SearchableVec, Select, SelectEvent, SelectState};
@@ -179,6 +180,10 @@ pub struct Workspace {
   /// SB-S3: the status bar's one activity slot (transient fades, failure sticks).
   activity_event: Option<ActivityEvent>,
   activity_generation: u64,
+  /// P2: activity events awaiting their FLOATING toast (drained at render,
+  /// where a `Window` exists) — the inline status-bar red box is gone; every
+  /// subsystem's transient/failure voice is a stacked popover notification.
+  pending_toasts: Vec<ActivityEvent>,
   autosave_flow_in_flight: FxHashSet<Uuid>,
   collaboration_dialog: Option<Entity<crate::collab::share_dialog::CollabShareDialog>>,
   /// B-S8: the equation composer popover (one at a time, editor-scoped).

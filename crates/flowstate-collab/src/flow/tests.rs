@@ -429,7 +429,8 @@ fn import_classification_feeds_per_cell_streams() {
 
   let board_items = a.drain_board_stream().unwrap();
   assert!(
-    board_items.iter().any(|FlowStreamItem::Board(board)| {
+    board_items.iter().any(|item| {
+      let FlowStreamItem::Board(board) = item else { return false };
       board
         .sheet(sheet)
         .and_then(|s| s.find_cell(cell))

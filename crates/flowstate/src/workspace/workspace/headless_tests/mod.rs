@@ -21,6 +21,7 @@ mod cutting;
 mod comments;
 mod dialogs;
 mod documents;
+mod flow_interaction;
 mod flows_and_keystrokes;
 mod history;
 mod tabs_and_overlays;

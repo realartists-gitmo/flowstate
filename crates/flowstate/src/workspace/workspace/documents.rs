@@ -23,7 +23,10 @@ pub(crate) struct RecoveredWorkEntry {
 
 /// R3-A: startup scan over the recovery locations we can KNOW about — the
 /// recent-documents list (recovery files are `.recovery` siblings of their
-/// documents, discarded on clean close; an existing one means a crash).
+/// documents, discarded on clean close; an existing one means a crash), plus
+/// the collaboration recovery directory (A3: pathless collab tabs — rich text
+/// AND flows — debounce their snapshots there; clean detach deletes them, so
+/// anything left behind is a crash).
 pub(crate) fn scan_recovered_work() -> Vec<RecoveredWorkEntry> {
   let mut seen = std::collections::HashSet::new();
   let mut entries: Vec<RecoveredWorkEntry> = crate::app_settings::load_recent_documents()
@@ -41,6 +44,27 @@ pub(crate) fn scan_recovered_work() -> Vec<RecoveredWorkEntry> {
       })
     })
     .collect();
+  // A3: the collab recovery directory. These entries have no original source
+  // path (the tab was pathless), so the recovery file stands in for it.
+  let collab_dir = std::env::temp_dir().join("flowstate-collab-recovery");
+  if let Ok(dir) = fs::read_dir(&collab_dir) {
+    for file in dir.flatten() {
+      let recovery_path = file.path();
+      let is_recovery_kind = recovery_path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| matches!(ext, "db8" | "fl0"));
+      if !is_recovery_kind || !seen.insert(recovery_path.clone()) {
+        continue;
+      }
+      let modified_at = fs::metadata(&recovery_path).ok().and_then(|meta| meta.modified().ok());
+      entries.push(RecoveredWorkEntry {
+        source_path: recovery_path.clone(),
+        recovery_path,
+        modified_at,
+      });
+    }
+  }
   entries.sort_by_key(|entry| std::cmp::Reverse(entry.modified_at));
   entries
 }
@@ -363,6 +387,7 @@ impl Workspace {
       autosave_pending_generation: FxHashMap::default(),   // §act-five P9-throttle debounce
       panel_save_states: FxHashMap::default(),
       activity_event: None,
+      pending_toasts: Vec::new(),
       activity_generation: 0,
       autosave_flow_in_flight: FxHashSet::default(),       // §perf: FxHash for trusted Uuid keys
       collaboration_dialog: None,
@@ -454,6 +479,34 @@ impl Workspace {
   /// autosave must never adopt the `.recovery` path (the docx-clobber law) —
   /// titled after its source document; saving re-homes it deliberately.
   pub(crate) fn open_recovered_work(&mut self, entry: &RecoveredWorkEntry, window: &mut Window, cx: &mut Context<Self>) {
+    let source_name = entry
+      .source_path
+      .file_name()
+      .map_or_else(|| "document".to_string(), |name| name.to_string_lossy().to_string());
+    // A3: flow recovery files are framed `.fl0` snapshots — decode them on the
+    // flow stack instead of failing the DocumentPackage parse.
+    if entry.recovery_path.extension().and_then(|ext| ext.to_str()) == Some("fl0") {
+      let snapshot = fs::read(&entry.recovery_path)
+        .map_err(anyhow::Error::from)
+        .and_then(|bytes| flowstate_flow::persistence::decode_snapshot(&bytes));
+      match snapshot {
+        Ok(snapshot) => {
+          let title = Some(format!("Recovered — {source_name}"));
+          self.create_flow_panel_titled(FlowRuntimeSource::FromSnapshot(snapshot), None, title, window, cx);
+          let recovery_path = entry.recovery_path.clone();
+          self
+            .recovered_work
+            .retain(|candidate| candidate.recovery_path != recovery_path);
+          self.report_activity(
+            format!("Opened recovered flow {source_name} — save it where it belongs"),
+            cx,
+          );
+          cx.notify();
+        },
+        Err(error) => self.report_failure(format!("Opening recovered flow failed: {error:#}"), None, cx),
+      }
+      return;
+    }
     let loaded = (|| -> std::io::Result<_> {
       let bytes = fs::read(&entry.recovery_path)?;
       let package = flowstate_document::DocumentPackage::from_bytes(&bytes)?;
@@ -461,10 +514,6 @@ impl Workspace {
       let document = runtime.projection_snapshot().map_err(runtime_io_error)?;
       Ok((document, runtime))
     })();
-    let source_name = entry
-      .source_path
-      .file_name()
-      .map_or_else(|| "document".to_string(), |name| name.to_string_lossy().to_string());
     match loaded {
       Ok((document, runtime)) => {
         let title = Some(format!("Recovered — {source_name}"));
@@ -1254,6 +1303,9 @@ impl Workspace {
         invisibility: panel.editor().read(cx).invisibility_mode(),
         flow_active_sheet: None,
         flow_hidden_ink_sheets: Vec::new(),
+        flow_zoom: None,
+        flow_camera: None,
+        flow_cursor: None,
       });
     }
 
@@ -1276,12 +1328,12 @@ impl Workspace {
         viewport_paragraph: None,
         invisibility: false,
         flow_active_sheet: flow_editor.read(cx).active_sheet().map(|sheet| sheet.to_string()),
-        flow_hidden_ink_sheets: flow_editor
-          .read(cx)
-          .hidden_ink_sheets()
-          .into_iter()
-          .map(|sheet| sheet.to_string())
-          .collect(),
+        // E12: ink visibility is app-global now; the per-sheet session list
+        // stays only for file-format compatibility.
+        flow_hidden_ink_sheets: Vec::new(),
+        flow_zoom: Some(flow_editor.read(cx).board_zoom()),
+        flow_camera: flow_editor.read(cx).camera_center_for_session(),
+        flow_cursor: flow_editor.read(cx).cursor(),
       });
     }
 
@@ -1424,6 +1476,12 @@ impl Workspace {
               .read(cx)
               .editor()
               .update(cx, |editor, cx| editor.restore_ui_state(active_sheet, &hidden, cx));
+          }
+          // D10: reopen where you left off — zoom, camera, cursor.
+          if entry.flow_zoom.is_some() || entry.flow_camera.is_some() || entry.flow_cursor.is_some() {
+            panel.read(cx).editor().update(cx, |editor, cx| {
+              editor.restore_view_state(entry.flow_zoom, entry.flow_camera, entry.flow_cursor, cx);
+            });
           }
           panel.read(cx).id()
         },
@@ -1744,6 +1802,28 @@ impl Workspace {
       id,
       cx.observe(&editor, move |workspace, editor, cx| {
         workspace.maybe_autosave_flow(id, editor.clone(), cx);
+      }),
+    ));
+    // F4/Q-22: "Send column to new document" — open a fresh .db8 and type the
+    // column in, one paragraph per card.
+    self.editor_subscriptions.push((
+      id,
+      cx.subscribe_in(&editor, window, move |workspace, _, event: &crate::flow::FlowEditorEvent, window, cx| {
+        match event {
+          crate::flow::FlowEditorEvent::SendColumnToDocument { text } => {
+            let text = text.clone();
+            workspace.new_document(window, cx);
+            if let Some(editor) = workspace.active_editor.clone() {
+              editor.update(cx, |editor, cx| editor.insert_plain_text_from_toolkit(&text, cx));
+            }
+            workspace.report_activity("Column sent to a new document — save it where it belongs".to_string(), cx);
+          },
+          // Q-21/F2: jump from a flowed card back to its evidence document.
+          crate::flow::FlowEditorEvent::OpenCellSource { path } => {
+            workspace.open_document_path(PathBuf::from(path), window, cx);
+          },
+          _ => {},
+        }
       }),
     ));
     self.flow_document_runtimes.insert(id, io);
@@ -2274,7 +2354,8 @@ impl Workspace {
 
     self.autosave_flow_in_flight.insert(panel_id);
     self.set_save_state(panel_id, PanelSaveState::Saving, cx);
-    let save_task = editor.update(cx, |editor, cx| editor.save(cx));
+    // G5: autosaves mint Auto-tier checkpoints (explicit saves mint Session).
+    let save_task = editor.update(cx, |editor, cx| editor.save_auto(cx));
     cx.spawn(async move |workspace, cx| {
       let result = save_task.await;
       let _ = workspace.update(cx, |workspace, cx| {
@@ -2352,6 +2433,10 @@ impl Workspace {
           },
         },
         Err(error) => {
+          // Law 2 / A2: a save that never started must reach the user too.
+          let _ = workspace.update(cx, |workspace, cx| {
+            workspace.report_failure(format!("Save failed before it could start: {error}"), None, cx);
+          });
           eprintln!("failed to access editor before save: {error}");
         },
       }
@@ -2405,7 +2490,10 @@ impl Workspace {
           },
         },
         Err(error) => {
-          eprintln!("failed to access flow before save: {error}");
+          // Law 2 / A2: a save that never started must reach the user too.
+          let _ = workspace.update(cx, |workspace, cx| {
+            workspace.report_failure(format!("Save failed before it could start: {error}"), None, cx);
+          });
         },
       }
     })
@@ -2647,8 +2735,16 @@ struct TemporaryWorkspaceSessionEntry {
   #[serde(default)]
   flow_active_sheet: Option<String>,
   /// I-S1: per-sheet ink-visibility choices survive a restart.
+  /// (E12: superseded by the app-global setting; kept for file compat.)
   #[serde(default)]
   flow_hidden_ink_sheets: Vec<String>,
+  /// D10: reopen a flow exactly where you left it — zoom, camera, cursor.
+  #[serde(default)]
+  flow_zoom: Option<f32>,
+  #[serde(default)]
+  flow_camera: Option<(f32, f32)>,
+  #[serde(default)]
+  flow_cursor: Option<(usize, usize)>,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]

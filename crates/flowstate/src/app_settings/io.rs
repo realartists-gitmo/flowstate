@@ -538,6 +538,17 @@ pub fn save_autosave(enabled: bool) -> io::Result<()> {
   save_app_settings(settings)
 }
 
+/// E12: the app-global flow ink visibility toggle.
+pub fn load_flow_ink_visible() -> bool {
+  load_app_settings().editor.flow_ink_visible
+}
+
+pub fn save_flow_ink_visible(visible: bool) -> io::Result<()> {
+  let mut settings = load_app_settings();
+  settings.editor.flow_ink_visible = visible;
+  save_app_settings(settings)
+}
+
 pub fn save_tub_root(path: Option<PathBuf>) -> io::Result<()> {
   let mut settings = load_app_settings();
   settings.toolkit.tub_root = path;

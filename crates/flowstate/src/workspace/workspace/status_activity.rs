@@ -74,6 +74,14 @@ impl Workspace {
   /// after [`ACTIVITY_TRANSIENT_DECAY`] unless superseded first. A pending
   /// FAILURE is never displaced by a transient (Law 2: failures persist).
   pub fn report_activity(&mut self, message: impl Into<String>, cx: &mut Context<Self>) {
+    let message = message.into();
+    // P2: every activity floats as a toast (render drains these).
+    self.pending_toasts.push(ActivityEvent {
+      kind: ActivityKind::Transient,
+      message: message.clone(),
+      action: None,
+      generation: 0,
+    });
     if matches!(
       self.activity_event,
       Some(ActivityEvent {
@@ -81,13 +89,14 @@ impl Workspace {
         ..
       })
     ) {
+      cx.notify();
       return;
     }
     self.activity_generation = self.activity_generation.wrapping_add(1);
     let generation = self.activity_generation;
     self.activity_event = Some(ActivityEvent {
       kind: ActivityKind::Transient,
-      message: message.into(),
+      message,
       action: None,
       generation,
     });
@@ -111,10 +120,18 @@ impl Workspace {
   /// Surface a failure in the activity zone. It persists until the user
   /// dismisses it, runs its action, or a newer failure supersedes it.
   pub fn report_failure(&mut self, message: impl Into<String>, action: Option<ActivityAction>, cx: &mut Context<Self>) {
+    let message = message.into();
     self.activity_generation = self.activity_generation.wrapping_add(1);
+    // P2: failures float too — sticky (no autohide) with their Retry.
+    self.pending_toasts.push(ActivityEvent {
+      kind: ActivityKind::Failure,
+      message: message.clone(),
+      action: action.clone(),
+      generation: self.activity_generation,
+    });
     self.activity_event = Some(ActivityEvent {
       kind: ActivityKind::Failure,
-      message: message.into(),
+      message,
       action,
       generation: self.activity_generation,
     });

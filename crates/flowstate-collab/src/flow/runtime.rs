@@ -35,12 +35,35 @@ pub enum FlowPublishEvent {
   },
 }
 
+/// Q-23: what structurally changed between the previous `Board` stream item
+/// and the one this delta rides behind — the metadata the UI needs to flash a
+/// remote edit or animate a move, which the replace-whole board cannot carry.
+#[derive(Clone, Debug, Default)]
+pub struct FlowBoardDelta {
+  pub inserted_cells: Vec<CellId>,
+  pub removed_cells: Vec<CellId>,
+  pub moved_cells: Vec<CellId>,
+}
+
+impl FlowBoardDelta {
+  pub fn is_empty(&self) -> bool {
+    self.inserted_cells.is_empty() && self.removed_cells.is_empty() && self.moved_cells.is_empty()
+  }
+}
+
 /// The board editor's ordered stream item. Replace-per-change: a board
 /// projection without content is metadata-priced (summaries are shared
-/// `Arc<str>`), and structural changes are human-rate.
+/// `Arc<str>`), and structural changes are human-rate. A `Board` item may be
+/// followed by a `Delta` (Q-23) and/or `Defects` (A4) describing it.
 #[derive(Clone, Debug)]
 pub enum FlowStreamItem {
   Board(Box<FlowBoardProjection>),
+  /// What structurally changed since the previous `Board` item.
+  Delta(FlowBoardDelta),
+  /// A4: normalizer/repair defects that APPEARED with the preceding `Board`
+  /// (already-reported defects are not repeated). A silently rearranged grid
+  /// is a defect of its own — the UI toasts these.
+  Defects(Vec<FlowDefect>),
 }
 
 /// Synchronous outcome of a local intent (the optimistic apply IS the
@@ -78,6 +101,11 @@ pub struct FlowRuntime {
   /// Batched-import calls served (a coalesced chunk of N blobs counts once) —
   /// the §6.4 coalescing observability counter, mirroring `CrdtRuntime`'s.
   import_batches_served: u64,
+  /// Q-23: the cell layout the LAST `Board` stream item carried, so the next
+  /// push can describe what moved. Keyed off `cell_locations`.
+  last_streamed_locations: HashMap<CellId, (usize, usize, usize)>,
+  /// A4: defects already reported on the stream — only NEW defects are pushed.
+  last_streamed_defects: Vec<FlowDefect>,
   /// True between `undo_group_start`/`undo_group_end`: the excluded "meta"
   /// modified-stamp commit is deferred to group end so grouped members stay
   /// counter-contiguous (the group-merge law).
@@ -134,6 +162,20 @@ impl FlowRuntime {
     Ok(runtime)
   }
 
+  /// Same as `from_snapshot`, but with a FIXED Loro peer id. Used by
+  /// convergence fuzzes/soaks so LWW tie-breaking is reproducible across runs
+  /// (a fresh `LoroDoc` otherwise gets a random peer id, making divergences
+  /// intermittent and un-bisectable).
+  pub fn from_snapshot_with_peer_id(snapshot: &[u8], peer_id: u64) -> anyhow::Result<Self> {
+    let doc = LoroDoc::new();
+    doc.set_peer_id(peer_id).map_err(|error| anyhow::anyhow!("set peer id: {error:?}"))?;
+    loro_schema::configure_flow_doc(&doc);
+    doc.import(snapshot)?;
+    let mut runtime = Self::around_doc(doc)?;
+    runtime.refresh(None, true)?;
+    Ok(runtime)
+  }
+
   /// Wire the undo manager + touch subscription around a CONFIGURED doc that
   /// already carries the flow content (imported or forked), leaving the
   /// board/indices for the caller to `refresh` or seed.
@@ -174,6 +216,8 @@ impl FlowRuntime {
       touched,
       repair_attempts: HashMap::new(),
       import_batches_served: 0,
+      last_streamed_locations: HashMap::new(),
+      last_streamed_defects: Vec::new(),
       undo_group_active: false,
       _root_subscription: root_subscription,
     })
@@ -385,6 +429,7 @@ impl FlowRuntime {
     if flow_verify_enabled() {
       self.verify_board_equivalence();
     }
+    self.emit_board_fidelity();
     self.push_board_stream();
     for cell in &report.content_cells {
       self.push_cell_replace(*cell);
@@ -452,6 +497,7 @@ impl FlowRuntime {
     if flow_verify_enabled() {
       self.verify_board_equivalence();
     }
+    self.emit_board_fidelity();
     self.push_board_stream();
     // The authority receives the replace synchronously; OTHER consumers (a
     // second editor on the same cell) still get the stream item — reuse the
@@ -491,6 +537,14 @@ impl FlowRuntime {
       self.doc.import_with(blob, "remote")?;
     }
     let touched = self.take_touched();
+    // A concurrent merge (mergeable-text resolution, same-cell co-creation, an
+    // unmark that loses LWW) can move a cell's text to a DIFFERENT winner
+    // container than the one the index recorded. Re-resolve the index from the
+    // CURRENT doc BEFORE attributing touches, or a mark-only change on the new
+    // container falls through as "structural", the cell is never dirtied, and
+    // its cached summary (e.g. `struck`) goes stale forever — a real
+    // convergence defect the broadened fuzz caught.
+    let moved = self.rebuild_text_container_index();
     let mut dirty: HashSet<CellId> = HashSet::new();
     for container in &touched {
       if let Some(cell) = self.text_containers.get(container) {
@@ -498,10 +552,12 @@ impl FlowRuntime {
         continue;
       }
       // Any container we can't attribute to a specific cell's flow could be a
-      // registry/attrs child: attribute by cell-record ancestry via the
-      // container name when possible; otherwise treat as structural (cheap —
-      // structure rebuilds reuse the summary cache).
+      // registry/attrs child: treat as structural (cheap — structure rebuilds
+      // reuse the summary cache).
     }
+    // Cells whose text container the merge moved/re-minted also went dirty even
+    // though no live container in `touched` maps to them.
+    dirty.extend(moved);
     // The import itself never writes repairs; a follow-up LOCAL canonicalization
     // commit re-mints registry records the merge left unresolvable. Imports
     // publish nothing themselves, so the repair commit exports its own delta.
@@ -692,12 +748,17 @@ impl FlowRuntime {
     // An undo can touch anything its item recorded: classify from the touch
     // buffer like an import.
     let touched = self.take_touched();
+    // Same hazard as import: an undo re-inserts text under NEW container ids,
+    // so re-resolve the index from the current doc before attributing touches
+    // (else the restored cell's summary cache goes stale).
+    let moved = self.rebuild_text_container_index();
     let mut dirty: HashSet<CellId> = HashSet::new();
     for container in &touched {
       if let Some(cell) = self.text_containers.get(container) {
         dirty.insert(*cell);
       }
     }
+    dirty.extend(moved);
     // An undo re-inserts text under NEW op ids; restored registry records
     // still point at the tombstones. Re-mint before materializing; the
     // repair delta rides the `vv_before` export below (no separate publish).
@@ -772,6 +833,36 @@ impl FlowRuntime {
     self
       .board_stream
       .push(FlowStreamItem::Board(Box::new(self.board.clone())));
+    // Q-23: describe what structurally changed since the last Board item.
+    // Structural pushes are human-rate; the diff is O(cells) over two maps.
+    let mut delta = FlowBoardDelta::default();
+    for (cell, location) in &self.cell_locations {
+      match self.last_streamed_locations.get(cell) {
+        None => delta.inserted_cells.push(*cell),
+        Some(previous) if previous != location => delta.moved_cells.push(*cell),
+        Some(_) => {},
+      }
+    }
+    for cell in self.last_streamed_locations.keys() {
+      if !self.cell_locations.contains_key(cell) {
+        delta.removed_cells.push(*cell);
+      }
+    }
+    if !delta.is_empty() {
+      self.board_stream.push(FlowStreamItem::Delta(delta));
+    }
+    self.last_streamed_locations = self.cell_locations.clone();
+    // A4: defects the user has not been told about yet ride the same push.
+    let fresh: Vec<FlowDefect> = self
+      .defects
+      .iter()
+      .filter(|defect| !self.last_streamed_defects.contains(defect))
+      .cloned()
+      .collect();
+    if !fresh.is_empty() {
+      self.board_stream.push(FlowStreamItem::Defects(fresh));
+    }
+    self.last_streamed_defects = self.defects.clone();
   }
 
   fn push_cell_replace(&mut self, cell_id: CellId) {
@@ -826,7 +917,7 @@ impl FlowRuntime {
     // the summary cache makes clean cells free, and this rebuild is metadata
     // plus O(dirty) content — asserted by the runtime tests.
     if cell_set_may_have_changed {
-      self.rebuild_text_container_index();
+      let _ = self.rebuild_text_container_index();
     }
     Ok(())
   }
@@ -1114,6 +1205,9 @@ impl FlowRuntime {
       row_id,
       column_id,
       summary: summary.clone(),
+      // A freshly ADDED cell has no provenance yet; SetCellSource (a
+      // structural-path intent) rematerializes when it lands.
+      source: None,
     });
     self.summaries.insert(cell_id, summary);
     self.cell_locations.insert(cell_id, (sheet_ix, row_ix, column_ix));
@@ -1153,6 +1247,29 @@ impl FlowRuntime {
   /// board and the text-container routing index must ALWAYS equal a fresh full
   /// materialization. The soak drives thousands of mixed intents (incl. remote
   /// merges) through this, fuzzing every incremental path.
+  /// Route incremental-vs-full board drift into the SHARED flowstate-fidelity
+  /// firehose (non-fatal, collectable via `take_violations`) — the flow twin of
+  /// the .db8 `self_check` projection-hash. Zero-cost when fidelity is off; the
+  /// whole-board rebuild only runs under `FLOWSTATE_TRACE_FIDELITY_HEAVY`.
+  fn emit_board_fidelity(&self) {
+    if !flowstate_fidelity::enabled() {
+      return;
+    }
+    flowstate_fidelity::event(flowstate_fidelity::FidelityClass::Structure, "flow-board", || {
+      let cells: usize = self.board.sheets.iter().map(|sheet| sheet.cells().count()).sum();
+      format!("sheets={} cells={cells}", self.board.sheets.len())
+    });
+    if flowstate_fidelity::expensive_checks_enabled()
+      && let Ok(materialized) = board_from_loro(&self.doc)
+    {
+      let live = flowstate_flow::board_hash(&self.board);
+      let fresh = flowstate_flow::board_hash(&materialized.board);
+      flowstate_fidelity::check(live == fresh, flowstate_fidelity::FidelityClass::Convergence, "flow-board-drift", || {
+        format!("incremental board_hash {live} != full rebuild {fresh}")
+      });
+    }
+  }
+
   pub(super) fn verify_board_equivalence(&self) {
     let fresh = board_from_loro(&self.doc).expect("verify: materialize").board;
     assert_eq!(self.board, fresh, "flow incremental board diverged from full materialization");
@@ -1173,8 +1290,22 @@ impl FlowRuntime {
   }
 
   #[hotpath::measure]
-  fn rebuild_text_container_index(&mut self) {
+  /// Rebuild the container→cell index from the CURRENT doc and return the cells
+  /// whose resolved text container CHANGED (moved to a new id, appeared, or
+  /// vanished) versus the previous index. A merge can re-mint a cell's registry
+  /// record (fabricated-id repair) so its text now lives under a different
+  /// container — or the id-registry lookup goes momentarily unresolvable while
+  /// placement-based materialization still reads it. Either way the cell's
+  /// content moved out from under its cached summary, so the caller must dirty
+  /// the returned cells; the `touched` set alone can't see it (the touch landed
+  /// on the orphaned old container that maps to no live cell).
+  fn rebuild_text_container_index(&mut self) -> HashSet<CellId> {
+    let mut previous: HashMap<CellId, loro::ContainerID> = HashMap::new();
+    for (container, cell) in &self.text_containers {
+      previous.insert(*cell, container.clone());
+    }
     self.text_containers.clear();
+    let mut current: HashMap<CellId, loro::ContainerID> = HashMap::new();
     for sheet in &self.board.sheets {
       for cell in sheet.cells() {
         let Some(record) = loro_schema::cell_record(&self.doc, cell.id) else {
@@ -1185,9 +1316,22 @@ impl FlowRuntime {
         };
         if let Ok(text) = flow.ensure_mergeable_text(flowstate_document::FLOW_TEXT_KEY) {
           self.text_containers.insert(text.id(), cell.id);
+          current.insert(cell.id, text.id());
         }
       }
     }
+    let mut moved: HashSet<CellId> = HashSet::new();
+    for (cell, container) in &previous {
+      if current.get(cell) != Some(container) {
+        moved.insert(*cell);
+      }
+    }
+    for cell in current.keys() {
+      if !previous.contains_key(cell) {
+        moved.insert(*cell);
+      }
+    }
+    moved
   }
 }
 

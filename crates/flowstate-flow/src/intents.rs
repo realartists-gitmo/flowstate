@@ -83,6 +83,33 @@ pub enum FlowIntent {
     column_id: ColumnId,
     label: String,
   },
+  /// E3: correct a column's aff/neg side after the fact — the add-column
+  /// alternation guess finally has an eraser.
+  SetColumnSide {
+    sheet_id: SheetId,
+    column_id: ColumnId,
+    side: ArgumentSide,
+  },
+  /// E10: set ONE round-metadata field. Field-per-key LWW: concurrent edits
+  /// to different fields both survive the merge.
+  SetRoundField { field: RoundField, value: String },
+  /// Q-21/F2: record (or clear) a cell's provenance — the card it was flowed
+  /// from. LWW blob; `None` clears.
+  SetCellSource {
+    sheet_id: SheetId,
+    cell_id: CellId,
+    source: Option<crate::projection::CellSource>,
+  },
+  /// F5: a LOSSLESS cross-sheet move — the cell keeps its identity (comments
+  /// and history survive) and lands at an explicit target address. The user
+  /// owns WHERE on the destination sheet; occupied targets reject.
+  MoveCellToSheet {
+    from_sheet: SheetId,
+    cell_id: CellId,
+    to_sheet: SheetId,
+    row_id: RowId,
+    column_id: ColumnId,
+  },
   MoveColumn {
     sheet_id: SheetId,
     column_id: ColumnId,
@@ -196,6 +223,10 @@ impl FlowIntent {
       Self::SetRowHeight { .. } => "flow.set-row-height",
       Self::AddColumn { .. } => "flow.add-column",
       Self::RenameColumn { .. } => "flow.rename-column",
+      Self::SetColumnSide { .. } => "flow.set-column-side",
+      Self::SetRoundField { .. } => "flow.set-round-field",
+      Self::MoveCellToSheet { .. } => "flow.move-cell-to-sheet",
+      Self::SetCellSource { .. } => "flow.set-cell-source",
       Self::MoveColumn { .. } => "flow.move-column",
       Self::DeleteColumn { .. } => "flow.delete-column",
       Self::SetColumnWidth { .. } => "flow.set-column-width",
@@ -226,6 +257,7 @@ impl FlowIntent {
       | Self::SetRowHeight { sheet_id, .. }
       | Self::AddColumn { sheet_id, .. }
       | Self::RenameColumn { sheet_id, .. }
+      | Self::SetColumnSide { sheet_id, .. }
       | Self::MoveColumn { sheet_id, .. }
       | Self::DeleteColumn { sheet_id, .. }
       | Self::SetColumnWidth { sheet_id, .. }
@@ -237,6 +269,7 @@ impl FlowIntent {
       | Self::SetCellStruck { sheet_id, .. }
       | Self::EnsureCellEditable { sheet_id, .. }
       | Self::ReplaceCellContent { sheet_id, .. }
+      | Self::SetCellSource { sheet_id, .. }
       | Self::DeleteAnnotation { sheet_id, .. } => Some(*sheet_id),
       Self::AddAnnotation { stroke } => Some(stroke.sheet_id),
       Self::ClearAnnotations {
@@ -247,7 +280,46 @@ impl FlowIntent {
         scope: AnnotationScope::AllSheets,
         ..
       }
-      | Self::CellText { .. } => None,
+      | Self::CellText { .. }
+      | Self::SetRoundField { .. } => None,
+      Self::MoveCellToSheet { from_sheet, .. } => Some(*from_sheet),
     }
   }
+}
+
+/// E10: the six round-identity fields, each its own LWW key in `flow.meta`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoundField {
+  Tournament,
+  Round,
+  Opponent,
+  Judge,
+  Side,
+  Result,
+}
+
+impl RoundField {
+  pub fn key(self) -> &'static str {
+    match self {
+      Self::Tournament => "round.tournament",
+      Self::Round => "round.round",
+      Self::Opponent => "round.opponent",
+      Self::Judge => "round.judge",
+      Self::Side => "round.side",
+      Self::Result => "round.result",
+    }
+  }
+
+  pub fn label(self) -> &'static str {
+    match self {
+      Self::Tournament => "Tournament",
+      Self::Round => "Round",
+      Self::Opponent => "Opponent",
+      Self::Judge => "Judge",
+      Self::Side => "Side",
+      Self::Result => "Result",
+    }
+  }
+
+  pub const ALL: [Self; 6] = [Self::Tournament, Self::Round, Self::Opponent, Self::Judge, Self::Side, Self::Result];
 }

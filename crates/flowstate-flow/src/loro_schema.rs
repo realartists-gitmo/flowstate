@@ -50,6 +50,17 @@ pub const SCHEMA_VERSION: i64 = 3;
 pub const META_FORMAT_KEY: &str = "format";
 pub const META_SCHEMA_VERSION_KEY: &str = "schema_version";
 pub const META_DOCUMENT_ID_KEY: &str = "document_id";
+/// E10: round metadata — each field its own LWW key under `flow.meta`, so
+/// concurrent edits to different fields never clobber each other. Values are
+/// plain strings; empty = unset.
+pub const META_ROUND_KEYS: [&str; 6] = [
+  "round.tournament",
+  "round.round",
+  "round.opponent",
+  "round.judge",
+  "round.side",
+  "round.result",
+];
 
 /// One-time creation of a fresh .fl0 v3 document. The format is immutable by
 /// law: written exactly once here, never rewritten by any executor.
@@ -182,16 +193,13 @@ pub fn column_record(sheet: &LoroMap, column_id: ColumnId) -> Option<LoroMap> {
   child_map(&child_map(sheet, COLUMNS_BY_ID_KEY)?, &column_id.to_string())
 }
 
+/// Width is a pure LWW register: ALWAYS an unconditional insert (never a
+/// read-then-delete). `0.0` is the "auto" sentinel — a read-before-write to
+/// decide whether to emit a `delete` is not a clean CRDT register and diverges
+/// under concurrent width writes (caught by the convergence soak). Real widths
+/// are ≥ `MIN_COLUMN_WIDTH`, so `0.0` can never collide with a set width.
 pub fn set_column_width(column: &LoroMap, width: Option<f32>) -> LoroResult<()> {
-  match width {
-    Some(width) => column.insert("width", f64::from(width)),
-    None => {
-      if column.get("width").is_some() {
-        column.delete("width")?;
-      }
-      Ok(())
-    },
-  }
+  column.insert("width", f64::from(width.unwrap_or(0.0)))
 }
 
 pub fn side_str(side: ArgumentSide) -> &'static str {

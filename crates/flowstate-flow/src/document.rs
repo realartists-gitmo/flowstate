@@ -46,7 +46,11 @@ impl FlowDocument {
     let undo_manager = UndoManager::new(&loro);
     let mut document = Self {
       loro,
-      board: FlowBoardProjection { format, sheets: Vec::new() },
+      board: FlowBoardProjection {
+        format,
+        sheets: Vec::new(),
+        round: crate::projection::RoundMetadata::default(),
+      },
       defects: Vec::new(),
       undo_manager,
     };

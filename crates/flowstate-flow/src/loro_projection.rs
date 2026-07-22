@@ -269,11 +269,19 @@ pub fn board_from_loro_cached(
         continue;
       };
       let summary = summaries.get(&placement.cell).cloned().unwrap_or_default();
+      // Q-21/F2: the provenance blob rides the cell record.
+      let source = records_by_id.get(&placement.cell).and_then(|record| match record.get("source") {
+        Some(loro::ValueOrContainer::Value(loro::LoroValue::Binary(bytes))) => {
+          postcard::from_bytes::<crate::projection::CellSource>(&bytes).ok()
+        },
+        _ => None,
+      });
       grid_rows[row_ix].cells[placement.column_ix] = Some(Cell {
         id: placement.cell,
         row_id: placement.row,
         column_id: columns[placement.column_ix].id,
         summary,
+        source,
       });
     }
 
@@ -289,9 +297,32 @@ pub fn board_from_loro_cached(
   }
 
   Ok(MaterializedBoard {
-    board: FlowBoardProjection { format, sheets },
+    board: FlowBoardProjection {
+      format,
+      sheets,
+      round: read_round_metadata(doc),
+    },
     defects,
   })
+}
+
+/// E10: the six LWW round fields, missing keys = empty.
+fn read_round_metadata(doc: &LoroDoc) -> crate::projection::RoundMetadata {
+  let meta = doc.get_map(loro_schema::META_MAP);
+  let read = |key: &str| -> String {
+    match meta.get(key) {
+      Some(loro::ValueOrContainer::Value(loro::LoroValue::String(value))) => value.to_string(),
+      _ => String::new(),
+    }
+  };
+  crate::projection::RoundMetadata {
+    tournament: read("round.tournament"),
+    round: read("round.round"),
+    opponent: read("round.opponent"),
+    judge: read("round.judge"),
+    side: read("round.side"),
+    result: read("round.result"),
+  }
 }
 
 struct Placement {
@@ -390,7 +421,9 @@ fn grid_column(column_id: ColumnId, record: &LoroMap) -> GridColumn {
     side: map_string(record, "side")
       .and_then(|value| loro_schema::parse_side(&value))
       .unwrap_or(crate::format::ArgumentSide::One),
-    width: map_f64(record, "width").map(|value| value as f32),
+    // `0.0` (and absent) = auto width; see `set_column_width` — the register
+    // is always written, with `0.0` as the "auto" sentinel.
+    width: map_f64(record, "width").filter(|value| *value > 0.0).map(|value| value as f32),
   }
 }
 
@@ -415,7 +448,7 @@ fn sheet_annotations(doc: &LoroDoc, sheet_id: SheetId) -> Vec<AnnotationStroke> 
     let Some(bytes) = map_binary(&map, &key) else {
       continue;
     };
-    let Ok(stroke) = postcard::from_bytes::<AnnotationStroke>(&bytes) else {
+    let Some(stroke) = crate::projection::decode_stroke(&bytes) else {
       // I-S2 hardening: silent refusal is a defect — an invisible stroke too.
       tracing::warn!("skipping undecodable annotation blob in projection");
       continue;

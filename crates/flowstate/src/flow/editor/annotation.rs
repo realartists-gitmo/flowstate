@@ -14,12 +14,16 @@ impl FlowEditor {
     self.marker_color_rgba
   }
 
-  /// I-S2: pick a pen color (and arm the marker — picking a pen means you
-  /// want to draw).
-  pub fn set_marker_color(&mut self, color_rgba: u32, cx: &mut Context<Self>) {
-    self.marker_color_rgba = color_rgba;
+  /// C11: pick a pen width/opacity preset (and arm the marker — picking a
+  /// pen means you want to draw). Color is always the collab identity (Q-8).
+  pub fn set_pen_preset(&mut self, preset: super::PenPreset, cx: &mut Context<Self>) {
+    self.pen_preset = preset;
     self.annotation_tool = AnnotationTool::Marker;
     cx.notify();
+  }
+
+  pub fn pen_preset(&self) -> super::PenPreset {
+    self.pen_preset
   }
 
   pub fn set_annotation_tool(&mut self, tool: AnnotationTool, cx: &mut Context<Self>) {
@@ -32,12 +36,12 @@ impl FlowEditor {
     cx.notify();
   }
 
+  /// E12: ONE global switch — flips for every sheet and every flow, and
+  /// persists across restarts until flipped back.
   pub fn toggle_annotations_visible(&mut self, cx: &mut Context<Self>) {
-    let Some(sheet) = self.active_sheet else {
-      return;
-    };
-    if !self.hidden_annotation_sheets.remove(&sheet) {
-      self.hidden_annotation_sheets.insert(sheet);
+    self.ink_visible = !self.ink_visible;
+    if let Err(error) = crate::app_settings::save_flow_ink_visible(self.ink_visible) {
+      tracing::warn!(%error, "persisting ink visibility failed");
     }
     cx.notify();
   }
@@ -151,6 +155,10 @@ impl FlowEditor {
     });
     if should_append {
       self.drawing_points.push(point);
+      // G2: peers watch the stroke grow — throttled to every 8th point.
+      if self.drawing_points.len() % 8 == 0 {
+        cx.emit(super::FlowEditorEvent::PresenceShifted);
+      }
       cx.notify();
     }
   }
@@ -162,6 +170,8 @@ impl FlowEditor {
     // return, so a stray right-click never leaves us stuck inking.
     let ink_color = self.active_ink_color.take().unwrap_or(self.marker_color_rgba);
     self.right_inking = false;
+    // G2: the peer-visible draft ends with the stroke (commit or discard).
+    cx.emit(super::FlowEditorEvent::PresenceShifted);
     let Some(sheet_id) = self.active_sheet else {
       self.drawing_points.clear();
       return;
@@ -207,9 +217,10 @@ impl FlowEditor {
       anchor,
       points,
       style: StrokeStyle {
+        // C11: width/opacity from the armed preset (color is identity).
         color_rgba: ink_color,
-        width: 4.0,
-        opacity: 0.55,
+        width: self.pen_preset.width(),
+        opacity: self.pen_preset.opacity(),
       },
       bbox,
     };
@@ -228,7 +239,9 @@ impl FlowEditor {
       let Some((layout, sheet)) = self.active_layout() else {
         return;
       };
-      let radius = 10.0;
+      // B13: the eraser is a pointer TOOL, so its reach is screen-constant —
+      // divide the board-space radius by zoom (10 screen px at any level).
+      let radius = 10.0 / self.board_zoom.max(0.01);
       sheet
         .annotations
         .iter()
@@ -255,20 +268,71 @@ impl FlowEditor {
               .windows(2)
               .any(|segment| segment_distance(local, segment[0], segment[1]) <= radius)
         })
-        .map(|stroke| (stroke.id, stroke.originator.clone(), sheet.id))
+        .map(|stroke| {
+          // H7: PARTIAL erase — the eraser removes the touched span, and the
+          // surviving runs become fresh strokes sharing the original's anchor
+          // (points are anchor-relative, so both halves stay rigid bodies).
+          let (row_ix, column_ix) = sheet.resolve_anchor(&stroke.anchor);
+          let (slot_x, slot_y) = layout.slot_origin(row_ix, column_ix);
+          let local = BoardPoint {
+            x: point.x - (slot_x + stroke.anchor.offset.x),
+            y: point.y - (slot_y + stroke.anchor.offset.y),
+          };
+          let survivors: Vec<Vec<StrokePoint>> = {
+            let mut runs: Vec<Vec<StrokePoint>> = Vec::new();
+            let mut current: Vec<StrokePoint> = Vec::new();
+            for p in &stroke.points {
+              let erased = (local.x - p.x).hypot(local.y - p.y) <= radius;
+              if erased {
+                if current.len() >= 2 {
+                  runs.push(std::mem::take(&mut current));
+                } else {
+                  current.clear();
+                }
+              } else {
+                current.push(*p);
+              }
+            }
+            if current.len() >= 2 {
+              runs.push(current);
+            }
+            runs
+          };
+          (stroke.clone(), survivors, sheet.id)
+        })
     };
-    if let Some((stroke_id, originator, sheet_id)) = touched
-      && self
-        .apply_intent(
-          &flowstate_flow::FlowIntent::DeleteAnnotation {
-            sheet_id,
-            stroke_id,
-            originator,
-          },
-          cx,
-        )
-        .is_ok()
-    {
+    let Some((stroke, survivors, sheet_id)) = touched else {
+      return;
+    };
+    // One gesture: delete the original + add the surviving pieces.
+    self.begin_bulk();
+    let deleted = self
+      .apply_intent(
+        &flowstate_flow::FlowIntent::DeleteAnnotation {
+          sheet_id,
+          stroke_id: stroke.id,
+          originator: stroke.originator.clone(),
+        },
+        cx,
+      )
+      .is_ok();
+    if deleted {
+      for run in survivors {
+        let bbox = stroke_bbox(&run);
+        let piece = flowstate_flow::AnnotationStroke {
+          id: uuid::Uuid::new_v4(),
+          sheet_id,
+          originator: stroke.originator.clone(),
+          anchor: stroke.anchor,
+          points: run,
+          style: stroke.style,
+          bbox,
+        };
+        let _ = self.apply_intent(&flowstate_flow::FlowIntent::AddAnnotation { stroke: piece }, cx);
+      }
+    }
+    self.end_bulk("erase", cx);
+    if deleted {
       self.changed(self.active_cell, cx);
     }
   }

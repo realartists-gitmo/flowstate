@@ -166,6 +166,14 @@ pub struct EditorSettings {
   /// row lands with the P5-S2 unified home; editable in settings.toml now.
   #[serde(default)]
   pub reduce_motion: bool,
+  /// E12: ink visibility is ONE app-global view state — it persists across
+  /// sheets, flows, and restarts until the user flips it again.
+  #[serde(default = "default_flow_ink_visible")]
+  pub flow_ink_visible: bool,
+}
+
+fn default_flow_ink_visible() -> bool {
+  true
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -186,6 +194,7 @@ impl Default for EditorSettings {
       export_docx_directory: None,
       export_pdf_directory: None,
       reduce_motion: false,
+      flow_ink_visible: true,
     }
   }
 }

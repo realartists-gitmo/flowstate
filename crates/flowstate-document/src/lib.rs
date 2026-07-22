@@ -10,8 +10,8 @@ pub mod table_topology;
 
 pub use gpui_flowtext::*;
 pub use loro_import::{
-  ImportedLoroDocument, document_to_loro, import_document_projection, import_paragraphs_as_loro, write_cell_object_record, replace_single_flow_from_document,
-  write_imported_document_as_loro_db8,
+  ImportedLoroDocument, document_to_loro, import_document_projection, import_paragraphs_as_loro, paragraph_style_value, write_cell_object_record,
+  replace_single_flow_from_document, write_imported_document_as_loro_db8,
 };
 pub use loro_projection::{
   ChangedContainerOwner, RegionRows, document_from_loro, document_from_loro_with_defects, materialize_body_region, materialize_single_flow,

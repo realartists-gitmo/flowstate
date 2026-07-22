@@ -17,12 +17,12 @@ mod tests;
 
 pub use document::{FlowDocument, FlowFrontier};
 pub use format::{ArgumentSide, CellId, ColumnDefinition, ColumnId, FlowFormat, FormatId, RowId, SheetId, SheetTypeDefinition, SheetTypeId, StrokeId};
-pub use intents::{AnnotationScope, CellSeed, FlowIntent};
+pub use intents::{AnnotationScope, CellSeed, FlowIntent, RoundField};
 pub use loro::VersionVector;
 pub use loro_projection::{MaterializedBoard, board_from_loro, board_from_loro_cached, bump_row_id, cell_document, derive_cell_summary};
 pub use mutate::MutationReport;
 pub use persistence::{decode as decode_flow_document, encode as encode_flow_document, load_flow_document, load_flow_snapshot, save_flow_document};
 pub use projection::{
-  AnnotationOriginator, AnnotationStroke, Cell, CellSummary, FlowBoardProjection, FlowDefect, GridAnchor, GridColumn, GridRow, Sheet, StrokePoint,
-  StrokeRect, StrokeStyle,
+  AnnotationOriginator, AnnotationStroke, Cell, CellSource, CellSummary, FlowBoardProjection, FlowDefect, GridAnchor, GridColumn, GridRow,
+  RoundMetadata, Sheet, StrokePoint, StrokeRect, StrokeStyle, board_hash,
 };

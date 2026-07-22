@@ -67,7 +67,7 @@ pub fn execute_intent(doc: &LoroDoc, board: &FlowBoardProjection, intent: &FlowI
       let annotations = annotations_map(doc);
       for key in loro_schema::map_keys(&annotations) {
         let Some(bytes) = map_binary(&annotations, &key) else { continue };
-        let Ok(stroke) = postcard::from_bytes::<crate::projection::AnnotationStroke>(&bytes) else {
+        let Some(stroke) = crate::projection::decode_stroke(&bytes) else {
           continue;
         };
         if stroke.sheet_id == *sheet_id {
@@ -250,6 +250,14 @@ pub fn execute_intent(doc: &LoroDoc, board: &FlowBoardProjection, intent: &FlowI
       let record = sheet_record(doc, *sheet_id).context("unknown sheet record")?;
       let column = column_record(&record, *column_id).context("unknown column record")?;
       column.insert("label", label.as_str())?;
+      Ok(MutationReport::default())
+    },
+    FlowIntent::SetColumnSide { sheet_id, column_id, side } => {
+      let sheet = board.sheet(*sheet_id).context("unknown sheet")?;
+      sheet.column_index(*column_id).context("unknown column")?;
+      let record = sheet_record(doc, *sheet_id).context("unknown sheet record")?;
+      let column = column_record(&record, *column_id).context("unknown column record")?;
+      column.insert("side", loro_schema::side_str(*side))?;
       Ok(MutationReport::default())
     },
     FlowIntent::MoveColumn { sheet_id, column_id, before } => {
@@ -435,11 +443,15 @@ pub fn execute_intent(doc: &LoroDoc, board: &FlowBoardProjection, intent: &FlowI
       let record = cell_record(doc, *cell_id).context("unknown cell record")?;
       let flow = cell_flow(&record).context("cell has no flow")?;
       let text = flow.ensure_mergeable_text(flowstate_document::FLOW_TEXT_KEY)?;
-      let slot = flowstate_document::paragraph_slot(flowstate_document::PARAGRAPH_TAG).context("TAG style has no slot")?;
       if text.len_unicode() == 0 {
         loro_schema::seed_cell_flow(doc, *cell_id)?;
       } else {
-        text.mark(0..1, flowstate_document::MARK_PARAGRAPH_STYLE, i64::from(slot))?;
+        // The mark value MUST be the canonical `paragraph_style_value` encoding
+        // (`Custom(slot) = slot + 1`), NOT the raw slot — writing the raw slot
+        // is off-by-one and races the seed's correctly-encoded mark into a
+        // non-convergent paragraph style (the flow convergence soak caught this).
+        let value = flowstate_document::paragraph_style_value(flowstate_document::PARAGRAPH_TAG);
+        text.mark(0..1, flowstate_document::MARK_PARAGRAPH_STYLE, value)?;
       }
       Ok(MutationReport {
         content_cells: vec![*cell_id],
@@ -461,7 +473,9 @@ pub fn execute_intent(doc: &LoroDoc, board: &FlowBoardProjection, intent: &FlowI
     },
     FlowIntent::AddAnnotation { stroke } => {
       board.sheet(stroke.sheet_id).context("unknown sheet")?;
-      annotations_map(doc).insert(&stroke.id.to_string(), postcard::to_allocvec(stroke)?)?;
+      // A11: versioned framing — postcard alone strands old ink on any
+      // struct evolution.
+      annotations_map(doc).insert(&stroke.id.to_string(), crate::projection::encode_stroke(stroke)?)?;
       Ok(MutationReport::default())
     },
     FlowIntent::DeleteAnnotation {
@@ -477,14 +491,14 @@ pub fn execute_intent(doc: &LoroDoc, board: &FlowBoardProjection, intent: &FlowI
       // I-S2 hardening: an UNDECODABLE stroke must not be immortal — the old
       // `?` made corrupt blobs undeletable while the materializer silently
       // skipped them (invisible AND unremovable).
-      match postcard::from_bytes::<crate::projection::AnnotationStroke>(&bytes) {
-        Ok(stroke) => {
+      match crate::projection::decode_stroke(&bytes) {
+        Some(stroke) => {
           if stroke.sheet_id != *sheet_id || &stroke.originator != originator {
             bail!("annotation {stroke_id} does not match sheet/originator");
           }
         },
-        Err(error) => {
-          tracing::warn!(%error, stroke = %stroke_id, "deleting undecodable annotation blob");
+        None => {
+          tracing::warn!(stroke = %stroke_id, "deleting undecodable annotation blob");
         },
       }
       map.delete(&key)?;
@@ -493,6 +507,54 @@ pub fn execute_intent(doc: &LoroDoc, board: &FlowBoardProjection, intent: &FlowI
     FlowIntent::ClearAnnotations { scope, originator } => {
       clear_annotations(doc, scope, originator)?;
       Ok(MutationReport::default())
+    },
+    // E10: one LWW write per field — trims to keep "unset" = empty.
+    FlowIntent::SetRoundField { field, value } => {
+      let meta = doc.get_map(loro_schema::META_MAP);
+      meta.insert(field.key(), value.trim())?;
+      Ok(MutationReport::default())
+    },
+    // Q-21/F2: provenance blob, LWW on the cell record.
+    FlowIntent::SetCellSource { sheet_id, cell_id, source } => {
+      let sheet = board.sheet(*sheet_id).context("unknown sheet")?;
+      if sheet.find_cell(*cell_id).is_none() {
+        bail!("unknown cell {cell_id}");
+      }
+      let record = cell_record(doc, *cell_id).context("unknown cell record")?;
+      match source {
+        Some(source) => {
+          record.insert("source", postcard::to_allocvec(source)?)?;
+        },
+        None => {
+          if record.get("source").is_some() {
+            record.delete("source")?;
+          }
+        },
+      }
+      Ok(MutationReport::default())
+    },
+    // F5: the cell record's sheet/row/column rewrite IN PLACE — same id, so
+    // comments and per-cell history stay attached across the move.
+    FlowIntent::MoveCellToSheet {
+      from_sheet,
+      cell_id,
+      to_sheet,
+      row_id,
+      column_id,
+    } => {
+      let source = board.sheet(*from_sheet).context("unknown source sheet")?;
+      if source.find_cell(*cell_id).is_none() {
+        bail!("cell {cell_id} is not on the source sheet");
+      }
+      let target = board.sheet(*to_sheet).context("unknown target sheet")?;
+      resolve_empty_slot(target, *row_id, *column_id, None)?;
+      let record = cell_record(doc, *cell_id).context("unknown cell record")?;
+      record.insert("sheet_id", to_sheet.to_string())?;
+      record.insert("row_id", row_id.to_string())?;
+      record.insert("column_id", column_id.to_string())?;
+      Ok(MutationReport {
+        content_cells: vec![*cell_id],
+      })
     },
     FlowIntent::CellText { .. } => {
       bail!("cell text intents execute only through the gated flow runtime");
@@ -545,7 +607,7 @@ fn clear_annotations(doc: &LoroDoc, scope: &AnnotationScope, originator: &Annota
   let map = annotations_map(doc);
   for key in loro_schema::map_keys(&map) {
     let Some(bytes) = map_binary(&map, &key) else { continue };
-    let Ok(stroke) = postcard::from_bytes::<crate::projection::AnnotationStroke>(&bytes) else {
+    let Some(stroke) = crate::projection::decode_stroke(&bytes) else {
       continue;
     };
     if &stroke.originator != originator {

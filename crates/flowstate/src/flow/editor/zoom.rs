@@ -13,9 +13,17 @@ impl FlowEditor {
   }
 
   pub fn set_board_zoom(&mut self, zoom: f32, cx: &mut gpui::Context<Self>) {
-    let percent = ((zoom * 100.0 / ZOOM_STEP_PERCENT).round() * ZOOM_STEP_PERCENT).clamp(MIN_ZOOM_PERCENT, MAX_ZOOM_PERCENT);
+    let requested = (zoom * 100.0 / ZOOM_STEP_PERCENT).round() * ZOOM_STEP_PERCENT;
+    let percent = requested.clamp(MIN_ZOOM_PERCENT, MAX_ZOOM_PERCENT);
     let zoom = percent / 100.0;
     if (self.board_zoom - zoom).abs() < f32::EPSILON {
+      // Already pinned to this level. If the user asked to push PAST a rail,
+      // say why the key did nothing (a dead key at the rail is a defect).
+      if requested > MAX_ZOOM_PERCENT + f32::EPSILON {
+        self.refuse(format!("already at maximum zoom ({MAX_ZOOM_PERCENT:.0}%)"), None, cx);
+      } else if requested < MIN_ZOOM_PERCENT - f32::EPSILON {
+        self.refuse(format!("already at minimum zoom ({MIN_ZOOM_PERCENT:.0}%)"), None, cx);
+      }
       return;
     }
     if !self.camera_apply_pending
@@ -104,6 +112,65 @@ impl FlowEditor {
     self.set_zoom_percent(self.zoom_percent() - ZOOM_STEP_PERCENT, cx);
   }
 
+  /// D10: the camera center for session persistence — the live scroll-derived
+  /// center when the viewport has laid out, else whatever camera is pending.
+  pub fn camera_center_for_session(&self) -> Option<(f32, f32)> {
+    let viewport = self.board_scroll.bounds().size;
+    if viewport.width > px(1.0) && viewport.height > px(1.0) {
+      let center = camera_center_for_offset(self.board_scroll.offset(), viewport, self.board_zoom);
+      return Some((center.x, center.y));
+    }
+    self.camera_center.map(|center| (center.x, center.y))
+  }
+
+  /// D10: reopen a flow exactly where it was left — zoom, camera, cursor.
+  /// Called after `restore_ui_state` (the sheet must be active first).
+  pub fn restore_view_state(
+    &mut self,
+    zoom: Option<f32>,
+    camera: Option<(f32, f32)>,
+    cursor: Option<(usize, usize)>,
+    cx: &mut gpui::Context<Self>,
+  ) {
+    if let Some(zoom) = zoom {
+      self.board_zoom = zoom.clamp(MIN_ZOOM_PERCENT / 100.0, MAX_ZOOM_PERCENT / 100.0);
+    }
+    if let Some((x, y)) = camera {
+      self.camera_center = Some(BoardPoint { x, y });
+      self.camera_apply_pending = true;
+    }
+    if let Some((row, column)) = cursor {
+      self.set_cursor(row, column, cx);
+    }
+    cx.notify();
+  }
+
+  /// B5: Ctrl+wheel zooms on the 5% rail, anchored at the POINTER — the board
+  /// point under the cursor stays under the cursor instead of the viewport
+  /// center drifting.
+  pub(super) fn zoom_wheel(&mut self, position: Point<Pixels>, zoom_in: bool, cx: &mut gpui::Context<Self>) {
+    let bounds = self.board_scroll.bounds();
+    let local = point(position.x - bounds.origin.x, position.y - bounds.origin.y);
+    let offset = self.board_scroll.offset();
+    let old_zoom = self.board_zoom;
+    let anchor_x = (-offset.x.as_f32() + local.x.as_f32()) / old_zoom;
+    let anchor_y = (-offset.y.as_f32() + local.y.as_f32()) / old_zoom;
+    let step = if zoom_in { ZOOM_STEP_PERCENT } else { -ZOOM_STEP_PERCENT };
+    self.set_zoom_percent(self.zoom_percent() + step, cx);
+    if (self.board_zoom - old_zoom).abs() < f32::EPSILON {
+      return; // at a rail — set_board_zoom already refused with words
+    }
+    let new_offset = point(
+      px(-(anchor_x * self.board_zoom - local.x.as_f32())),
+      px(-(anchor_y * self.board_zoom - local.y.as_f32())),
+    );
+    self
+      .board_scroll
+      .set_offset(clamp_scroll_offset(new_offset, self.board_scroll.max_offset()));
+    self.camera_apply_pending = false;
+    self.sync_camera_center_from_scroll();
+    cx.notify();
+  }
 }
 
 fn camera_center_for_offset(offset: Point<Pixels>, viewport: Size<Pixels>, zoom: f32) -> BoardPoint {

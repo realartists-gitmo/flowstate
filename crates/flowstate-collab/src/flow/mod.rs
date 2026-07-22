@@ -16,6 +16,6 @@ mod tests;
 pub use cell_authority::FlowCellAuthority;
 pub use flow_io::{FlowIoHandle, FlowIoRequest};
 pub use handle::{FlowDocHandle, FlowWriteRejected};
-pub use runtime::{FlowLocalOutcome, FlowPublishEvent, FlowRuntime, FlowStreamItem};
+pub use runtime::{FlowBoardDelta, FlowLocalOutcome, FlowPublishEvent, FlowRuntime, FlowStreamItem};
 
 pub use crate::local_write::WriteGate;

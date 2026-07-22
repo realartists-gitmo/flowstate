@@ -61,6 +61,31 @@ pub struct AnnotationStroke {
   pub bbox: StrokeRect,
 }
 
+/// A11: the stroke blob's leading version byte. Postcard is not
+/// self-describing, so without this byte ANY evolution of `AnnotationStroke`
+/// silently strands every stroke ever written. Bump on struct change and
+/// branch in `decode_stroke`.
+pub const STROKE_BLOB_VERSION: u8 = 1;
+
+/// Encode a stroke for the `flow.annotations` map: version byte + postcard.
+pub fn encode_stroke(stroke: &AnnotationStroke) -> Result<Vec<u8>, postcard::Error> {
+  let mut bytes = vec![STROKE_BLOB_VERSION];
+  bytes.extend(postcard::to_allocvec(stroke)?);
+  Ok(bytes)
+}
+
+/// Decode a stroke blob. Tries the versioned framing first; falls back to the
+/// pre-version raw-postcard framing (dev-era files — nothing shipped) so no
+/// existing ink is stranded. `None` = undecodable; callers warn-and-skip.
+pub fn decode_stroke(bytes: &[u8]) -> Option<AnnotationStroke> {
+  if let Some((&STROKE_BLOB_VERSION, rest)) = bytes.split_first()
+    && let Ok(stroke) = postcard::from_bytes::<AnnotationStroke>(rest)
+  {
+    return Some(stroke);
+  }
+  postcard::from_bytes::<AnnotationStroke>(bytes).ok()
+}
+
 /// Cached, cheap read model of a cell's rich text — derived from the cell's
 /// materialized `DocumentProjection` whenever the cell's flow changes, and
 /// shared by `Arc` so board-projection clones are metadata-priced.
@@ -94,6 +119,20 @@ pub struct Cell {
   pub row_id: RowId,
   pub column_id: ColumnId,
   pub summary: CellSummary,
+  /// Q-21/F2: where this card came from, when it was dropped in from a
+  /// document or the tub — enough to jump back to the evidence.
+  pub source: Option<CellSource>,
+}
+
+/// Q-21/F2: a flowed card's provenance. LWW blob on the cell record.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CellSource {
+  /// The source document's path (a .db8, usually).
+  pub path: String,
+  /// The tub search-unit id, when the drop came from search.
+  pub unit: Option<String>,
+  /// An encoded durable cursor into the source document, when known.
+  pub cursor: Option<Vec<u8>>,
 }
 
 /// A sheet column as materialized (per-sheet records seeded from the sheet
@@ -191,6 +230,20 @@ impl Sheet {
 pub struct FlowBoardProjection {
   pub format: FlowFormat,
   pub sheets: Vec<Sheet>,
+  /// E10: round identity from `flow.meta` (LWW per field).
+  pub round: RoundMetadata,
+}
+
+/// A cheap, stable drift signature for a board — a soak/self-check tripwire so
+/// "live incremental board == fresh full rematerialization" reduces to a `u64`
+/// compare (see the flow fidelity hook). Hashes the deterministic `Debug`
+/// rendering, which sidesteps the `f32` fields that block a derived `Hash`.
+#[must_use]
+pub fn board_hash(board: &FlowBoardProjection) -> u64 {
+  use std::hash::{Hash as _, Hasher as _};
+  let mut hasher = std::collections::hash_map::DefaultHasher::new();
+  format!("{board:?}").hash(&mut hasher);
+  hasher.finish()
 }
 
 impl Default for FlowBoardProjection {
@@ -198,7 +251,47 @@ impl Default for FlowBoardProjection {
     Self {
       format: FlowFormat::policy_debate(),
       sheets: Vec::new(),
+      round: RoundMetadata::default(),
     }
+  }
+}
+
+/// E10: the round's identity — "round 3 vs Northwestern, judge X, we won" —
+/// six LWW string fields under `flow.meta`. Empty string = unset.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RoundMetadata {
+  pub tournament: String,
+  pub round: String,
+  pub opponent: String,
+  pub judge: String,
+  pub side: String,
+  pub result: String,
+}
+
+impl RoundMetadata {
+  pub fn is_empty(&self) -> bool {
+    self.tournament.is_empty()
+      && self.round.is_empty()
+      && self.opponent.is_empty()
+      && self.judge.is_empty()
+      && self.side.is_empty()
+      && self.result.is_empty()
+  }
+
+  /// A compact one-line identity for tab titles and recents:
+  /// "Aldrich R3 vs Northwestern".
+  pub fn summary(&self) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if !self.tournament.is_empty() {
+      parts.push(self.tournament.clone());
+    }
+    if !self.round.is_empty() {
+      parts.push(format!("R{}", self.round.trim_start_matches(['r', 'R'])));
+    }
+    if !self.opponent.is_empty() {
+      parts.push(format!("vs {}", self.opponent));
+    }
+    (!parts.is_empty()).then(|| parts.join(" "))
   }
 }
 

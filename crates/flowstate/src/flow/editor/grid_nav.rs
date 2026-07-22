@@ -41,6 +41,7 @@ impl FlowEditor {
       message,
       cell,
       at: std::time::Instant::now(),
+      toasted: false,
     });
     cx.notify();
   }
@@ -71,6 +72,13 @@ impl FlowEditor {
     let column_ix = column_ix.min(columns - 1);
     let occupant = sheet.slot(row_ix, column_ix).map(|cell| cell.id);
     self.cursor = Some((row_ix, column_ix));
+    // A plain cursor move COLLAPSES any multi-cell selection and re-anchors
+    // here (Excel). Without this, `selected_cells` outlives the move, and a
+    // following Delete/Cut/Copy (which read `operation_set`) or Shift+Arrow
+    // would silently act on the stale rectangle the cursor already left.
+    self.selected_cells.clear();
+    self.clear_selection_shape();
+    self.selection_anchor = Some((row_ix, column_ix));
     match occupant {
       Some(cell) => self.activate_cell(cell, cx),
       None => {
@@ -80,6 +88,8 @@ impl FlowEditor {
         cx.notify();
       },
     }
+    // G2: peers track the SLOT, not just cell activations.
+    cx.emit(super::FlowEditorEvent::PresenceShifted);
     // No auto-scroll here: a mouse click must not snap the viewport. Keyboard
     // navigation calls `scroll_cursor_into_view` itself.
   }
@@ -188,7 +198,7 @@ impl FlowEditor {
     let existing_row = sheet.rows.get(row_ix).map(|row| row.id);
     let grouped = needs_rows > 0;
     if grouped {
-      let _ = self.handle.undo_group_start();
+      self.begin_bulk();
     }
     let row_id = match existing_row {
       Some(row_id) => Some(row_id),
@@ -208,7 +218,7 @@ impl FlowEditor {
         .is_ok()
     });
     if grouped {
-      let _ = self.handle.undo_group_end();
+      self.end_bulk("edit", cx);
     }
     if moved {
       self.changed(Some(cell_id), cx);
@@ -282,7 +292,7 @@ impl FlowEditor {
     }
 
     let needs_rows = (max_row + 1).saturating_sub(sheet.rows.len());
-    let _ = self.handle.undo_group_start();
+    self.begin_bulk();
     if needs_rows > 0 {
       self.materialize_rows(sheet_id, needs_rows, cx);
     }
@@ -302,7 +312,7 @@ impl FlowEditor {
         .apply_intent(&FlowIntent::SetCellAddresses { sheet_id, placements }, cx)
         .is_ok();
     }
-    let _ = self.handle.undo_group_end();
+    self.end_bulk("edit", cx);
     if moved {
       self.changed(Some(dragged), cx);
       self.cursor = Some((target_row, target_column));
@@ -346,7 +356,7 @@ impl FlowEditor {
     let existing_row = sheet.rows.get(row_ix).map(|row| row.id);
     let grouped = needs_rows > 0;
     if grouped {
-      let _ = self.handle.undo_group_start();
+      self.begin_bulk();
     }
     let row_id = match existing_row {
       Some(row_id) => Some(row_id),
@@ -368,7 +378,7 @@ impl FlowEditor {
         .is_ok()
     });
     if grouped {
-      let _ = self.handle.undo_group_end();
+      self.end_bulk("edit", cx);
     }
     if !added {
       return None;
@@ -417,7 +427,7 @@ impl FlowEditor {
     let row_id = uuid::Uuid::new_v4();
     let column_id = sheet.columns.get(column_ix).map(|column| column.id);
     let Some(column_id) = column_id else { return };
-    let _ = self.handle.undo_group_start();
+    self.begin_bulk();
     let inserted = self
       .apply_intent(
         &FlowIntent::InsertRows {
@@ -442,7 +452,7 @@ impl FlowEditor {
           cx,
         )
         .is_ok();
-    let _ = self.handle.undo_group_end();
+    self.end_bulk("edit", cx);
     if added {
       self.cursor = Some((new_row_ix, column_ix));
       self.ensure_cell_editor(cell_id, cx);
@@ -512,6 +522,36 @@ impl FlowEditor {
   pub fn tab_navigate(&mut self, reverse: bool, cx: &mut Context<Self>) {
     if self.tab_anchor_column.is_none() {
       self.tab_anchor_column = self.cursor.map(|(_, column)| column);
+    }
+    let last_column = match self.active_sheet_ref() {
+      Some(sheet) if !sheet.columns.is_empty() => sheet.columns.len() - 1,
+      _ => {
+        self.navigate(if reverse { GridDirection::Left } else { GridDirection::Right }, cx);
+        return;
+      },
+    };
+    let Some((row, column)) = self.cursor else {
+      self.navigate(if reverse { GridDirection::Left } else { GridDirection::Right }, cx);
+      return;
+    };
+    // Excel: Tab past the last column WRAPS to the next row at the Tab run's
+    // start column; Shift+Tab past the first column wraps up to the last
+    // column — never a silent dead-end at the row's edge.
+    if !reverse && column >= last_column {
+      let anchor = self.tab_anchor_column.unwrap_or(0).min(last_column);
+      self.set_cursor(row + 1, anchor, cx);
+      self.scroll_cursor_into_view();
+      return;
+    }
+    if reverse && column == 0 {
+      match row.checked_sub(1) {
+        Some(prev) => {
+          self.set_cursor(prev, last_column, cx);
+          self.scroll_cursor_into_view();
+        },
+        None => self.refuse("already at the first cell", self.active_cell, cx),
+      }
+      return;
     }
     self.navigate(if reverse { GridDirection::Left } else { GridDirection::Right }, cx);
   }
@@ -654,6 +694,8 @@ impl FlowEditor {
   /// Ctrl+Arrow: jump to the data-block edge. `extend` = Ctrl+Shift+Arrow.
   pub fn jump_to_edge(&mut self, direction: GridDirection, extend: bool, cx: &mut Context<Self>) {
     let Some((row, col)) = self.edge_target(direction) else {
+      // A5: a dead keypress must speak.
+      self.refuse("place the cursor on the grid first", None, cx);
       return;
     };
     if extend {
@@ -688,7 +730,11 @@ impl FlowEditor {
 
   /// Home / End / Ctrl+Home / Ctrl+End.
   pub fn cursor_to_extreme(&mut self, key: &str, ctrl: bool, cx: &mut Context<Self>) {
-    let Some((row, _col)) = self.cursor else { return };
+    let Some((row, _col)) = self.cursor else {
+      // A5: a dead keypress must speak.
+      self.refuse("place the cursor on the grid first", None, cx);
+      return;
+    };
     let (r, c) = match (key, ctrl) {
       ("home", true) => (0, 0),
       ("end", true) => self.used_extent(),
@@ -729,12 +775,16 @@ impl FlowEditor {
   /// Ctrl+Space (and the column-header click): select every cell in a column.
   pub fn select_column(&mut self, column_ix: usize, cx: &mut Context<Self>) {
     let Some(sheet) = self.active_sheet_ref() else { return };
+    let rows = sheet.rows.len();
     let set: std::collections::HashSet<CellId> = sheet
       .rows
       .iter()
       .filter_map(|row| row.cells.get(column_ix).and_then(|slot| slot.as_ref()).map(|cell| cell.id))
       .collect();
     self.selected_cells = set;
+    self.selection_rect = (rows > 0).then_some((0, column_ix, rows - 1, column_ix));
+    self.selected_column_band = Some((column_ix, column_ix));
+    self.selected_row_band = None;
     let row = self.cursor.map(|(row, _)| row).unwrap_or(0);
     self.cursor = Some((row, column_ix));
     self.selection_anchor = Some((row, column_ix));
@@ -745,12 +795,16 @@ impl FlowEditor {
   pub fn select_column_span(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
     let (c0, c1) = (from.min(to), from.max(to));
     let Some(sheet) = self.active_sheet_ref() else { return };
+    let rows = sheet.rows.len();
     let set: std::collections::HashSet<CellId> = sheet
       .rows
       .iter()
       .flat_map(|row| (c0..=c1).filter_map(|c| row.cells.get(c).and_then(|slot| slot.as_ref()).map(|cell| cell.id)))
       .collect();
     self.selected_cells = set;
+    self.selection_rect = (rows > 0).then_some((0, c0, rows - 1, c1));
+    self.selected_column_band = Some((c0, c1));
+    self.selected_row_band = None;
     cx.notify();
   }
 
@@ -763,6 +817,7 @@ impl FlowEditor {
       .filter_map(|row| row.cells.get(column_ix).and_then(|slot| slot.as_ref()).map(|cell| cell.id))
       .collect();
     self.selected_cells.extend(ids);
+    self.clear_selection_shape();
     self.selection_anchor = Some((0, column_ix));
     cx.notify();
   }
@@ -771,11 +826,15 @@ impl FlowEditor {
   pub fn select_row_span(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
     let (r0, r1) = (from.min(to), from.max(to));
     let Some(sheet) = self.active_sheet_ref() else { return };
+    let columns = sheet.columns.len();
     let set: std::collections::HashSet<CellId> = (r0..=r1)
       .filter_map(|r| sheet.rows.get(r))
       .flat_map(|row| row.cells.iter().filter_map(|slot| slot.as_ref().map(|cell| cell.id)))
       .collect();
     self.selected_cells = set;
+    self.selection_rect = (columns > 0).then_some((r0, 0, r1, columns - 1));
+    self.selected_row_band = Some((r0, r1));
+    self.selected_column_band = None;
     self.cursor = Some((r1, 0));
     cx.notify();
   }
@@ -790,6 +849,7 @@ impl FlowEditor {
       .flat_map(|row| row.cells.iter().filter_map(|slot| slot.as_ref().map(|cell| cell.id)))
       .collect();
     self.selected_cells.extend(ids);
+    self.clear_selection_shape();
     self.selection_anchor = Some((row_ix, 0));
     cx.notify();
   }
@@ -797,12 +857,16 @@ impl FlowEditor {
   /// Ctrl+A (and the top-left corner box): select every cell in the sheet.
   pub fn select_all(&mut self, cx: &mut Context<Self>) {
     let Some(sheet) = self.active_sheet_ref() else { return };
+    let (rows, columns) = (sheet.rows.len(), sheet.columns.len());
     let set: std::collections::HashSet<CellId> = sheet
       .rows
       .iter()
       .flat_map(|row| row.cells.iter().filter_map(|slot| slot.as_ref().map(|cell| cell.id)))
       .collect();
     self.selected_cells = set;
+    self.selection_rect = (rows > 0 && columns > 0).then_some((0, 0, rows - 1, columns - 1));
+    self.selected_row_band = None;
+    self.selected_column_band = None;
     cx.notify();
   }
 
@@ -810,12 +874,21 @@ impl FlowEditor {
   /// caret at the end (the keyboard twin of a single click).
   pub fn edit_cursor_cell(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) {
     let Some((row_ix, column_ix)) = self.cursor else { return };
-    let Some(cell_id) = self.active_sheet_ref().and_then(|sheet| sheet.slot(row_ix, column_ix)).map(|cell| cell.id) else {
-      return;
-    };
-    self.activate_cell(cell_id, cx);
-    self.ensure_cell_editor(cell_id, cx);
-    self.focus_active_cell(window, cx);
+    match self.active_sheet_ref().and_then(|sheet| sheet.slot(row_ix, column_ix)).map(|cell| cell.id) {
+      Some(cell_id) => {
+        self.activate_cell(cell_id, cx);
+        self.ensure_cell_editor(cell_id, cx);
+        self.focus_active_cell(window, cx);
+      },
+      // Excel: F2 on a BLANK slot enters edit mode on a fresh empty cell —
+      // never a silent no-op inconsistent with an occupied cell.
+      None => {
+        if let Some(cell_id) = self.add_cell_at_slot(row_ix, column_ix, CellSeed::Empty, cx) {
+          self.activate_cell(cell_id, cx);
+          self.focus_active_cell(window, cx);
+        }
+      },
+    }
   }
 
   /// Type-to-overwrite (Excel): a printable key on an occupied cell REPLACES
@@ -835,10 +908,10 @@ impl FlowEditor {
             styles: flowstate_document::RunStyles::default(),
           }],
         }]);
-        let _ = self.handle.undo_group_start();
+        self.begin_bulk();
         let _ = self.apply_intent(&FlowIntent::DeleteCell { sheet_id, cell_id }, cx);
         let created = self.add_cell_at_slot(row_ix, column_ix, seed, cx);
-        let _ = self.handle.undo_group_end();
+        self.end_bulk("edit", cx);
         created
       },
     }

@@ -21,7 +21,7 @@ fn split_number(text: &str) -> Option<(String, i64, String)> {
 /// Extend `sources` by `beyond` more values: continue an arithmetic series when
 /// the sources share a prefix/suffix and step by a constant (`1, 2, 3…` or
 /// `1AC, 2AC…`), otherwise tile the block (Excel drag-fill).
-fn series_or_tile(sources: &[String], beyond: usize) -> Vec<String> {
+pub(super) fn series_or_tile(sources: &[String], beyond: usize) -> Vec<String> {
   if let Some(parsed) = sources.iter().map(|s| split_number(s)).collect::<Option<Vec<_>>>()
     && parsed.len() >= 2
     && parsed.windows(2).all(|w| w[0].0 == w[1].0 && w[0].2 == w[1].2)
@@ -37,10 +37,12 @@ fn series_or_tile(sources: &[String], beyond: usize) -> Vec<String> {
 }
 
 impl FlowEditor {
-  /// Ctrl+C: copy the selection (or the cursor's cell) to the clipboard as TSV.
+  /// Ctrl+C: copy the selection (or the cursor's cell) to the clipboard as TSV
+  /// — and capture the rich twin internally (D11) so an intra-app paste keeps
+  /// styles instead of flattening to plain tags.
   pub fn copy_selection(&mut self, cx: &mut Context<Self>) {
     self.cut_pending = None;
-    if let Some(tsv) = self.selection_tsv() {
+    if let Some(tsv) = self.capture_selection() {
       cx.write_to_clipboard(ClipboardItem::new_string(tsv));
     }
   }
@@ -49,9 +51,64 @@ impl FlowEditor {
   /// (Excel cut).
   pub fn cut_selection(&mut self, cx: &mut Context<Self>) {
     let Some(sheet_id) = self.active_sheet else { return };
-    let Some(tsv) = self.selection_tsv() else { return };
+    let Some(tsv) = self.capture_selection() else { return };
     cx.write_to_clipboard(ClipboardItem::new_string(tsv));
-    self.cut_pending = Some(self.operation_set(sheet_id));
+    // The home sheet rides along so a paste on ANOTHER sheet still deletes the
+    // sources where they live (a cut is a move, not a copy — A1).
+    self.cut_pending = Some((sheet_id, self.operation_set(sheet_id), std::time::Instant::now()));
+  }
+
+  /// D11: build the TSV AND the rich paragraph grid for the same selection,
+  /// stashing the rich twin keyed by the TSV fingerprint.
+  fn capture_selection(&mut self) -> Option<String> {
+    let tsv = self.selection_tsv()?;
+    let rich = self.selection_rich_grid();
+    self.internal_clipboard = rich.map(|grid| (tsv.clone(), grid));
+    Some(tsv)
+  }
+
+  /// The selection's cells as full paragraph seeds, tiled over the bounding
+  /// rectangle (`None` = empty slot), in the same geometry as the TSV.
+  fn selection_rich_grid(&self) -> Option<Vec<Vec<Option<Vec<flowstate_document::InputParagraph>>>>> {
+    let sheet_id = self.active_sheet?;
+    let sheet = self.active_sheet_ref()?;
+    let cells: Vec<((usize, usize), CellId)> = self
+      .operation_set(sheet_id)
+      .into_iter()
+      .filter_map(|id| sheet.cell_position(id).map(|position| (position, id)))
+      .collect();
+    if cells.is_empty() {
+      return None;
+    }
+    let min_row = cells.iter().map(|((row, _), _)| *row).min()?;
+    let min_col = cells.iter().map(|((_, col), _)| *col).min()?;
+    let max_row = cells.iter().map(|((row, _), _)| *row).max()?;
+    let max_col = cells.iter().map(|((_, col), _)| *col).max()?;
+    let mut grid: Vec<Vec<Option<Vec<flowstate_document::InputParagraph>>>> =
+      vec![vec![None; max_col - min_col + 1]; max_row - min_row + 1];
+    for ((row, col), id) in cells {
+      grid[row - min_row][col - min_col] = self.cell_paragraph_seed(id);
+    }
+    Some(grid)
+  }
+
+  /// One cell's full content as `InputParagraph`s (the same shape `CellSeed::
+  /// Paragraphs` takes), via the editor's rich-fragment machinery.
+  fn cell_paragraph_seed(&self, cell_id: CellId) -> Option<Vec<flowstate_document::InputParagraph>> {
+    let document = self.cell_document(cell_id)?;
+    if document.paragraphs.is_empty() {
+      return Some(Vec::new());
+    }
+    let last = document.paragraphs.len() - 1;
+    let end_byte = flowstate_document::paragraph_text_len(&document.paragraphs[last]);
+    let fragment = flowstate_document::selected_rich_fragment(
+      &document,
+      flowstate_document::DocumentOffset { paragraph: 0, byte: 0 }..flowstate_document::DocumentOffset {
+        paragraph: last,
+        byte: end_byte,
+      },
+    );
+    Some(fragment.paragraphs)
   }
 
   /// The selection as a TSV grid, tiled over its bounding rectangle (gaps are
@@ -94,8 +151,11 @@ impl FlowEditor {
   /// Occupied targets are overwritten; blanks in the grid are skipped. A cut's
   /// source cells are removed first (the move). One undo group.
   pub fn paste(&mut self, cx: &mut Context<Self>) {
-    let Some(item) = cx.read_from_clipboard() else { return };
-    let Some(text) = item.text() else { return };
+    let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+      // A5: an empty clipboard is a dead keypress unless it speaks.
+      self.refuse("the clipboard has no text to paste", None, cx);
+      return;
+    };
     let grid: Vec<Vec<String>> = text
       .replace("\r\n", "\n")
       .trim_end_matches('\n')
@@ -103,38 +163,85 @@ impl FlowEditor {
       .map(|line| line.split('\t').map(|cell| cell.to_string()).collect())
       .collect();
     if grid.is_empty() {
+      self.refuse("the clipboard has no text to paste", None, cx);
       return;
     }
     let Some(sheet_id) = self.active_sheet else { return };
     let (anchor_row, anchor_col) = self.cursor.unwrap_or((0, 0));
     let max_row = anchor_row + grid.len().saturating_sub(1);
     let cut = self.cut_pending.take();
+    // D11: when the system clipboard still holds OUR copy (fingerprint match),
+    // paste the rich paragraph grid instead of flattened plain text.
+    let rich_grid: Option<Vec<Vec<Option<Vec<flowstate_document::InputParagraph>>>>> = self
+      .internal_clipboard
+      .as_ref()
+      .filter(|(fingerprint, _)| *fingerprint == text.replace("\r\n", "\n").trim_end_matches('\n'))
+      .map(|(_, grid)| grid.clone());
 
-    let _ = self.handle.undo_group_start();
+    self.begin_bulk();
     let existing = self.active_sheet_ref().map(|sheet| sheet.rows.len()).unwrap_or(0);
     let needed = (max_row + 1).saturating_sub(existing);
     if needed > 0 {
       self.materialize_rows(sheet_id, needed, cx);
     }
     // Clear the cut's origin cells before placing (a move that overlaps its own
-    // source re-creates the overlap fresh).
-    if let Some(sources) = &cut {
+    // source re-creates the overlap fresh). The delete targets the cut's HOME
+    // sheet — pasting on another sheet must still be a move (A1).
+    if let Some((cut_sheet, sources, _)) = &cut {
       for &cell_id in sources {
-        let _ = self.apply_intent(&FlowIntent::DeleteCell { sheet_id, cell_id }, cx);
+        let _ = self.apply_intent(
+          &FlowIntent::DeleteCell {
+            sheet_id: *cut_sheet,
+            cell_id,
+          },
+          cx,
+        );
       }
     }
     let columns = self.active_sheet_ref().map(|sheet| sheet.columns.len()).unwrap_or(0);
+    let mut clipped = 0usize;
     for (delta_row, line) in grid.iter().enumerate() {
       for (delta_col, cell_text) in line.iter().enumerate() {
         let column_ix = anchor_col + delta_col;
-        if column_ix >= columns || cell_text.is_empty() {
-          continue; // clip past the last column; blanks don't overwrite
+        if column_ix >= columns {
+          // Overflow past the last column is DROPPED — but a silent drop is a
+          // defect, so count non-empty cells and speak up after the paste.
+          if !cell_text.is_empty() {
+            clipped += 1;
+          }
+          continue;
+        }
+        // D11: prefer the rich twin when this paste is our own copy.
+        if let Some(rich_rows) = rich_grid.as_ref() {
+          let seed = rich_rows
+            .get(delta_row)
+            .and_then(|row| row.get(delta_col))
+            .cloned()
+            .flatten();
+          match seed {
+            Some(paragraphs) => {
+              self.place_cell_rich(sheet_id, anchor_row + delta_row, column_ix, paragraphs, cx);
+            },
+            None => {}, // the rich copy says this slot was empty
+          }
+          continue;
+        }
+        if cell_text.is_empty() {
+          continue; // blanks don't overwrite
         }
         self.place_cell_text(sheet_id, anchor_row + delta_row, column_ix, cell_text, cx);
       }
     }
-    let _ = self.handle.undo_group_end();
+    self.end_bulk("paste", cx);
     self.changed(None, cx);
+    if clipped > 0 {
+      let plural = if clipped == 1 { "" } else { "s" };
+      self.refuse(
+        format!("paste ran past the last column — {clipped} cell{plural} dropped (add columns first)"),
+        None,
+        cx,
+      );
+    }
   }
 
   /// Ctrl+D: fill down. A range fills its top row into the rows below; a single
@@ -143,7 +250,8 @@ impl FlowEditor {
     let Some((sheet_id, r0, c0, r1, c1)) = self.fill_bounds() else { return };
     let plan: Vec<(usize, usize, String)> = if r0 == r1 {
       if r0 == 0 {
-        return; // nothing above to pull from
+        self.refuse("no row above to fill down from", self.active_cell, cx);
+        return;
       }
       (c0..=c1)
         .filter_map(|c| self.cell_text_at(r0 - 1, c).map(|text| (r0, c, text)))
@@ -163,6 +271,7 @@ impl FlowEditor {
     let Some((sheet_id, r0, c0, r1, c1)) = self.fill_bounds() else { return };
     let plan: Vec<(usize, usize, String)> = if c0 == c1 {
       if c0 == 0 {
+        self.refuse("no column to the left to fill right from", self.active_cell, cx);
         return;
       }
       (r0..=r1)
@@ -202,11 +311,17 @@ impl FlowEditor {
         }
       }
     } else {
+      // Dragging the handle up or left fills nothing — say so rather than
+      // snapping back in silence.
+      self.refuse("the fill handle only fills down or right", self.active_cell, cx);
       return;
     }
     let plan: Vec<_> = plan.into_iter().filter(|(_, _, text)| !text.is_empty()).collect();
-    let Some(max_row) = plan.iter().map(|(row, _, _)| *row).max() else { return };
-    let _ = self.handle.undo_group_start();
+    let Some(max_row) = plan.iter().map(|(row, _, _)| *row).max() else {
+      self.refuse("nothing to fill — the source cells are empty", self.active_cell, cx);
+      return;
+    };
+    self.begin_bulk();
     let existing = self.active_sheet_ref().map(|sheet| sheet.rows.len()).unwrap_or(0);
     let needed = (max_row + 1).saturating_sub(existing);
     if needed > 0 {
@@ -215,7 +330,7 @@ impl FlowEditor {
     for (row, column, text) in plan {
       self.place_cell_text(sheet_id, row, column, &text, cx);
     }
-    let _ = self.handle.undo_group_end();
+    self.end_bulk("fill", cx);
     self.changed(None, cx);
   }
 
@@ -223,13 +338,14 @@ impl FlowEditor {
   fn apply_fill(&mut self, sheet_id: flowstate_flow::SheetId, plan: Vec<(usize, usize, String)>, cx: &mut Context<Self>) {
     let plan: Vec<_> = plan.into_iter().filter(|(_, _, text)| !text.is_empty()).collect();
     if plan.is_empty() {
+      self.refuse("nothing to fill — the source cells are empty", self.active_cell, cx);
       return;
     }
-    let _ = self.handle.undo_group_start();
+    self.begin_bulk();
     for (row, col, text) in plan {
       self.place_cell_text(sheet_id, row, col, &text, cx);
     }
-    let _ = self.handle.undo_group_end();
+    self.end_bulk("fill", cx);
     self.changed(None, cx);
   }
 
@@ -252,9 +368,46 @@ impl FlowEditor {
   }
 
   /// The plain-text content of the cell at a slot, if occupied.
-  fn cell_text_at(&self, row_ix: usize, column_ix: usize) -> Option<String> {
+  pub(super) fn cell_text_at(&self, row_ix: usize, column_ix: usize) -> Option<String> {
     let sheet = self.active_sheet_ref()?;
     sheet.slot(row_ix, column_ix).map(|cell| cell.summary.summary_text.to_string())
+  }
+
+  /// D11: overwrite (or create) the cell at a slot with FULL paragraph seeds
+  /// — the lossless intra-app paste.
+  fn place_cell_rich(
+    &mut self,
+    sheet_id: flowstate_flow::SheetId,
+    row_ix: usize,
+    column_ix: usize,
+    paragraphs: Vec<flowstate_document::InputParagraph>,
+    cx: &mut Context<Self>,
+  ) {
+    let (column_id, row_id, occupant) = {
+      let Some(sheet) = self.active_sheet_ref() else { return };
+      let Some(column_id) = sheet.columns.get(column_ix).map(|column| column.id) else { return };
+      let Some(row_id) = sheet.rows.get(row_ix).map(|row| row.id) else { return };
+      (column_id, row_id, sheet.slot(row_ix, column_ix).map(|cell| cell.id))
+    };
+    if let Some(cell_id) = occupant {
+      let _ = self.apply_intent(&FlowIntent::DeleteCell { sheet_id, cell_id }, cx);
+    }
+    let seed = if paragraphs.is_empty() {
+      CellSeed::Empty
+    } else {
+      CellSeed::Paragraphs(paragraphs)
+    };
+    let cell_id: CellId = uuid::Uuid::new_v4();
+    let _ = self.apply_intent(
+      &FlowIntent::AddCell {
+        sheet_id,
+        cell_id,
+        row_id,
+        column_id,
+        seed,
+      },
+      cx,
+    );
   }
 
   /// Overwrite (or create) the cell at a slot with plain text. The row must

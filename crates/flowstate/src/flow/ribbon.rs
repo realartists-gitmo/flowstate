@@ -60,6 +60,9 @@ impl Render for FlowRibbon {
     let clear_all_editor = self.editor.clone();
     let has_active_sheet = self.editor.read(cx).active_sheet().is_some();
     let has_active_cell = self.editor.read(cx).active_cell().is_some();
+    // A9: header/gutter selections fill the operation set while `active_cell`
+    // stays None — cell verbs gate on the SET, not the active cell.
+    let has_targets = self.editor.read(cx).has_operation_targets();
     let chip = |chip: crate::ribbon::shared::RibbonChip| chip.build(cx);
     let scrubbing = self.editor.read(cx).history_scrubbing();
     let annotation_tool = self.editor.read(cx).annotation_tool();
@@ -178,11 +181,11 @@ impl Render for FlowRibbon {
           .child({
             let editor = self.editor.clone();
             chip(
-              RibbonChip::new("flow-delete-column", "Delete column", "Delete the cursor's column (asks first)")
+              RibbonChip::new("flow-delete-column", "Delete column", "Delete the cursor's column — undo brings it back")
                 .danger(true)
                 .disabled(!has_active_sheet),
             )
-            .on_click(move |_, window, cx| editor.update(cx, |editor, cx| editor.confirm_delete_cursor_column(window, cx)))
+            .on_click(move |_, _, cx| editor.update(cx, |editor, cx| editor.delete_cursor_column(cx)))
           }),
       )
       // ---- Cell ----
@@ -194,16 +197,16 @@ impl Render for FlowRibbon {
                 .icon("icons/strikethrough.svg")
                 .command_shortcut(CommandId::FlowStrike)
                 .selected(struck)
-                .disabled(!has_active_cell),
+                .disabled(!has_targets),
             )
             .on_click(move |_, _, cx| strike_editor.update(cx, |editor, cx| editor.strike_selected(cx))),
           )
           .child(
             chip(
-              RibbonChip::new("flow-delete-selected", "Delete", "Delete the selected cell and its thread")
+              RibbonChip::new("flow-delete-selected", "Delete", "Delete the selected cells")
                 .command_shortcut(CommandId::FlowDeleteSelected)
                 .danger(true)
-                .disabled(!has_active_cell),
+                .disabled(!has_targets),
             )
             .on_click(move |_, window, cx| delete_editor.update(cx, |editor, cx| editor.delete_selected(window, cx))),
           ),
@@ -220,42 +223,43 @@ impl Render for FlowRibbon {
             )
             .on_click(move |_, _, cx| marker_editor.update(cx, |editor, cx| editor.toggle_annotation_tool(AnnotationTool::Marker, cx))),
           )
-          // I-S2: the pen palette — theme-derived swatches (paper flowing is
-          // color-coded); picking one arms the marker. color_rgba was in
-          // every stroke blob all along; only hardcoded amber ever reached it.
+          // Q-8: the pen IS your collab identity color — no palette. What
+          // remains is the C11 width/opacity preset picker; picking one arms
+          // the marker (picking a pen means you want to draw).
           .child({
-            let swatches: Vec<(&'static str, gpui::Hsla)> = vec![
-              ("amber", cx.theme().warning),
-              ("red", cx.theme().danger),
-              ("blue", cx.theme().link),
-              ("green", cx.theme().success),
-              ("ink", cx.theme().foreground),
-            ];
-            let current = self.editor.read(cx).marker_color_rgba();
-            gpui::div().flex().flex_row().items_center().gap_0p5().children(swatches.into_iter().map(|(name, color)| {
-              let rgba = gpui::Rgba::from(color);
-              let color_u32 = (u32::from((rgba.r * 255.0) as u8) << 24)
-                | (u32::from((rgba.g * 255.0) as u8) << 16)
-                | (u32::from((rgba.b * 255.0) as u8) << 8)
-                | 0xff;
-              let editor = self.editor.clone();
-              gpui::div()
-                .id(gpui::SharedString::from(format!("flow-pen-{name}")))
-                .size(gpui::px(14.0))
-                .rounded_full()
-                .bg(color)
-                .border_2()
-                .border_color(if current == color_u32 {
-                  cx.theme().foreground
-                } else {
-                  cx.theme().border.opacity(0.4)
-                })
-                .cursor_pointer()
-                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                  editor.update(cx, |editor, cx| editor.set_marker_color(color_u32, cx));
-                  cx.stop_propagation();
-                })
-            }))
+            use crate::flow::PenPreset;
+            let current = self.editor.read(cx).pen_preset();
+            let pen_color = gpui::Hsla::from(gpui::rgba(self.editor.read(cx).marker_color_rgba()));
+            gpui::div().flex().flex_row().items_center().gap_0p5().children(
+              [PenPreset::Fine, PenPreset::Marker, PenPreset::Highlighter].into_iter().map(|preset| {
+                let editor = self.editor.clone();
+                let dot = 6.0 + preset.width() * 2.0;
+                gpui::div()
+                  .id(gpui::SharedString::from(format!("flow-pen-{}", preset.label())))
+                  .size(gpui::px(20.0))
+                  .flex()
+                  .items_center()
+                  .justify_center()
+                  .rounded_full()
+                  .border_2()
+                  .border_color(if current == preset {
+                    cx.theme().foreground
+                  } else {
+                    cx.theme().border.opacity(0.4)
+                  })
+                  .cursor_pointer()
+                  .child(
+                    gpui::div()
+                      .size(gpui::px(dot))
+                      .rounded_full()
+                      .bg(pen_color.opacity(preset.opacity())),
+                  )
+                  .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                    editor.update(cx, |editor, cx| editor.set_pen_preset(preset, cx));
+                    cx.stop_propagation();
+                  })
+              }),
+            )
           })
           .child(
             chip(
@@ -271,7 +275,7 @@ impl Render for FlowRibbon {
               RibbonChip::new(
                 "flow-toggle-annotations",
                 if annotations_visible { "Hide ink" } else { "Show ink" },
-                "Show or hide every stroke on the board",
+                "Show or hide ink everywhere — all sheets, remembered until you flip it back",
               )
               .command_shortcut(CommandId::FlowToggleAnnotations),
             )
@@ -288,29 +292,25 @@ impl Render for FlowRibbon {
           )
           .child(
             chip(
-              RibbonChip::new("flow-clear-all-annotations", "Clear all", "Delete your strokes on EVERY sheet (asks first)")
+              RibbonChip::new("flow-clear-all-annotations", "Clear all", "Delete your strokes on EVERY sheet — undo brings them back")
                 .command_shortcut(CommandId::FlowClearAllAnnotations)
                 .danger(true),
             )
-            .on_click(move |_, window, cx| {
-              // I-S1: the every-sheet clear confirms — it was the silent
-              // behavior hiding behind the "this sheet" label.
-              let answer = window.prompt(
-                gpui::PromptLevel::Warning,
-                "Clear your ink on every sheet?",
-                Some("Every stroke you drew, on all sheets. Undo can bring them back."),
-                &[gpui::PromptButton::ok("Clear everywhere"), gpui::PromptButton::cancel("Cancel")],
-                cx,
-              );
-              let editor = clear_all_editor.clone();
-              cx.spawn(async move |cx| {
-                if matches!(answer.await, Ok(0)) {
-                  let _ = editor.update(cx, |editor, cx| editor.clear_all_annotations(cx));
-                }
-              })
-              .detach();
-            }),
+            // P3: no confirmation dialogs anywhere — undo is the guard.
+            .on_click(move |_, _, cx| clear_all_editor.update(cx, |editor, cx| editor.clear_all_annotations(cx))),
           ),
+      )
+      // ---- Round (E10) ----
+      .child(
+        ribbon_group(true, cx).child({
+          let editor = self.editor.clone();
+          let open = self.editor.read(cx).round_form_open();
+          chip(
+            RibbonChip::new("flow-round-metadata", "Round", "Tournament, round, opponent, judge, side, result — the flow's identity")
+              .selected(open),
+          )
+          .on_click(move |_, window, cx| editor.update(cx, |editor, cx| editor.toggle_round_form(window, cx)))
+        }),
       )
       // ---- History ----
       .child(

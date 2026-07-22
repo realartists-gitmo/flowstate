@@ -1019,7 +1019,11 @@ fn clear_movable_list(list: &LoroMovableList) -> LoroResult<()> {
   list.clear()
 }
 
-fn paragraph_style_value(style: ParagraphStyle) -> i64 {
+/// The canonical `MARK_PARAGRAPH_STYLE` mark value for a paragraph style — the
+/// ONE encoding the writer and reader agree on (`Normal = 0`, `Custom(slot) =
+/// slot + 1`). Anything writing this mark MUST go through here; writing the raw
+/// slot instead is off-by-one and does not converge (caught by the flow soak).
+pub fn paragraph_style_value(style: ParagraphStyle) -> i64 {
   match style {
     ParagraphStyle::Normal => 0,
     ParagraphStyle::Custom(slot) => i64::from(slot) + 1,

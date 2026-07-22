@@ -1,19 +1,35 @@
 //! Flow architecture S5 gate, leg 1: N-peer STRUCTURAL convergence fuzz.
-//! Random adds/deletes/moves/strikes/renames/annotations race across peers
-//! with randomized pairwise sync rounds; after every full mesh sync all
-//! boards must be byte-identical, pass the validator, AND equal a fresh
-//! from-snapshot materialization (materializer equivalence).
+//! Random adds/deletes/moves/strikes/renames/annotations/columns/swaps race
+//! across peers with randomized pairwise sync rounds; after every full mesh
+//! sync all boards must be byte-identical, pass the validator, AND equal a
+//! fresh from-snapshot materialization (materializer equivalence).
 //!
-//! Default rounds keep CI fast; `FLOWSTATE_FLOW_FUZZ_ROUNDS` scales to the
-//! 10k+ soak.
+//! Peer ids are FIXED (1..=3) so LWW tie-breaking is reproducible and
+//! divergences are bisectable. Default rounds keep CI green;
+//! `FLOWSTATE_FLOW_FUZZ_ROUNDS` scales to the deep soak.
+//!
+//! This soak FOUND and drove FIXES for two real convergence bugs:
+//!   - SetColumnWidth was a read-before-write conditional `delete` (diverged);
+//!     now an unconditional LWW register (`0.0` = auto).
+//!   - EnsureCellEditable wrote the raw paragraph slot (off-by-one from the
+//!     canonical `paragraph_style_value` encoding); now the canonical value.
+//!
+//! A third divergence was suspected here — a strikethrough `struck` split under
+//! concurrent `SetCellStruck` + `EnsureCellEditable`, reported diverging near
+//! round 299 at 3000 rounds. It was a downstream symptom of the EnsureCellEditable
+//! off-by-one (Bug 2 above): with the canonical paragraph-style encoding fixed it
+//! no longer reproduces — 500 rounds is clean and a 1200-round run completes green
+//! with zero divergences. (A full 3000-round completion is just slow — the
+//! per-round live-vs-cold rematerialization check grows with the board — not
+//! diverging.) `FLOWSTATE_FLOW_FUZZ_ROUNDS` still scales the deep soak on demand.
 #[cfg(test)]
 mod tests {
   use flowstate_collab::flow::{FlowDocHandle, FlowPublishEvent, FlowRuntime};
   use flowstate_collab::local_write::GateHolder;
   use flowstate_document::{InputParagraph, InputRun, RunStyles};
   use flowstate_flow::{
-    AnnotationOriginator, AnnotationStroke, CellId, CellSeed, ColumnId, FlowIntent, GridAnchor, RowId, SheetId, StrokePoint, StrokeRect,
-    StrokeStyle,
+    AnnotationOriginator, AnnotationStroke, ArgumentSide, CellId, CellSeed, ColumnId, FlowIntent, GridAnchor, RowId, SheetId, StrokePoint,
+    StrokeRect, StrokeStyle,
   };
   use uuid::Uuid;
 
@@ -46,6 +62,15 @@ mod tests {
         sheet.rows.len(),
         sheet.cells().count()
       ));
+      for (ix, column) in sheet.columns.iter().enumerate() {
+        lines.push(format!(
+          "  col[{ix}] {} label={:?} side={:?} width={:?}",
+          column.id, column.label, column.side, column.width
+        ));
+      }
+      for (ix, row) in sheet.rows.iter().enumerate() {
+        lines.push(format!("  row[{ix}] {} height={:?}", row.id, row.height_override));
+      }
       for cell in sheet.cells() {
         lines.push(format!(
           "  cell {} col={} row={} struck={} empty={} summary={:?}",
@@ -74,7 +99,9 @@ mod tests {
       }
     }
     if diff.is_empty() {
-      diff = "signatures equal; divergence is in a field the signature omits".into();
+      std::fs::write("/tmp/flow_div_reference.txt", format!("{reference:#?}")).ok();
+      std::fs::write("/tmp/flow_div_other.txt", format!("{other:#?}")).ok();
+      diff = "signatures equal; full boards written to /tmp/flow_div_{reference,other}.txt".into();
     }
     panic!("{label}: boards diverged:\n{diff}");
   }
@@ -184,8 +211,10 @@ mod tests {
         .unwrap();
       guard.snapshot_bytes().unwrap()
     };
-    let peers: Vec<FlowDocHandle> = (0..3)
-      .map(|_| FlowDocHandle::new(FlowRuntime::from_snapshot(&snapshot).unwrap()).0)
+    // Fixed peer ids so LWW tie-breaking is reproducible across runs (a random
+    // peer id makes divergences intermittent).
+    let peers: Vec<FlowDocHandle> = (1..=3)
+      .map(|peer_id| FlowDocHandle::new(FlowRuntime::from_snapshot_with_peer_id(&snapshot, peer_id).unwrap()).0)
       .collect();
 
     let mut minted = 0_usize;
@@ -196,7 +225,7 @@ mod tests {
           let cells = live_cells(peer, sheet);
           let rows = live_rows(peer, sheet);
           let columns = live_columns(peer, sheet);
-          let roll = rng.below(10);
+          let roll = rng.below(18);
           let result: Result<(), String> = match roll {
             0 | 1 if !rows.is_empty() && !columns.is_empty() => {
               minted += 1;
@@ -305,6 +334,90 @@ mod tests {
               })
               .map(|_| ())
               .map_err(|error| error.to_string()),
+            10 if cells.len() > 1 => {
+              let a = cells[rng.below(cells.len())];
+              let b = cells[rng.below(cells.len())];
+              if a == b {
+                Ok(())
+              } else {
+                peer
+                  .apply(&FlowIntent::SwapCells { sheet_id: sheet, a, b })
+                  .map(|_| ())
+                  .map_err(|error| error.to_string())
+              }
+            },
+            11 if !cells.is_empty() && !rows.is_empty() && !columns.is_empty() => {
+              let count = 1 + rng.below(3);
+              let placements = (0..count)
+                .map(|_| {
+                  (
+                    cells[rng.below(cells.len())],
+                    rows[rng.below(rows.len())],
+                    columns[rng.below(columns.len())],
+                  )
+                })
+                .collect();
+              peer
+                .apply(&FlowIntent::SetCellAddresses { sheet_id: sheet, placements })
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+            },
+            12 if !cells.is_empty() => peer
+              .apply(&FlowIntent::EnsureCellEditable {
+                sheet_id: sheet,
+                cell_id: cells[rng.below(cells.len())],
+              })
+              .map(|_| ())
+              .map_err(|error| error.to_string()),
+            13 => peer
+              .apply(&FlowIntent::AddColumn {
+                sheet_id: sheet,
+                column_id: rng.uuid(),
+                label: format!("Col r{round}"),
+                side: if rng.below(2) == 0 { ArgumentSide::One } else { ArgumentSide::Two },
+                before: if columns.is_empty() || rng.below(2) == 0 {
+                  None
+                } else {
+                  Some(columns[rng.below(columns.len())])
+                },
+              })
+              .map(|_| ())
+              .map_err(|error| error.to_string()),
+            14 if columns.len() > 2 => peer
+              .apply(&FlowIntent::DeleteColumn {
+                sheet_id: sheet,
+                column_id: columns[rng.below(columns.len())],
+              })
+              .map(|_| ())
+              .map_err(|error| error.to_string()),
+            15 if !columns.is_empty() => peer
+              .apply(&FlowIntent::RenameColumn {
+                sheet_id: sheet,
+                column_id: columns[rng.below(columns.len())],
+                label: format!("C{}", rng.below(1000)),
+              })
+              .map(|_| ())
+              .map_err(|error| error.to_string()),
+            16 if columns.len() > 1 => peer
+              .apply(&FlowIntent::MoveColumn {
+                sheet_id: sheet,
+                column_id: columns[rng.below(columns.len())],
+                before: if rng.below(2) == 0 {
+                  None
+                } else {
+                  Some(columns[rng.below(columns.len())])
+                },
+              })
+              .map(|_| ())
+              .map_err(|error| error.to_string()),
+            17 if !columns.is_empty() => peer
+              .apply(&FlowIntent::SetColumnWidth {
+                sheet_id: sheet,
+                column_id: columns[rng.below(columns.len())],
+                width: (rng.below(2) == 0).then(|| 90.0 + rng.below(400) as f32),
+              })
+              .map(|_| ())
+              .map_err(|error| error.to_string()),
             _ => peer
               .apply(&FlowIntent::RenameSheet {
                 sheet_id: sheet,
@@ -327,17 +440,28 @@ mod tests {
       reference
         .validate()
         .unwrap_or_else(|error| panic!("round {round}: normalized board failed validation: {error}"));
+      // Cross-peer convergence: every peer's live board agrees with peer 0's.
       for (peer_ix, peer) in peers.iter().enumerate().skip(1) {
-        assert_eq!(reference, peer.board_projection().unwrap(), "round {round}: peer {peer_ix} diverged");
+        assert_boards_equal(&reference, &peer.board_projection().unwrap(), &format!("round {round}: peer {peer_ix} diverged"));
       }
-      // Materializer equivalence: a cold open of the same canonical state must
-      // produce the identical board.
-      let snapshot = {
-        let guard = peers[0].gate().lock(GateHolder::DocumentService).unwrap();
-        guard.snapshot_bytes().unwrap()
-      };
-      let cold = FlowRuntime::from_snapshot(&snapshot).unwrap();
-      assert_boards_equal(&reference, cold.board(), &format!("round {round}: cold rematerialization"));
+      // Per-peer self-consistency (the incremental-cache staleness oracle): each
+      // peer's LIVE board (built through the incremental summary cache + touch
+      // dirtying) must equal a COLD rematerialization of its own canonical state
+      // (dirty=None → every summary re-derived). A mismatch means the peer's
+      // cache went stale WITHOUT the peer diverging from anyone — which is how
+      // the strikethrough/re-mint bug hid for ~300 rounds (only peer 0 was
+      // cold-checked before, so a stale peer 2 slipped through until it happened
+      // to disagree with peer 0 on the same cell). Checking EVERY peer catches
+      // it the round the cache is first reused stale.
+      for (peer_ix, peer) in peers.iter().enumerate() {
+        let live = peer.board_projection().unwrap();
+        let snapshot = {
+          let guard = peer.gate().lock(GateHolder::DocumentService).unwrap();
+          guard.snapshot_bytes().unwrap()
+        };
+        let cold = FlowRuntime::from_snapshot(&snapshot).unwrap();
+        assert_boards_equal(&live, cold.board(), &format!("round {round}: peer {peer_ix} incremental board != cold rematerialization (stale summary cache)"));
+      }
     }
   }
 }

@@ -52,6 +52,17 @@ pub struct FlowPresenceFocus {
   pub editing: bool,
   /// (head, anchor) Loro cursor bytes within the focused cell.
   pub caret: Option<(Vec<u8>, Vec<u8>)>,
+  /// G2: the (row, column) SLOT under the peer's cursor — representable even
+  /// when the slot is EMPTY (`cell` = None), which a cell id cannot express.
+  #[serde(default)]
+  pub slot: Option<(u32, u32)>,
+  /// G2: the peer's selection rectangle `(r0, c0, r1, c1)`, inclusive slots.
+  #[serde(default)]
+  pub selection_rect: Option<(u32, u32, u32, u32)>,
+  /// G2: the in-flight ink draft (board-space points, rounded + capped) so a
+  /// stroke is visible to peers WHILE it's drawn, not only at commit.
+  #[serde(default)]
+  pub ink_preview: Vec<(i32, i32)>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

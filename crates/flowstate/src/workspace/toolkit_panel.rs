@@ -872,6 +872,9 @@ impl Workspace {
       text: hit.insert_text.clone(),
       paragraphs,
       cursor_offset: point(px(0.0), px(0.0)),
+      // Q-21/F2: provenance rides the drag so a flow drop can link back.
+      source_path: Some(hit.path.to_string_lossy().to_string()),
+      source_unit: Some(format!("{}:{}", hit.file_id, hit.unit_id)),
     };
     let (preview_theme, preview_invisibility_mode) = self
       .active_editor

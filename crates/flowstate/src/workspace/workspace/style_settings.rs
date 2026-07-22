@@ -509,6 +509,42 @@ fn flow_color_item(
   })
 }
 
+/// Q-15/C20: the cell wash — every slot tinted ~5% by its column's side.
+/// A theme setting, DEFAULT OFF (headers-only is the ratified look).
+fn flow_cell_wash_item(workspace: WeakEntity<Workspace>) -> SettingItem {
+  SettingItem::render(move |_, _, cx| {
+    let enabled = load_flow_theme().cell_wash > 0.0;
+    let workspace = workspace.clone();
+    h_flex()
+      .w_full()
+      .items_center()
+      .justify_between()
+      .gap_4()
+      .child(
+        div()
+          .flex_1()
+          .min_w_0()
+          .child(div().text_sm().child("Cell wash"))
+          .child(
+            div()
+              .text_xs()
+              .text_color(cx.theme().muted_foreground)
+              .child("Tint every slot faintly by its column's side — the two-pen paper feel."),
+          ),
+      )
+      .child(
+        Checkbox::new("flow-cell-wash")
+          .small()
+          .checked(enabled)
+          .on_click(move |checked, _, cx| {
+            let target = if *checked { 0.05 } else { 0.0 };
+            update_flow_theme(cx, &workspace, move |theme| theme.cell_wash = target);
+          }),
+      )
+      .into_any_element()
+  })
+}
+
 fn update_flow_theme(cx: &mut App, workspace: &WeakEntity<Workspace>, update: impl FnOnce(&mut FlowTheme)) {
   let mut theme = load_flow_theme();
   update(&mut theme);

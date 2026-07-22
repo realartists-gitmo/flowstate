@@ -1422,6 +1422,12 @@ impl CollabSession {
           // S11 presence rides these (board hands + cell carets).
           session.schedule_own_presence_refresh(cx);
         },
+        // Workspace-level verb; the session has no stake in it.
+        crate::flow::editor::FlowEditorEvent::SendColumnToDocument { .. } => {},
+        // G2: slot/marquee/live-ink presence expressiveness.
+        crate::flow::editor::FlowEditorEvent::PresenceShifted => session.schedule_own_presence_refresh(cx),
+        // Workspace-level verb; the session has no stake in it.
+        crate::flow::editor::FlowEditorEvent::OpenCellSource { .. } => {},
       }),
     );
   }

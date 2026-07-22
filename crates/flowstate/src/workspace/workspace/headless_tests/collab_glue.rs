@@ -210,6 +210,9 @@ fn flow_external_presence_hand_and_cell_caret(cx: &mut TestAppContext) {
     sheet: Some(sheet),
     cell: Some(cell),
     editing: true,
+    slot: None,
+    selection_rect: None,
+    ink_preview: Vec::new(),
   };
   editor.update(cx, |editor, cx| {
     editor.activate_cell(cell, cx); // open the cell editor so the caret can land

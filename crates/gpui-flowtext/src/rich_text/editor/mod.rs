@@ -135,6 +135,10 @@ pub struct ToolkitTextDrag {
   pub text: String,
   pub paragraphs: Vec<InputParagraph>,
   pub cursor_offset: Point<Pixels>,
+  /// Q-21/F2 (host concern, carried opaquely): where this card came from —
+  /// a source document path and search-unit id, when the drag source knows.
+  pub source_path: Option<String>,
+  pub source_unit: Option<String>,
 }
 
 impl Render for ToolkitTextDrag {

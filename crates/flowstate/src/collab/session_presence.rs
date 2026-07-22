@@ -137,6 +137,12 @@ impl CollabSession {
         cell: focus.cell.map(|id| id.as_u128()),
         editing: focus.editing,
         caret: focus.caret,
+        // G2: slot / selection-rect / live-ink expressiveness.
+        slot: focus.slot.map(|(row, column)| (row as u32, column as u32)),
+        selection_rect: focus
+          .selection_rect
+          .map(|(r0, c0, r1, c1)| (r0 as u32, c0 as u32, r1 as u32, c1 as u32)),
+        ink_preview: focus.ink_preview,
       }),
       comment_typing: None,
     };
@@ -181,6 +187,11 @@ impl CollabSession {
         sheet: focus.sheet.map(uuid::Uuid::from_u128),
         cell,
         editing: focus.editing,
+        slot: focus.slot.map(|(row, column)| (row as usize, column as usize)),
+        selection_rect: focus
+          .selection_rect
+          .map(|(r0, c0, r1, c1)| (r0 as usize, c0 as usize, r1 as usize, c1 as usize)),
+        ink_preview: focus.ink_preview.clone(),
       });
     }
     editor.update(cx, |editor, cx| editor.set_external_presences(hands, carets, cx));

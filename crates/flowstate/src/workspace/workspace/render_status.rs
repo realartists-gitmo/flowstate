@@ -457,7 +457,34 @@ impl Workspace {
     // collab / counters / zoom. The old bar was one flex_1 spacer and a
     // right-cluster; every zone below has an address now.
     let identity = self.active_panel_identity(cx);
-    let activity = self.activity_event.clone();
+    // P2: activity floats as stacked popover toasts — the inline red box is
+    // gone. Transients autohide; failures stick and carry their Retry.
+    for event in std::mem::take(&mut self.pending_toasts) {
+      let toast = match event.kind {
+        ActivityKind::Transient => Notification::info(event.message.clone()),
+        ActivityKind::Failure => {
+          let mut toast = Notification::error(event.message.clone()).autohide(false);
+          if let Some(action) = event.action.clone() {
+            let workspace = cx.entity().downgrade();
+            toast = toast.action(move |_, _, _| {
+              let workspace = workspace.clone();
+              let action = action.clone();
+              Button::new("toast-retry")
+                .text()
+                .compact()
+                .label("Retry")
+                .on_click(move |_, window, cx| {
+                  let _ = workspace.update(cx, |workspace, cx| {
+                    workspace.run_activity_action(action.clone(), window, cx);
+                  });
+                })
+            });
+          }
+          toast
+        },
+      };
+      window.push_notification(toast, cx);
+    }
     h_flex()
       .h(px(26.0))
       .flex_none()
@@ -470,7 +497,7 @@ impl Workspace {
       .bg(cx.theme().background)
       .when_some(identity, |this, identity| this.child(self.render_status_identity(identity, cx)))
       .child(div().flex_1())
-      .when_some(activity, |this, event| this.child(self.render_activity_slot(&event, cx)))
+      // P2: the center activity slot is retired — events float as toasts.
       .child(div().flex_1())
       .when_some(collab_phase, |this, phase| {
         // CO-S4: while attached, the session STRIP is the collab surface —
@@ -672,53 +699,6 @@ impl Workspace {
       .active_editor
       .as_ref()
       .is_some_and(|editor| editor.read(cx).invisibility_mode())
-  }
-
-  fn render_activity_slot(&self, event: &ActivityEvent, cx: &mut Context<Self>) -> impl IntoElement {
-    let failure = event.kind == ActivityKind::Failure;
-    let color = if failure {
-      cx.theme().danger
-    } else {
-      cx.theme().muted_foreground.opacity(0.8)
-    };
-    // D-S3: failures sit on an engine-derived surface (elevation law) so the
-    // one persistent chip in the bar reads as an object, not loose text.
-    let surface = failure.then(|| crate::visual_engine::chrome_surface(cx, cx.theme().danger, 0.04));
-    h_flex()
-      .flex_none()
-      .items_center()
-      .gap_1()
-      .when_some(surface, |this, surface| {
-        this
-          .px_1p5()
-          .rounded_sm()
-          .bg(surface.fill)
-          .when_some(surface.hairline, |this, hairline| this.border_1().border_color(hairline))
-      })
-      .child(div().text_size(px(10.0)).text_color(color).child(event.message.clone()))
-      .when(failure, |this| {
-        let action = event.action.clone();
-        this
-          .when_some(action, |this, action| {
-            this.child(
-              Button::new("activity-action")
-                .text()
-                .compact()
-                .text_color(cx.theme().danger)
-                .child(div().text_size(px(10.0)).child("Retry"))
-                .on_click(cx.listener(move |workspace, _, window, cx| {
-                  workspace.run_activity_action(action.clone(), window, cx);
-                })),
-            )
-          })
-          .child(
-            Button::new("activity-dismiss")
-              .text()
-              .compact()
-              .child(div().text_size(px(10.0)).text_color(cx.theme().muted_foreground).child("✕"))
-              .on_click(cx.listener(|workspace, _, _, cx| workspace.dismiss_activity(cx))),
-          )
-      })
   }
 
   fn sync_collab_notice_subscriptions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
