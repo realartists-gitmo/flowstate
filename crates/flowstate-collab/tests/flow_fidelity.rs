@@ -40,9 +40,9 @@ mod tests {
     // Arms the GLOBAL fidelity gate + heavy (whole-board reproject) checks. The
     // firehose only RECORDS on an actual drift, so a concurrent clean test adds
     // no violations; this stays robust in parallel.
-    unsafe {
-      std::env::set_var("FLOWSTATE_TRACE_FIDELITY_HEAVY", "1");
-    }
+    // SAFETY: single-threaded at this point in the test; no other thread reads
+    // the environment concurrently.
+    unsafe { std::env::set_var("FLOWSTATE_TRACE_FIDELITY_HEAVY", "1") };
     flowstate_fidelity::set_enabled(true);
     let _ = flowstate_fidelity::take_violations(); // clear any prior
 
@@ -78,9 +78,8 @@ mod tests {
 
     let violations = flowstate_fidelity::take_violations();
     flowstate_fidelity::set_enabled(false);
-    unsafe {
-      std::env::remove_var("FLOWSTATE_TRACE_FIDELITY_HEAVY");
-    }
+    // SAFETY: the workload above has fully completed; no concurrent env reads.
+    unsafe { std::env::remove_var("FLOWSTATE_TRACE_FIDELITY_HEAVY") };
     assert!(
       violations.is_empty(),
       "a clean flow workload must not trip the board-drift firehose: {violations:?}"

@@ -1,5 +1,6 @@
 mod cleaner;
 mod exporter;
+pub mod flow_xlsx;
 mod fragment_parse;
 mod html_paste;
 #[cfg(test)]

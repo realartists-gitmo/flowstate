@@ -57,6 +57,12 @@ impl FlowPanel {
     self.editor.clone()
   }
 
+  /// G7: a live cross-window handoff re-homes the panel — the adopting
+  /// workspace becomes the one this panel talks to.
+  pub fn set_workspace(&mut self, workspace: WeakEntity<Workspace>) {
+    self.workspace = workspace;
+  }
+
   pub fn ribbon(&self) -> Entity<FlowRibbon> {
     self.ribbon.clone()
   }
@@ -76,10 +82,14 @@ impl FlowPanel {
   }
 
   fn display_title(&self, cx: &App) -> SharedString {
+    // E10: the round's identity beats the filename when it's filled in —
+    // "Aldrich R3 vs Northwestern" is the flow's real name.
+    let round = self.editor.read(cx).board().round.summary();
+    let base = round.map(SharedString::from).unwrap_or_else(|| self.title.clone());
     if self.is_dirty(cx) {
-      format!("{} *", self.title).into()
+      format!("{base} *").into()
     } else {
-      self.title.clone()
+      base
     }
   }
 }

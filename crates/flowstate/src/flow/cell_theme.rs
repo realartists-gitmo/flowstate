@@ -14,7 +14,9 @@ pub(super) fn apply_flow_cell_theme(
   zoom: f32,
 ) {
   document.theme = client_theme.clone();
-  document.theme.zoom_factor *= zoom;
+  // D14: the density multiplier scales cell TEXT; row heights follow the
+  // measured text automatically, so the whole grid tightens or breathes.
+  document.theme.zoom_factor *= zoom * crate::app_settings::load_flow_density();
   scale_flow_layout_metrics(&mut document.theme, zoom);
   let source_default = document.theme.default_text_color;
   document.theme.default_text_color = foreground;

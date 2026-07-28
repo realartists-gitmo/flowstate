@@ -28,11 +28,13 @@ impl FlowEditor {
 
   pub fn set_annotation_tool(&mut self, tool: AnnotationTool, cx: &mut Context<Self>) {
     self.annotation_tool = tool;
+    self.tool_stroke_live = false;
     cx.notify();
   }
 
   pub fn toggle_annotation_tool(&mut self, tool: AnnotationTool, cx: &mut Context<Self>) {
     self.annotation_tool = if self.annotation_tool == tool { AnnotationTool::None } else { tool };
+    self.tool_stroke_live = false;
     cx.notify();
   }
 
@@ -109,14 +111,16 @@ impl FlowEditor {
     };
   }
 
-  pub(super) fn begin_annotation(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+  pub(crate) fn begin_annotation(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
     match self.annotation_tool {
       AnnotationTool::Marker => {
+        self.tool_stroke_live = true;
         self.drawing_points.clear();
         let point = self.model_point(position);
         self.drawing_points.push(point);
       },
       AnnotationTool::Eraser => {
+        self.tool_stroke_live = true;
         let point = self.model_point(position);
         self.erase_at(point, cx);
       },
@@ -136,14 +140,20 @@ impl FlowEditor {
     cx.notify();
   }
 
-  pub(super) fn continue_annotation(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+  pub(crate) fn continue_annotation(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
     if self.annotation_tool == AnnotationTool::Eraser {
-      let point = self.model_point(position);
-      self.erase_at(point, cx);
+      // The eraser is a DRAG tool: it applies only between mouse-down and
+      // mouse-up. Without this gate an armed eraser ate ink under a bare
+      // hover (and minted an undo group per mouse move).
+      if self.tool_stroke_live {
+        let point = self.model_point(position);
+        self.erase_at(point, cx);
+      }
       return;
     }
-    // The armed marker OR an in-flight right-drag both extend the draft.
-    let inking = self.annotation_tool == AnnotationTool::Marker || self.right_inking;
+    // The armed marker's live stroke OR an in-flight right-drag both extend
+    // the draft — an armed-but-idle marker hover draws nothing.
+    let inking = (self.annotation_tool == AnnotationTool::Marker && self.tool_stroke_live) || self.right_inking;
     if !inking || self.drawing_points.is_empty() {
       return;
     }
@@ -156,7 +166,7 @@ impl FlowEditor {
     if should_append {
       self.drawing_points.push(point);
       // G2: peers watch the stroke grow — throttled to every 8th point.
-      if self.drawing_points.len() % 8 == 0 {
+      if self.drawing_points.len().is_multiple_of(8) {
         cx.emit(super::FlowEditorEvent::PresenceShifted);
       }
       cx.notify();
@@ -165,11 +175,12 @@ impl FlowEditor {
 
   /// Commit the draft as a rigid body: the slot under the FIRST point is the
   /// stroke's one grid anchor; every stored coordinate is stroke-local.
-  pub(super) fn finish_annotation(&mut self, cx: &mut Context<Self>) {
+  pub(crate) fn finish_annotation(&mut self, cx: &mut Context<Self>) {
     // Take the ink color (and disarm the right-drag) regardless of how we
     // return, so a stray right-click never leaves us stuck inking.
     let ink_color = self.active_ink_color.take().unwrap_or(self.marker_color_rgba);
     self.right_inking = false;
+    self.tool_stroke_live = false;
     // G2: the peer-visible draft ends with the stroke (commit or discard).
     cx.emit(super::FlowEditorEvent::PresenceShifted);
     let Some(sheet_id) = self.active_sheet else {

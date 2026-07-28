@@ -2,7 +2,7 @@
 //! window interceptor installed in `Workspace::new` (one level above the
 //! `handle_window_keybinding` unit the other suites exercise).
 
-use gpui::TestAppContext;
+use gpui::{Focusable as _, TestAppContext};
 
 use super::support;
 
@@ -378,10 +378,10 @@ fn multiselect_drag_translates_the_whole_set(cx: &mut TestAppContext) {
 // (not in the selection) slide into the slots the block vacated. Lossless.
 #[gpui::test]
 fn multiselect_drag_block_swaps_displaced_cards(cx: &mut TestAppContext) {
-  let h = support::open_workspace(cx);
-  h.update(cx, |ws, window, cx| ws.new_flow(window, cx));
+  let harness = support::open_workspace(cx);
+  harness.update(cx, |ws, window, cx| ws.new_flow(window, cx));
   cx.run_until_parked();
-  let flow = h.read(cx, |ws| ws.active_flow.clone()).expect("active flow");
+  let flow = harness.read(cx, |ws| ws.active_flow.clone()).expect("active flow");
   flow.update(cx, |editor, cx| editor.create_sheet(cx));
   cx.run_until_parked();
 
@@ -465,4 +465,304 @@ fn move_sheet_before_reorders_and_skips_noops(cx: &mut TestAppContext) {
   cx.update(|cx| editor.update(cx, |editor, cx| editor.move_sheet_before(b, None, cx)));
   let after_tail = order(cx);
   assert_eq!(*after_tail.last().expect("sheets"), b, "B lands at the end");
+}
+
+/// The lasso must grow on BOTH axes from the keyboard. Reported live: with a
+/// blue lasso up, shift+down extends it but shift+left/right cannot cross into
+/// other columns. Drives true keystroke dispatch in the two real focus states.
+#[gpui::test]
+fn shift_arrows_extend_the_lasso_on_both_axes(cx: &mut TestAppContext) {
+  let h = support::open_workspace(cx);
+  h.update(cx, |ws, window, cx| ws.new_flow(window, cx));
+  cx.run_until_parked();
+  let flow = h.read(cx, |ws| ws.active_flow.clone()).expect("active flow");
+  flow.update(cx, |editor, cx| editor.create_sheet(cx));
+  cx.run_until_parked();
+
+  // A 2×3 block so both axes have room.
+  flow.update(cx, |editor, cx| {
+    for (row, column) in [(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2)] {
+      editor.set_cursor(row, column, cx);
+      editor.type_into_cursor("x", cx).expect("cell created");
+    }
+  });
+  cx.run_until_parked();
+
+  // Case A: BOARD focused (the state after a marquee or Esc), cursor parked.
+  h.update(cx, |_ws, window, cx| {
+    let handle = flow.read(cx).focus_handle(cx);
+    window.focus(&handle);
+  });
+  flow.update(cx, |editor, cx| {
+    editor.clear_selection(cx);
+    editor.set_cursor(0, 0, cx);
+  });
+  cx.run_until_parked();
+
+  cx.simulate_keystrokes(h.window, "shift-down");
+  cx.run_until_parked();
+  flow.read_with(cx, |editor, _cx| {
+    assert_eq!(editor.selection_rect(), Some((0, 0, 1, 0)), "board-focused shift+down grows the lasso down");
+  });
+
+  cx.simulate_keystrokes(h.window, "shift-right");
+  cx.run_until_parked();
+  flow.read_with(cx, |editor, _cx| {
+    assert_eq!(editor.selection_rect(), Some((0, 0, 1, 1)), "board-focused shift+right grows the lasso right");
+  });
+
+  cx.simulate_keystrokes(h.window, "shift-right");
+  cx.run_until_parked();
+  flow.read_with(cx, |editor, _cx| {
+    assert_eq!(editor.selection_rect(), Some((0, 0, 1, 2)), "a second shift+right keeps growing across columns");
+  });
+
+  cx.simulate_keystrokes(h.window, "shift-left");
+  cx.run_until_parked();
+  flow.read_with(cx, |editor, _cx| {
+    assert_eq!(editor.selection_rect(), Some((0, 0, 1, 1)), "shift+left shrinks the moving edge back");
+  });
+
+  // Case B: a CELL is active (the state right after clicking a card) — the
+  // cell editor holds focus. This is the reported-broken state; record what
+  // each axis actually does to the lasso.
+  flow.update(cx, |editor, cx| {
+    editor.clear_selection(cx);
+    editor.set_cursor(0, 0, cx);
+  });
+  let first = flow.read_with(cx, |editor, _cx| {
+    editor.board().sheets[0].slot(0, 0).map(|cell| cell.id).expect("seeded cell")
+  });
+  h.update(cx, |_ws, window, cx| {
+    flow.update(cx, |editor, cx| {
+      editor.activate_cell(first, cx);
+      editor.focus_active_cell(window, cx);
+    });
+  });
+  cx.run_until_parked();
+
+  cx.simulate_keystrokes(h.window, "shift-down");
+  cx.run_until_parked();
+  let rect_after_down = flow.read_with(cx, |editor, _cx| editor.selection_rect());
+
+  cx.simulate_keystrokes(h.window, "shift-right");
+  cx.run_until_parked();
+  let rect_after_right = flow.read_with(cx, |editor, _cx| editor.selection_rect());
+
+  // Whatever the cell-active policy is, it must be axis-symmetric: if down
+  // grew the lasso a row, right must widen it a column.
+  if rect_after_down == Some((0, 0, 1, 0)) {
+    assert_eq!(
+      rect_after_right,
+      Some((0, 0, 1, 1)),
+      "cell-active shift+right must widen the lasso just like shift+down grew it"
+    );
+  } else {
+    assert_eq!(
+      rect_after_down, rect_after_right,
+      "cell-active shift arrows must be axis-symmetric (down: {rect_after_down:?}, right: {rect_after_right:?})"
+    );
+  }
+}
+
+/// The MOUSE marquee must grow on both axes — including the reported-broken
+/// gesture: lasso a column downward, release, then shift-press into the next
+/// column. Before the fix, every shift-press RESET the anchor to the pressed
+/// slot, collapsing the lasso (invisible when re-dragging down the same
+/// column, glaring when reaching sideways). Drives the marquee functions with
+/// real slot-center coordinates.
+#[gpui::test]
+fn mouse_marquee_grows_on_both_axes(cx: &mut TestAppContext) {
+  let h = support::open_workspace(cx);
+  h.update(cx, |ws, window, cx| ws.new_flow(window, cx));
+  cx.run_until_parked();
+  let flow = h.read(cx, |ws| ws.active_flow.clone()).expect("active flow");
+  flow.update(cx, |editor, cx| editor.create_sheet(cx));
+  cx.run_until_parked();
+
+  flow.update(cx, |editor, cx| {
+    for (row, column) in [(0, 0), (0, 1), (1, 0), (1, 1), (2, 0), (2, 1)] {
+      editor.set_cursor(row, column, cx);
+      editor.type_into_cursor("x", cx).expect("cell created");
+    }
+    editor.clear_selection(cx);
+    editor.set_cursor(0, 0, cx);
+  });
+  cx.run_until_parked();
+
+  // One continuous shift-drag: (0,0) pressed, pointer down the column to (2,0).
+  flow.update(cx, |editor, cx| {
+    let start = editor.slot_center(0, 0).expect("slot center");
+    editor.begin_marquee(start, cx);
+    let down = editor.slot_center(2, 0).expect("slot center");
+    editor.update_marquee(down, cx);
+  });
+  flow.read_with(cx, |editor, _cx| {
+    assert_eq!(editor.selection_rect(), Some((0, 0, 2, 0)), "the drag lassoed the column");
+  });
+
+  // Mouse-up ends the drag (the app clears marquee_anchor on up).
+  flow.update(cx, |editor, cx| {
+    editor.end_marquee_for_test();
+    cx.notify();
+  });
+
+  // THE reported gesture: a NEW shift-press one column to the right must
+  // EXTEND the lasso from its surviving anchor, not collapse it.
+  flow.update(cx, |editor, cx| {
+    let right = editor.slot_center(2, 1).expect("slot center");
+    editor.begin_marquee(right, cx);
+  });
+  flow.read_with(cx, |editor, _cx| {
+    assert_eq!(
+      editor.selection_rect(),
+      Some((0, 0, 2, 1)),
+      "shift-press in the next column widens the existing lasso (Excel law)"
+    );
+  });
+
+  // And the mirror: a fresh shift-press back inside column 0 shrinks to it.
+  flow.update(cx, |editor, cx| {
+    editor.end_marquee_for_test();
+    let back = editor.slot_center(1, 0).expect("slot center");
+    editor.begin_marquee(back, cx);
+  });
+  flow.read_with(cx, |editor, _cx| {
+    assert_eq!(
+      editor.selection_rect(),
+      Some((0, 0, 1, 0)),
+      "the moving corner follows the press; the anchor stays planted"
+    );
+  });
+}
+
+/// The eraser is a DRAG tool: armed-but-idle hover must never erase. Before
+/// the fix, `continue_annotation` erased on every mouse move with the tool
+/// armed — hovering across the sheet silently ate ink (and minted an undo
+/// group per move).
+#[gpui::test]
+fn armed_eraser_does_not_erase_on_bare_hover(cx: &mut TestAppContext) {
+  use crate::flow::AnnotationTool;
+
+  let h = support::open_workspace(cx);
+  h.update(cx, |ws, window, cx| ws.new_flow(window, cx));
+  cx.run_until_parked();
+  let flow = h.read(cx, |ws| ws.active_flow.clone()).expect("active flow");
+  flow.update(cx, |editor, cx| editor.create_sheet(cx));
+  cx.run_until_parked();
+
+  // Draw one marker stroke across slot (0,0) through the real gesture path.
+  flow.update(cx, |editor, cx| {
+    editor.set_annotation_tool(AnnotationTool::Marker, cx);
+    let start = editor.slot_center(0, 0).expect("slot center");
+    editor.begin_annotation(start, cx);
+    for step in 1..=6 {
+      editor.continue_annotation(gpui::point(start.x + gpui::px(step as f32 * 4.0), start.y), cx);
+    }
+    editor.finish_annotation(cx);
+  });
+  cx.run_until_parked();
+  let strokes = |flow: &gpui::Entity<crate::flow::FlowEditor>, cx: &mut TestAppContext| {
+    flow.read_with(cx, |editor, _cx| editor.board().sheets[0].annotations.len())
+  };
+  assert_eq!(strokes(&flow, cx), 1, "the marker committed one stroke");
+
+  // Arm the eraser and HOVER across the stroke — no button held, no begin.
+  flow.update(cx, |editor, cx| {
+    editor.set_annotation_tool(AnnotationTool::Eraser, cx);
+    let start = editor.slot_center(0, 0).expect("slot center");
+    for step in 0..=8 {
+      editor.continue_annotation(gpui::point(start.x + gpui::px(step as f32 * 4.0), start.y), cx);
+    }
+  });
+  cx.run_until_parked();
+  assert_eq!(strokes(&flow, cx), 1, "a bare hover with the eraser armed must not erase");
+
+  // A real press-drag-release erases it.
+  flow.update(cx, |editor, cx| {
+    let start = editor.slot_center(0, 0).expect("slot center");
+    editor.begin_annotation(start, cx);
+    for step in 1..=8 {
+      editor.continue_annotation(gpui::point(start.x + gpui::px(step as f32 * 4.0), start.y), cx);
+    }
+    editor.finish_annotation(cx);
+  });
+  cx.run_until_parked();
+  assert_eq!(strokes(&flow, cx), 0, "a held eraser drag erases the stroke");
+}
+
+/// Ctrl+click must build NON-CONTIGUOUS selections: each ctrl+click toggles
+/// one cell into/out of the set. True event-level dispatch (move first — gpui
+/// hitbox hover state only updates on mouse-move events).
+#[gpui::test]
+fn ctrl_click_builds_non_contiguous_selections(cx: &mut TestAppContext) {
+  let h = support::open_workspace(cx);
+  h.update(cx, |ws, window, cx| ws.new_flow(window, cx));
+  cx.run_until_parked();
+  let flow = h.read(cx, |ws| ws.active_flow.clone()).expect("active flow");
+  flow.update(cx, |editor, cx| editor.create_sheet(cx));
+  cx.run_until_parked();
+
+  // Cells at (0,0), (2,0), (1,1) — deliberately non-adjacent.
+  let ids = flow.update(cx, |editor, cx| {
+    let mut ids = Vec::new();
+    for (row, column) in [(0, 0), (2, 0), (1, 1)] {
+      editor.set_cursor(row, column, cx);
+      ids.push(editor.type_into_cursor("x", cx).expect("cell created"));
+    }
+    editor.clear_selection(cx);
+    cx.notify();
+    ids
+  });
+  cx.run_until_parked();
+
+  let mut vcx = gpui::VisualTestContext::from_window(h.window, cx);
+  vcx.run_until_parked();
+  let center = |cx: &mut gpui::VisualTestContext, row: usize, col: usize| {
+    flow.read_with(cx, |editor, _cx| editor.slot_center(row, col).expect("slot center"))
+  };
+  let click_at = |cx: &mut gpui::VisualTestContext, pos: gpui::Point<gpui::Pixels>, modifiers: gpui::Modifiers| {
+    // Hover first: hitbox hover state follows mouse-MOVE events only.
+    cx.simulate_mouse_move(pos, None, modifiers);
+    cx.run_until_parked();
+    cx.simulate_mouse_down(pos, gpui::MouseButton::Left, modifiers);
+    cx.simulate_mouse_up(pos, gpui::MouseButton::Left, modifiers);
+    cx.run_until_parked();
+  };
+  let none = gpui::Modifiers::none();
+  let ctrl = gpui::Modifiers::control();
+
+  // Plain click on (0,0) activates it; ctrl+clicks gather the far cells.
+  let a = center(&mut vcx, 0, 0);
+  click_at(&mut vcx, a, none);
+  flow.read_with(&vcx, |editor, _cx| {
+    assert_eq!(editor.active_cell(), Some(ids[0]), "plain click activates the first cell");
+  });
+
+  let b = center(&mut vcx, 2, 0);
+  click_at(&mut vcx, b, ctrl);
+  flow.read_with(&vcx, |editor, _cx| {
+    let selected = editor.selected_cells();
+    assert!(
+      selected.contains(&ids[0]) && selected.contains(&ids[1]) && selected.len() == 2,
+      "ctrl+click adds the second cell alongside the active one (got {} selected)",
+      selected.len()
+    );
+  });
+
+  let c = center(&mut vcx, 1, 1);
+  click_at(&mut vcx, c, ctrl);
+  flow.read_with(&vcx, |editor, _cx| {
+    assert_eq!(editor.selected_cells().len(), 3, "a third ctrl+click keeps growing the set");
+  });
+
+  // Ctrl+click on a member REMOVES it.
+  click_at(&mut vcx, b, ctrl);
+  flow.read_with(&vcx, |editor, _cx| {
+    let selected = editor.selected_cells();
+    assert!(
+      selected.len() == 2 && !selected.contains(&ids[1]),
+      "ctrl+click on a selected member toggles it back out"
+    );
+  });
 }

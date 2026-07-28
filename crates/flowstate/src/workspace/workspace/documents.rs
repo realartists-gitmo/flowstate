@@ -83,6 +83,12 @@ pub(crate) struct DocumentPanelHandoff {
   pub io: Option<flowstate_collab::doc_io::DocIoHandle>,
 }
 
+/// G7: the flow twin.
+pub(crate) struct FlowPanelHandoff {
+  pub panel: Entity<FlowPanel>,
+  pub io: Option<flowstate_collab::flow::FlowIoHandle>,
+}
+
 fn cx_entity_weak(cx: &Context<Workspace>) -> WeakEntity<Workspace> {
   cx.entity().downgrade()
 }
@@ -730,6 +736,123 @@ impl Workspace {
     Some(DocumentPanelHandoff { panel, io })
   }
 
+  /// F6: open a flow and land on one of its cells (tub deep link). The open
+  /// pipeline is async, so the jump retries briefly until the panel exists.
+  pub(crate) fn open_flow_path_at_cell(&mut self, path: PathBuf, cell: flowstate_flow::CellId, window: &mut Window, cx: &mut Context<Self>) {
+    // Already open? Jump straight there.
+    if let Some(panel) = self
+      .flow_panels
+      .iter()
+      .find(|panel| panel.read(cx).editor().read(cx).document_path() == Some(&path))
+      .cloned()
+    {
+      let id = panel.read(cx).id();
+      self.activate_document_id(id, cx);
+      panel.read(cx).editor().update(cx, |editor, cx| editor.jump_to_cell(cell, cx));
+      return;
+    }
+    self.open_document_path(path.clone(), window, cx);
+    cx.spawn(async move |workspace, cx| {
+      for _ in 0..60 {
+        cx.background_executor()
+          .timer(std::time::Duration::from_millis(50))
+          .await;
+        let landed = workspace
+          .update(cx, |workspace, cx| {
+            let panel = workspace
+              .flow_panels
+              .iter()
+              .find(|panel| panel.read(cx).editor().read(cx).document_path() == Some(&path))
+              .cloned();
+            match panel {
+              Some(panel) => {
+                panel.read(cx).editor().update(cx, |editor, cx| editor.jump_to_cell(cell, cx));
+                true
+              },
+              None => false,
+            }
+          })
+          .unwrap_or(true);
+        if landed {
+          break;
+        }
+      }
+    })
+    .detach();
+  }
+
+  /// G7: the flow twin of the W-S3 handoff bundle — the LIVE panel entity
+  /// (runtime, undo, collab session) crosses windows; nothing reloads.
+  pub(crate) fn hand_off_flow_panel(&mut self, panel_id: Uuid, cx: &mut Context<Self>) -> Option<FlowPanelHandoff> {
+    let ix = self.flow_panels.iter().position(|panel| panel.read(cx).id() == panel_id)?;
+    let panel = self.flow_panels.remove(ix);
+    let io = self.flow_document_runtimes.remove(&panel_id);
+    self.pane_tree.remove_tab(panel_id);
+    self.editor_subscriptions.retain(|(id, _)| *id != panel_id);
+    self.pinned_document_ids.retain(|id| *id != panel_id);
+    if self.active_document_id == Some(panel_id) {
+      self.active_document_id = None;
+      self.active_flow = None;
+      let next = self
+        .document_panels
+        .first()
+        .map(|panel| panel.read(cx).id())
+        .or_else(|| self.flow_panels.first().map(|panel| panel.read(cx).id()));
+      if let Some(next) = next {
+        self.activate_document_id(next, cx);
+      }
+    }
+    self.persist_temporary_workspace_session(cx);
+    cx.notify();
+    Some(FlowPanelHandoff { panel, io })
+  }
+
+  /// G7: adopt a live flow panel handed off from another window.
+  pub(crate) fn adopt_flow_panel(&mut self, handoff: FlowPanelHandoff, window: &mut Window, cx: &mut Context<Self>) {
+    let FlowPanelHandoff { panel, io } = handoff;
+    let id = panel.read(cx).id();
+    let editor = panel.read(cx).editor();
+    if let Some(io) = io.clone() {
+      self.flow_document_runtimes.insert(id, io);
+    }
+    let adopting_workspace = cx_entity_weak(cx);
+    panel.update(cx, |panel, _| panel.set_workspace(adopting_workspace));
+    // Mirror create_flow_panel_titled's observers on the adopting side.
+    self.editor_subscriptions.push((
+      id,
+      cx.observe(&editor, move |workspace, editor, cx| {
+        workspace.maybe_autosave_flow(id, editor.clone(), cx);
+      }),
+    ));
+    self.editor_subscriptions.push((
+      id,
+      cx.subscribe_in(&editor, window, move |workspace, _, event: &crate::flow::FlowEditorEvent, window, cx| {
+        match event {
+          crate::flow::FlowEditorEvent::SendColumnToDocument { text } => {
+            let text = text.clone();
+            workspace.new_document(window, cx);
+            if let Some(editor) = workspace.active_editor.clone() {
+              editor.update(cx, |editor, cx| editor.insert_plain_text_from_toolkit(&text, cx));
+            }
+            workspace.report_activity("Column sent to a new document — save it where it belongs".to_string(), cx);
+          },
+          crate::flow::FlowEditorEvent::OpenCellSource { path } => {
+            workspace.open_document_path(PathBuf::from(path), window, cx);
+          },
+          _ => {},
+        }
+      }),
+    ));
+    self.flow_panels.push(panel);
+    self.pane_tree.insert_tab(id);
+    self.active_document_id = Some(id);
+    self.active_editor = None;
+    self.active_flow = Some(editor.clone());
+    editor.read(cx).focus_handle(cx).focus(window);
+    self.persist_temporary_workspace_session(cx);
+    cx.notify();
+  }
+
   /// W-S3: adopt a live panel handed off from another window.
   pub(crate) fn adopt_document_panel(&mut self, handoff: DocumentPanelHandoff, window: &mut Window, cx: &mut Context<Self>) {
     let DocumentPanelHandoff { panel, io } = handoff;
@@ -1250,8 +1373,32 @@ impl Workspace {
         Ok(LoadedWorkspaceDocument::Flow { snapshot, path }) => {
           let _ = window_handle.update(cx, |_, window, cx| {
             let _ = workspace.update(cx, |workspace, cx| {
+              // A10/Q-1 interim: warn at half the 64 MB refuse-to-open cap —
+              // the compaction ship (H4/H5) makes this unreachable later.
+              if snapshot.len() > 32 * 1024 * 1024 {
+                workspace.report_failure(
+                  format!(
+                    "This flow is {} MB — files past 64 MB cannot open. Start a fresh flow for the next round; compaction is coming.",
+                    snapshot.len() / (1024 * 1024)
+                  ),
+                  None,
+                  cx,
+                );
+              }
               workspace.record_recent_document(path.clone(), cx);
               workspace.add_flow_panel(FlowRuntimeSource::FromSnapshot(snapshot), Some(path), window, cx);
+            });
+          });
+        },
+        // H2: imported flows open pathless (docx-clobber law) with an honest
+        // "— imported" title; Save As gives them a real .fl0 home.
+        Ok(LoadedWorkspaceDocument::ImportedFlow { snapshot, title }) => {
+          let _ = window_handle.update(cx, |_, window, cx| {
+            let _ = workspace.update(cx, |workspace, cx| {
+              workspace.create_flow_panel_titled(FlowRuntimeSource::FromSnapshot(snapshot), None, Some(title), window, cx);
+              workspace.persist_temporary_workspace_session(cx);
+              workspace.report_activity("Imported as a new flow — save it as .fl0 where it belongs", cx);
+              cx.notify();
             });
           });
         },
@@ -1483,6 +1630,14 @@ impl Workspace {
               editor.restore_view_state(entry.flow_zoom, entry.flow_camera, entry.flow_cursor, cx);
             });
           }
+          panel.read(cx).id()
+        },
+        // H2: session entries never persist imported (pathless) flows, but
+        // the loader can still produce one if a session path was swapped for
+        // a spreadsheet on disk — open it the same pathless way.
+        LoadedWorkspaceDocument::ImportedFlow { snapshot, title } => {
+          let panel = self.create_flow_panel_titled(FlowRuntimeSource::FromSnapshot(snapshot), None, Some(title), window, cx);
+          is_flow_panel = true;
           panel.read(cx).id()
         },
       };
@@ -2662,6 +2817,130 @@ enum LoadedWorkspaceDocument {
     snapshot: Vec<u8>,
     path: PathBuf,
   },
+  /// H2: a flow IMPORTED from xlsx/csv — opens PATHLESS (docx-clobber law:
+  /// autosave must never adopt the foreign source path).
+  ImportedFlow {
+    snapshot: Vec<u8>,
+    title: String,
+  },
+}
+
+/// H2: xlsx / csv / tsv open as flow imports.
+fn is_spreadsheet_import_path(path: &Path) -> bool {
+  path
+    .extension()
+    .and_then(|extension| extension.to_str())
+    .is_some_and(|extension| {
+      extension.eq_ignore_ascii_case("xlsx") || extension.eq_ignore_ascii_case("csv") || extension.eq_ignore_ascii_case("tsv")
+    })
+}
+
+/// H2: build a fresh .fl0 snapshot from imported sheets — sheet type = the
+/// format's first, headers rename (or extend) the default speech ladder,
+/// cells seed as tag paragraphs. Generic today; the Verbatim-template shaping
+/// refines this when the Verbatim source lands.
+fn flow_snapshot_from_import(path: &Path) -> Result<Vec<u8>, String> {
+  let stem = path
+    .file_stem()
+    .map(|stem| stem.to_string_lossy().to_string())
+    .unwrap_or_else(|| "Imported".to_string());
+  let sheets: Vec<flowstate_docx::flow_xlsx::XlsxSheet> = if path
+    .extension()
+    .and_then(|extension| extension.to_str())
+    .is_some_and(|extension| extension.eq_ignore_ascii_case("xlsx"))
+  {
+    let bytes = fs::read(path).map_err(|error| format!("reading {}: {error}", path.display()))?;
+    flowstate_docx::flow_xlsx::read_xlsx(&bytes).map_err(|error| error.to_string())?
+  } else {
+    let text = fs::read_to_string(path).map_err(|error| format!("reading {}: {error}", path.display()))?;
+    vec![flowstate_docx::flow_xlsx::read_delimited(&stem, &text)]
+  };
+  let mut document = flowstate_flow::FlowDocument::new();
+  let sheet_type_id = document
+    .projection()
+    .format
+    .sheet_types
+    .first()
+    .map(|sheet_type| sheet_type.id)
+    .ok_or_else(|| "flow format has no sheet types".to_string())?;
+  for sheet in &sheets {
+    let sheet_id = Uuid::new_v4();
+    document
+      .apply_intent(&flowstate_flow::FlowIntent::CreateSheet {
+        sheet_id,
+        name: sheet.name.clone(),
+        sheet_type_id,
+      })
+      .map_err(|error| format!("creating imported sheet: {error}"))?;
+    // Reshape the type's default ladder to the imported headers.
+    let existing: Vec<flowstate_flow::ColumnId> = document
+      .projection()
+      .sheet(sheet_id)
+      .map(|sheet| sheet.columns.iter().map(|column| column.id).collect())
+      .unwrap_or_default();
+    for (column_ix, header) in sheet.headers.iter().enumerate() {
+      let header = if header.trim().is_empty() { format!("Col {}", column_ix + 1) } else { header.clone() };
+      if let Some(&column_id) = existing.get(column_ix) {
+        let _ = document.apply_intent(&flowstate_flow::FlowIntent::RenameColumn {
+          sheet_id,
+          column_id,
+          label: header,
+        });
+      } else {
+        let side = if column_ix % 2 == 0 {
+          flowstate_flow::ArgumentSide::One
+        } else {
+          flowstate_flow::ArgumentSide::Two
+        };
+        let _ = document.apply_intent(&flowstate_flow::FlowIntent::AddColumn {
+          sheet_id,
+          column_id: Uuid::new_v4(),
+          label: header,
+          side,
+          before: None,
+        });
+      }
+    }
+    // Rows + cells.
+    let row_ids: Vec<flowstate_flow::RowId> = (0..sheet.rows.len()).map(|_| Uuid::new_v4()).collect();
+    if !row_ids.is_empty() {
+      document
+        .apply_intent(&flowstate_flow::FlowIntent::InsertRows {
+          sheet_id,
+          before: None,
+          row_ids: row_ids.clone(),
+        })
+        .map_err(|error| format!("inserting imported rows: {error}"))?;
+    }
+    let columns_now: Vec<flowstate_flow::ColumnId> = document
+      .projection()
+      .sheet(sheet_id)
+      .map(|sheet| sheet.columns.iter().map(|column| column.id).collect())
+      .unwrap_or_default();
+    for (row_ix, row) in sheet.rows.iter().enumerate() {
+      for (column_ix, cell) in row.iter().enumerate() {
+        let Some(text) = cell else { continue };
+        if text.trim().is_empty() {
+          continue;
+        }
+        let Some(&column_id) = columns_now.get(column_ix) else { continue };
+        let _ = document.apply_intent(&flowstate_flow::FlowIntent::AddCell {
+          sheet_id,
+          cell_id: Uuid::new_v4(),
+          row_id: row_ids[row_ix],
+          column_id,
+          seed: flowstate_flow::CellSeed::Paragraphs(vec![flowstate_document::InputParagraph {
+            style: flowstate_document::PARAGRAPH_TAG,
+            runs: vec![flowstate_document::InputRun {
+              text: text.clone(),
+              styles: flowstate_document::RunStyles::default(),
+            }],
+          }]),
+        });
+      }
+    }
+  }
+  document.snapshot().map_err(|error| error.to_string())
 }
 
 #[hotpath::measure]
@@ -2669,6 +2948,15 @@ fn load_workspace_document(path: PathBuf) -> Result<LoadedWorkspaceDocument, Str
   if is_flow_path(&path) {
     let snapshot = flowstate_flow::load_flow_snapshot(&path).map_err(|error| error.to_string())?;
     return Ok(LoadedWorkspaceDocument::Flow { snapshot, path });
+  }
+  // H2: spreadsheets import as fresh, PATHLESS flows.
+  if is_spreadsheet_import_path(&path) {
+    let snapshot = flow_snapshot_from_import(&path)?;
+    let title = path
+      .file_stem()
+      .map(|stem| format!("{} — imported", stem.to_string_lossy()))
+      .unwrap_or_else(|| "Imported flow".to_string());
+    return Ok(LoadedWorkspaceDocument::ImportedFlow { snapshot, title });
   }
   load_document_for_open(&path)
     .map(|loaded| LoadedWorkspaceDocument::Document {

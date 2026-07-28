@@ -187,7 +187,10 @@ impl FlowRuntime {
     }
     let mut undo = UndoManager::new(&doc);
     undo.set_merge_interval(0);
-    undo.set_max_undo_steps(300);
+    // H6 (partial): a 90-minute round of rapid ops must never outrun undo —
+    // 300 was reachable. Full parity (persisted stacks + selection restore)
+    // is the recorded .db8 port; this kills the practical ceiling now.
+    undo.set_max_undo_steps(10_000);
     undo.add_exclude_origin_prefix("remote");
     undo.add_exclude_origin_prefix("repair");
     undo.add_exclude_origin_prefix("meta");
@@ -1363,6 +1366,8 @@ pub struct FlowCommentThread {
   pub created_at_unix_secs: i64,
   pub updated_at_unix_secs: i64,
   pub created_frontier: Option<Vec<u8>>,
+  /// H9: optional (head, anchor) encoded Loro cursors into the cell's text.
+  pub caret: Option<(Vec<u8>, Vec<u8>)>,
   pub messages: Vec<crate::crdt_runtime::RuntimeCommentMessage>,
 }
 
@@ -1426,6 +1431,8 @@ impl FlowRuntime {
         created_at_unix_secs: crate::crdt_runtime::map_i64_opt(&thread, "created_at").unwrap_or_default(),
         updated_at_unix_secs: crate::crdt_runtime::map_i64_opt(&thread, "updated_at").unwrap_or_default(),
         created_frontier: crate::crdt_runtime::map_binary_opt(&thread, "created_frontier"),
+        caret: crate::crdt_runtime::map_binary_opt(&thread, "anchor_head")
+          .zip(crate::crdt_runtime::map_binary_opt(&thread, "anchor_tail")),
         messages,
       });
     });
@@ -1438,6 +1445,20 @@ impl FlowRuntime {
   pub fn create_flow_comment(
     &mut self,
     cell: Option<CellId>,
+    body: &str,
+    author_user_id: u128,
+    author_display_name: &str,
+  ) -> anyhow::Result<u128> {
+    self.create_flow_comment_anchored(cell, None, body, author_user_id, author_display_name)
+  }
+
+  /// H9: like [`Self::create_flow_comment`], with an optional (head, anchor)
+  /// pair of encoded Loro cursors INTO the cell's text — "this word in this
+  /// tag" instead of "this cell".
+  pub fn create_flow_comment_anchored(
+    &mut self,
+    cell: Option<CellId>,
+    caret: Option<(Vec<u8>, Vec<u8>)>,
     body: &str,
     author_user_id: u128,
     author_display_name: &str,
@@ -1476,6 +1497,11 @@ impl FlowRuntime {
       },
     }
     thread.insert("quoted_text", quoted_text)?;
+    // H9: the optional in-cell range anchor (durable Loro cursors).
+    if let Some((head, tail)) = caret {
+      thread.insert("anchor_head", loro::LoroValue::Binary(head.into()))?;
+      thread.insert("anchor_tail", loro::LoroValue::Binary(tail.into()))?;
+    }
     thread.insert("created_frontier", loro::LoroValue::Binary(created_frontier.into()))?;
     thread.insert("resolved", false)?;
     thread.insert("created_at", now)?;

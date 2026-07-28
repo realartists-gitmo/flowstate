@@ -509,6 +509,57 @@ fn flow_color_item(
   })
 }
 
+/// D14: the density slider — continuous, not binary presets.
+fn flow_density_item(workspace: WeakEntity<Workspace>) -> SettingItem {
+  SettingItem::render(move |_, window, cx| {
+    let active = crate::app_settings::load_flow_density();
+    let slider_state = window.use_keyed_state(
+      SharedString::from(format!("flow-density-slider-{active:.2}")),
+      cx,
+      |_, _| {
+        SliderState::new()
+          .min(0.7)
+          .max(1.4)
+          .step(0.05)
+          .default_value(active)
+      },
+    );
+    let pending = match slider_state.read(cx).value() {
+      SliderValue::Single(value) => value,
+      SliderValue::Range(_, value) => value,
+    };
+    let has_pending = (pending - active).abs() > 0.011;
+    let workspace = workspace.clone();
+    h_flex()
+      .w_full()
+      .items_center()
+      .gap_2()
+      .child(div().w_48().text_sm().child("Density"))
+      .child(div().w(px(180.0)).child(Slider::new(&slider_state).horizontal()))
+      .child(
+        div()
+          .w(px(40.0))
+          .text_xs()
+          .text_color(cx.theme().muted_foreground)
+          .child(format!("{:.0}%", pending * 100.0)),
+      )
+      .when(has_pending, |this| {
+        this.child(
+          Button::new("flow-apply-density")
+            .icon(IconName::Check)
+            .small()
+            .ghost()
+            .tooltip("Apply density")
+            .on_click(move |_, _, cx| {
+              save_setting_reporting(workspace.clone(), "flow density", move || crate::app_settings::save_flow_density(pending), cx);
+              cx.refresh_windows();
+            }),
+        )
+      })
+      .into_any_element()
+  })
+}
+
 /// Q-15/C20: the cell wash — every slot tinted ~5% by its column's side.
 /// A theme setting, DEFAULT OFF (headers-only is the ratified look).
 fn flow_cell_wash_item(workspace: WeakEntity<Workspace>) -> SettingItem {

@@ -1,6 +1,6 @@
 //! Minimal repro hunt for the OPEN strikethrough-convergence bug (see
-//! flow_convergence.rs header). Isolates concurrent SetCellStruck +
-//! EnsureCellEditable on one cell and dumps the divergent cell projection.
+//! `flow_convergence.rs` header). Isolates concurrent `SetCellStruck` +
+//! `EnsureCellEditable` on one cell and dumps the divergent cell projection.
 #[cfg(test)]
 mod tests {
   use flowstate_collab::flow::{FlowDocHandle, FlowPublishEvent, FlowRuntime};

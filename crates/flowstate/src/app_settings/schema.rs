@@ -170,10 +170,18 @@ pub struct EditorSettings {
   /// sheets, flows, and restarts until the user flips it again.
   #[serde(default = "default_flow_ink_visible")]
   pub flow_ink_visible: bool,
+  /// D14: flow density — a continuous multiplier on cell text scale (row
+  /// heights follow the measured text automatically). 1.0 = default.
+  #[serde(default = "default_flow_density")]
+  pub flow_density: f32,
 }
 
 fn default_flow_ink_visible() -> bool {
   true
+}
+
+fn default_flow_density() -> f32 {
+  1.0
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -195,6 +203,7 @@ impl Default for EditorSettings {
       export_pdf_directory: None,
       reduce_motion: false,
       flow_ink_visible: true,
+      flow_density: 1.0,
     }
   }
 }

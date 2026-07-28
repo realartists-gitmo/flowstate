@@ -7,6 +7,7 @@
 use std::collections::HashSet;
 use std::future::Future;
 
+use flowstate_collab::flow::{FlowCommentThread, FlowIoHandle};
 use flowstate_collab::{SessionId, crdt_runtime::RuntimeCommentThread, doc_io::DocIoHandle, presence::CommentTyping};
 use gpui::AnimationExt as _;
 use gpui::{
@@ -36,12 +37,71 @@ const REFRESH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(2
 /// reads as noise, not review dress.
 const COMMENT_MARK_RGB: u32 = 0x00d9_9a20;
 
+/// G1: the panel serves BOTH formats through one dispatching handle — the
+/// comment verb surface is symmetric by design (C-S2 built the flow arm to
+/// mirror .db8), so every thread action goes through these shared methods.
+#[derive(Clone)]
+pub enum CommentsIo {
+  RichText(DocIoHandle),
+  Flow(FlowIoHandle),
+}
+
+impl CommentsIo {
+  async fn reply_to_comment(&self, comment_id: u128, body: String, author_user_id: u128, author_display_name: String) -> anyhow::Result<u128> {
+    match self {
+      Self::RichText(io) => io.reply_to_comment(comment_id, body, author_user_id, author_display_name).await,
+      Self::Flow(io) => io.reply_to_comment(comment_id, body, author_user_id, author_display_name).await,
+    }
+  }
+
+  async fn set_comment_resolved(&self, comment_id: u128, resolved: bool) -> anyhow::Result<()> {
+    match self {
+      Self::RichText(io) => io.set_comment_resolved(comment_id, resolved).await,
+      Self::Flow(io) => io.set_comment_resolved(comment_id, resolved).await,
+    }
+  }
+
+  async fn edit_comment_message(&self, comment_id: u128, message_id: u128, body: String, actor_user_id: u128) -> anyhow::Result<()> {
+    match self {
+      Self::RichText(io) => io.edit_comment_message(comment_id, message_id, body, actor_user_id).await,
+      Self::Flow(io) => io.edit_comment_message(comment_id, message_id, body, actor_user_id).await,
+    }
+  }
+
+  async fn delete_comment_message(&self, comment_id: u128, message_id: u128, actor_user_id: u128) -> anyhow::Result<()> {
+    match self {
+      Self::RichText(io) => io.delete_comment_message(comment_id, message_id, actor_user_id).await,
+      Self::Flow(io) => io.delete_comment_message(comment_id, message_id, actor_user_id).await,
+    }
+  }
+
+  async fn delete_comment(&self, comment_id: u128, actor_user_id: u128) -> anyhow::Result<()> {
+    match self {
+      Self::RichText(io) => io.delete_comment(comment_id, actor_user_id).await,
+      Self::Flow(io) => io.delete_comment(comment_id, actor_user_id).await,
+    }
+  }
+
+  async fn reanchor_comment(&self, comment_id: u128, selection: crate::rich_text_element::EditorSelection) -> anyhow::Result<()> {
+    match self {
+      Self::RichText(io) => io.reanchor_comment(comment_id, selection).await,
+      // Flow threads anchor by CELL (H9 ranges are set at creation); the
+      // re-anchor verb never renders for them (anchor = None).
+      Self::Flow(_) => anyhow::bail!("flow comments anchor to cells — re-anchor is a rich-text verb"),
+    }
+  }
+}
+
 pub struct CommentsPanel {
   /// The unread read-state lives workspace-side (C-S5); C-S6 history-jump
   /// opens a workspace view through this too.
   workspace: WeakEntity<Workspace>,
-  io: Option<DocIoHandle>,
+  io: Option<CommentsIo>,
   editor: Option<Entity<RichTextEditor>>,
+  /// G1: the flow twin of `editor` — set when the active panel is a flow.
+  flow_editor: Option<Entity<crate::flow::FlowEditor>>,
+  /// G1: comment id → its cell (None = general or dead cell), for jump.
+  flow_cells: std::collections::HashMap<u128, Option<flowstate_flow::CellId>>,
   panel_id: Option<Uuid>,
   author_user_id: u128,
   author_display_name: String,
@@ -98,6 +158,8 @@ impl CommentsPanel {
       workspace,
       io: None,
       editor: None,
+      flow_editor: None,
+      flow_cells: std::collections::HashMap::new(),
       panel_id: None,
       author_user_id: profile.user_id,
       author_display_name: profile.display_name,
@@ -164,7 +226,10 @@ impl CommentsPanel {
     let changed = self.panel_id != panel_id || self.io.is_some() != io.is_some();
     let reopened = !self.open;
     self.open = true;
-    self.io = io;
+    self.io = io.map(CommentsIo::RichText);
+    // A rich-text attach displaces any flow attach.
+    self.flow_editor = None;
+    self.flow_cells.clear();
     // A document switch orphans the previous editor's marks: clear them before
     // letting go of the handle.
     if changed && self.editor != editor {
@@ -189,6 +254,43 @@ impl CommentsPanel {
     } else if reopened {
       // Same document, panel re-shown: the cached threads are already right,
       // but review marks were cleared on detach — reload to re-arm them.
+      self.reload(cx);
+    }
+  }
+
+  /// G1: attach the active FLOW's io + editor — the panel's flow arm. The
+  /// backend has been live since C-S2; this is the surface it never had.
+  pub fn set_flow_context(
+    &mut self,
+    io: Option<FlowIoHandle>,
+    editor: Option<Entity<crate::flow::FlowEditor>>,
+    panel_id: Option<Uuid>,
+    cx: &mut Context<Self>,
+  ) {
+    let changed = self.panel_id != panel_id || self.io.is_some() != io.is_some();
+    let reopened = !self.open;
+    self.open = true;
+    self.io = io.map(CommentsIo::Flow);
+    // A flow attach displaces any rich-text attach (and its marks).
+    if changed && self.editor.is_some() {
+      self.clear_editor_marks(cx);
+      self.editor = None;
+    }
+    match &editor {
+      Some(observed) if self.flow_editor.as_ref() != Some(observed) => {
+        self._editor_observation = Some(cx.observe(observed, |panel, _, cx| panel.schedule_refresh(cx)));
+      },
+      Some(_) => {},
+      None => self._editor_observation = None,
+    }
+    self.flow_editor = editor;
+    self.panel_id = panel_id;
+    if changed {
+      self.threads.clear();
+      self.flow_cells.clear();
+      self.error = None;
+      self.reload(cx);
+    } else if reopened {
       self.reload(cx);
     }
   }
@@ -253,6 +355,23 @@ impl CommentsPanel {
     .detach();
   }
 
+  /// G1: a flow thread rendered through the rich-text thread shape — the
+  /// message model is shared; the anchor becomes the quoted cell snippet.
+  fn flow_thread_view(thread: &FlowCommentThread) -> RuntimeCommentThread {
+    RuntimeCommentThread {
+      comment_id: thread.comment_id,
+      author_user_id: thread.author_user_id,
+      quoted_text: thread.quoted_text.clone(),
+      resolved: thread.resolved,
+      general: thread.general,
+      created_at_unix_secs: thread.created_at_unix_secs,
+      updated_at_unix_secs: thread.updated_at_unix_secs,
+      created_frontier: thread.created_frontier.clone(),
+      anchor: None,
+      messages: thread.messages.clone(),
+    }
+  }
+
   fn reload(&mut self, cx: &mut Context<Self>) {
     let Some(io) = self.io.clone() else {
       cx.notify();
@@ -261,6 +380,68 @@ impl CommentsPanel {
     self.refresh_generation = self.refresh_generation.wrapping_add(1);
     let generation = self.refresh_generation;
     self.loading = self.threads.is_empty();
+    // G1: the flow arm loads + sorts (sheet → column → row, generals first —
+    // the C-S3 flow order) and remembers each thread's cell for the jump.
+    if let CommentsIo::Flow(flow_io) = io {
+      let order: std::collections::HashMap<flowstate_flow::CellId, (usize, usize, usize)> = self
+        .flow_editor
+        .as_ref()
+        .map(|editor| {
+          let mut order = std::collections::HashMap::new();
+          for (sheet_ix, sheet) in editor.read(cx).board().sheets.iter().enumerate() {
+            for (row_ix, row) in sheet.rows.iter().enumerate() {
+              for (column_ix, slot) in row.cells.iter().enumerate() {
+                if let Some(cell) = slot {
+                  order.insert(cell.id, (sheet_ix, column_ix, row_ix));
+                }
+              }
+            }
+          }
+          order
+        })
+        .unwrap_or_default();
+      cx.spawn(async move |panel, cx| {
+        let result = flow_io.comments().await;
+        let _ = panel.update(cx, |panel, cx| {
+          if panel.refresh_generation != generation {
+            return;
+          }
+          panel.loading = false;
+          match result {
+            Ok(mut threads) => {
+              threads.sort_by_key(|thread| {
+                let position = thread.cell_id.and_then(|cell| order.get(&cell).copied());
+                (position.is_some(), position, thread.created_at_unix_secs)
+              });
+              panel.flow_cells = threads
+                .iter()
+                .map(|thread| (thread.comment_id, thread.cell_id.filter(|_| thread.cell_alive)))
+                .collect();
+              panel.threads = threads.iter().map(Self::flow_thread_view).collect();
+              panel.error = None;
+              let stamps: Vec<(u128, i64)> = panel
+                .threads
+                .iter()
+                .map(|thread| (thread.comment_id, thread_latest_activity(thread)))
+                .collect();
+              let _ = panel.workspace.update(cx, |workspace, cx| {
+                for (comment_id, latest) in &stamps {
+                  if *latest > workspace.comment_seen_stamp(*comment_id) {
+                    panel.unread_threads.insert(*comment_id);
+                  }
+                }
+                workspace.mark_comment_threads_seen(&stamps, cx);
+              });
+            },
+            Err(error) => panel.error = Some(format!("Loading comments failed: {error:#}").into()),
+          }
+          cx.notify();
+        });
+      })
+      .detach();
+      return;
+    }
+    let CommentsIo::RichText(io) = io else { return };
     cx.spawn(async move |panel, cx| {
       let result = io.comments().await;
       let _ = panel.update(cx, |panel, cx| {
@@ -311,6 +492,14 @@ impl CommentsPanel {
       let selection = editor.read(cx).selection().clone();
       (selection.anchor != selection.head).then_some(selection)
     });
+    // G1: on a flow, the comment anchors to the ACTIVE cell (none = general).
+    // H9: and when the cell editor holds a live selection, to that RANGE.
+    let flow_cell = self.flow_editor.as_ref().and_then(|editor| editor.read(cx).active_cell());
+    let flow_caret = self
+      .flow_editor
+      .as_ref()
+      .map(|editor| editor.read(cx).presence_focus(cx).caret)
+      .unwrap_or(None);
     self.composer_busy = true;
     self
       .composer_input
@@ -319,7 +508,10 @@ impl CommentsPanel {
     self.sync_typing_state(cx);
     let (user, name) = (self.author_user_id, self.author_display_name.clone());
     cx.spawn(async move |panel, cx| {
-      let result = io.create_comment(selection, body, user, name).await;
+      let result = match io {
+        CommentsIo::RichText(io) => io.create_comment(selection, body, user, name).await,
+        CommentsIo::Flow(io) => io.create_comment_anchored(flow_cell, flow_caret, body, user, name).await,
+      };
       let _ = panel.update(cx, |panel, cx| {
         panel.composer_busy = false;
         match result {
@@ -334,7 +526,7 @@ impl CommentsPanel {
 
   fn thread_action<F, Fut>(&mut self, comment_id: u128, action: F, cx: &mut Context<Self>)
   where
-    F: FnOnce(DocIoHandle) -> Fut + 'static,
+    F: FnOnce(CommentsIo) -> Fut + 'static,
     Fut: Future<Output = anyhow::Result<()>> + 'static,
   {
     let Some(io) = self.io.clone() else { return };
@@ -356,6 +548,15 @@ impl CommentsPanel {
   }
 
   fn jump_to(&self, thread: &RuntimeCommentThread, window: &mut Window, cx: &mut Context<Self>) {
+    // G1: flow threads jump to their CELL (sheet activates, cursor lands,
+    // the cell flashes).
+    if let Some(flow) = self.flow_editor.clone() {
+      if let Some(Some(cell_id)) = self.flow_cells.get(&thread.comment_id).copied() {
+        flow.update(cx, |editor, cx| editor.jump_to_cell(cell_id, cx));
+      }
+      let _ = window;
+      return;
+    }
     let Some(editor) = self.editor.clone() else { return };
     let Some((start, end)) = thread.anchor else { return };
     editor.update(cx, |editor, cx| {

@@ -105,11 +105,61 @@ impl FlowEditor {
   }
 
   pub fn zoom_in(&mut self, cx: &mut gpui::Context<Self>) {
-    self.set_zoom_percent(self.zoom_percent() + ZOOM_STEP_PERCENT, cx);
+    self.animate_zoom_step(ZOOM_STEP_PERCENT, cx);
   }
 
   pub fn zoom_out(&mut self, cx: &mut gpui::Context<Self>) {
-    self.set_zoom_percent(self.zoom_percent() - ZOOM_STEP_PERCENT, cx);
+    self.animate_zoom_step(-ZOOM_STEP_PERCENT, cx);
+  }
+
+  /// C17: keyed/button zoom eases instead of snapping (wheel zoom stays
+  /// instant — pointer anchoring fights an ease on rapid ticks).
+  fn animate_zoom_step(&mut self, step: f32, cx: &mut gpui::Context<Self>) {
+    let requested = ((self.zoom_percent() + step) / ZOOM_STEP_PERCENT).round() * ZOOM_STEP_PERCENT;
+    let target = requested.clamp(MIN_ZOOM_PERCENT, MAX_ZOOM_PERCENT) / 100.0;
+    if (target - self.board_zoom).abs() < f32::EPSILON {
+      // Reuse the rail refusal voice.
+      self.set_zoom_percent(requested, cx);
+      return;
+    }
+    if !crate::motion::motion_enabled() {
+      self.set_zoom_percent(target * 100.0, cx);
+      return;
+    }
+    let center = self
+      .camera_center_for_session()
+      .map(|(x, y)| BoardPoint { x, y })
+      .unwrap_or_default();
+    self.camera_animation = Some(super::CameraAnimation {
+      from_zoom: self.board_zoom,
+      to_zoom: target,
+      from_center: center,
+      to_center: center,
+      started: std::time::Instant::now(),
+    });
+    cx.notify();
+  }
+
+  /// C17: ease the camera to a board point at the current zoom (long jumps).
+  pub(super) fn animate_center_to(&mut self, center: BoardPoint, cx: &mut gpui::Context<Self>) {
+    if !crate::motion::motion_enabled() {
+      self.camera_center = Some(center);
+      self.camera_apply_pending = true;
+      cx.notify();
+      return;
+    }
+    let from = self
+      .camera_center_for_session()
+      .map(|(x, y)| BoardPoint { x, y })
+      .unwrap_or(center);
+    self.camera_animation = Some(super::CameraAnimation {
+      from_zoom: self.board_zoom,
+      to_zoom: self.board_zoom,
+      from_center: from,
+      to_center: center,
+      started: std::time::Instant::now(),
+    });
+    cx.notify();
   }
 
   /// D10: the camera center for session persistence — the live scroll-derived

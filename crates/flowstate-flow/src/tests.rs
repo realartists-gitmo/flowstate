@@ -1117,8 +1117,8 @@ fn synthetic_flow(rows: usize, extra_cols: usize, seed: u64) -> (FlowDocument, S
     document
       .add_column(
         sheet,
-        &format!("Extra {i}"),
-        if i % 2 == 0 { ArgumentSide::One } else { ArgumentSide::Two },
+        format!("Extra {i}"),
+        if i.is_multiple_of(2) { ArgumentSide::One } else { ArgumentSide::Two },
         None,
       )
       .unwrap();

@@ -9,14 +9,14 @@
 //! `FLOWSTATE_FLOW_FUZZ_ROUNDS` scales to the deep soak.
 //!
 //! This soak FOUND and drove FIXES for two real convergence bugs:
-//!   - SetColumnWidth was a read-before-write conditional `delete` (diverged);
+//!   - `SetColumnWidth` was a read-before-write conditional `delete` (diverged);
 //!     now an unconditional LWW register (`0.0` = auto).
-//!   - EnsureCellEditable wrote the raw paragraph slot (off-by-one from the
+//!   - `EnsureCellEditable` wrote the raw paragraph slot (off-by-one from the
 //!     canonical `paragraph_style_value` encoding); now the canonical value.
 //!
 //! A third divergence was suspected here — a strikethrough `struck` split under
 //! concurrent `SetCellStruck` + `EnsureCellEditable`, reported diverging near
-//! round 299 at 3000 rounds. It was a downstream symptom of the EnsureCellEditable
+//! round 299 at 3000 rounds. It was a downstream symptom of the `EnsureCellEditable`
 //! off-by-one (Bug 2 above): with the canonical paragraph-style encoding fixed it
 //! no longer reproduces — 500 rounds is clean and a 1200-round run completes green
 //! with zero divergences. (A full 3000-round completion is just slow — the

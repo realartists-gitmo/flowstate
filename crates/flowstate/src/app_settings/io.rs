@@ -543,6 +543,17 @@ pub fn load_flow_ink_visible() -> bool {
   load_app_settings().editor.flow_ink_visible
 }
 
+/// D14: the flow density multiplier (clamped sane).
+pub fn load_flow_density() -> f32 {
+  load_app_settings().editor.flow_density.clamp(0.7, 1.4)
+}
+
+pub fn save_flow_density(density: f32) -> io::Result<()> {
+  let mut settings = load_app_settings();
+  settings.editor.flow_density = density.clamp(0.7, 1.4);
+  save_app_settings(settings)
+}
+
 pub fn save_flow_ink_visible(visible: bool) -> io::Result<()> {
   let mut settings = load_app_settings();
   settings.editor.flow_ink_visible = visible;

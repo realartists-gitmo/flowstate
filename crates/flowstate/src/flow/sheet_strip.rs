@@ -140,12 +140,11 @@ impl Render for FlowSheetStrip {
         .iter()
         .flat_map(|row| row.cells.iter())
         .filter_map(|slot| slot.as_ref())
-        .filter_map(|cell| {
+        .find_map(|cell| {
           let text = cell.summary.summary_text.to_string();
           let line = text.lines().next()?.trim().to_string();
           (!line.is_empty()).then_some(line)
         })
-        .next()
         .map(|line| SharedString::from(line.chars().take(24).collect::<String>()))
     };
     let sheets: Vec<(SheetId, SharedString, Option<usize>)> = editor

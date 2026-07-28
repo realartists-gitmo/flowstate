@@ -1,7 +1,7 @@
-//! Soak object #1: the app-side FlowEditor interaction net. Drives the real
+//! Soak object #1: the app-side `FlowEditor` interaction net. Drives the real
 //! public grid grammar built in P1–P6 — navigation, selection (range / row /
 //! column / select-all / cycle), clipboard copy/cut/paste, and fill/series —
-//! over a headless FlowEditor (no rendering), asserting on `board`/`cursor`/
+//! over a headless `FlowEditor` (no rendering), asserting on `board`/`cursor`/
 //! `selected_cells`. This is the behavioral net the interaction layer lacked.
 
 use gpui::{Entity, TestAppContext};
@@ -233,4 +233,103 @@ fn type_overwrite_replaces_an_occupied_cell(cx: &mut TestAppContext) {
   });
   cx.run_until_parked();
   assert_eq!(cell_text(&flow, cx, 0, 0).as_deref(), Some("z"), "type-to-overwrite replaces the cell's content");
+}
+
+// ---- flow-polish campaign nets (H12) ---------------------------------------
+
+/// B7: a gutter band selection deletes the ROWS themselves — no empty husks.
+#[gpui::test]
+fn band_delete_removes_the_rows(cx: &mut TestAppContext) {
+  let (h, flow) = open_flow(cx);
+  seed(&flow, cx, 0, 0, "a");
+  seed(&flow, cx, 1, 0, "b");
+  seed(&flow, cx, 2, 0, "c");
+  let before = flow.read_with(cx, |editor, _| editor.board().sheets[0].rows.len());
+  assert!(before >= 3, "three seeded rows exist");
+  flow.update(cx, |editor, cx| editor.select_row_span(0, 1, cx));
+  h.update(cx, |_, window, cx| {
+    flow.update(cx, |editor, cx| editor.delete_selected(window, cx));
+  });
+  cx.run_until_parked();
+  let after = flow.read_with(cx, |editor, _| editor.board().sheets[0].rows.len());
+  assert_eq!(after, before - 2, "the band's ROWS are gone, not just their cells");
+  assert_eq!(cell_text(&flow, cx, 0, 0).as_deref(), Some("c"), "the survivor moved up");
+}
+
+/// B6: Ctrl+PageDown cycles sheets, wrapping.
+#[gpui::test]
+fn cycle_sheet_wraps_around(cx: &mut TestAppContext) {
+  let (_h, flow) = open_flow(cx);
+  flow.update(cx, |editor, cx| editor.create_sheet(cx));
+  cx.run_until_parked();
+  let sheets: Vec<_> = flow.read_with(cx, |editor, _| {
+    editor.board().sheets.iter().map(|sheet| sheet.id).collect()
+  });
+  assert_eq!(sheets.len(), 2);
+  flow.update(cx, |editor, cx| editor.activate_sheet(sheets[0], cx));
+  flow.update(cx, |editor, cx| editor.cycle_sheet(true, cx));
+  assert_eq!(flow.read_with(cx, |editor, _| editor.active_sheet()), Some(sheets[1]));
+  flow.update(cx, |editor, cx| editor.cycle_sheet(true, cx));
+  assert_eq!(
+    flow.read_with(cx, |editor, _| editor.active_sheet()),
+    Some(sheets[0]),
+    "cycling wraps back to the first sheet"
+  );
+}
+
+/// A1: cut on sheet A + paste on sheet B is a MOVE — the source dies.
+#[gpui::test]
+fn cross_sheet_cut_paste_moves_the_cell(cx: &mut TestAppContext) {
+  let (_h, flow) = open_flow(cx);
+  seed(&flow, cx, 0, 0, "moved card");
+  flow.update(cx, |editor, cx| editor.create_sheet(cx));
+  cx.run_until_parked();
+  let sheets: Vec<_> = flow.read_with(cx, |editor, _| {
+    editor.board().sheets.iter().map(|sheet| sheet.id).collect()
+  });
+  // Cut on sheet 0.
+  flow.update(cx, |editor, cx| {
+    editor.activate_sheet(sheets[0], cx);
+    editor.set_cursor(0, 0, cx);
+    editor.cut_selection(cx);
+  });
+  // Paste on sheet 1.
+  flow.update(cx, |editor, cx| {
+    editor.activate_sheet(sheets[1], cx);
+    editor.set_cursor(0, 0, cx);
+    editor.paste(cx);
+  });
+  cx.run_until_parked();
+  let (source_gone, landed) = flow.read_with(cx, |editor, _| {
+    let board = editor.board();
+    let source = board.sheets.iter().find(|sheet| sheet.id == sheets[0]).unwrap();
+    let target = board.sheets.iter().find(|sheet| sheet.id == sheets[1]).unwrap();
+    (
+      source.slot(0, 0).is_none(),
+      target.slot(0, 0).map(|cell| cell.summary.summary_text.to_string()),
+    )
+  });
+  assert!(source_gone, "a cut is a move — the source cell is deleted on its HOME sheet");
+  assert_eq!(landed.as_deref(), Some("moved card"), "the content landed on the target sheet");
+}
+
+/// G1/D6: `jump_to_cell` activates the right sheet and parks the cursor.
+#[gpui::test]
+fn jump_to_cell_crosses_sheets(cx: &mut TestAppContext) {
+  let (_h, flow) = open_flow(cx);
+  seed(&flow, cx, 2, 1, "target");
+  let (first_sheet, cell_id) = flow.read_with(cx, |editor, _| {
+    let sheet = &editor.board().sheets[0];
+    (sheet.id, sheet.slot(2, 1).unwrap().id)
+  });
+  flow.update(cx, |editor, cx| editor.create_sheet(cx));
+  cx.run_until_parked();
+  let second = flow.read_with(cx, |editor, _| editor.board().sheets[1].id);
+  flow.update(cx, |editor, cx| {
+    editor.activate_sheet(second, cx);
+    editor.jump_to_cell(cell_id, cx);
+  });
+  cx.run_until_parked();
+  assert_eq!(flow.read_with(cx, |editor, _| editor.active_sheet()), Some(first_sheet));
+  assert_eq!(cursor(&flow, cx), Some((2, 1)), "the cursor landed on the jumped-to cell");
 }

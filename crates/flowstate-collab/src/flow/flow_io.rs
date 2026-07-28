@@ -60,8 +60,11 @@ pub enum FlowIoRequest {
     reply: ReplySender<Vec<u8>>,
   },
   /// Atomic `.fl0` write (fork under the gate, encode + write off it).
+  /// H4/H5: `allow_compact` (solo saves only) lets an oversized full-history
+  /// snapshot re-export shallow — the A10 size ceiling.
   SaveTo {
     path: PathBuf,
+    allow_compact: bool,
     reply: ReplySender<()>,
   },
   /// Framed `.fl0` bytes without touching disk (recovery files).
@@ -73,6 +76,8 @@ pub enum FlowIoRequest {
   },
   CreateComment {
     cell: Option<CellId>,
+    /// H9: optional (head, anchor) Loro cursors into the cell's text.
+    caret: Option<(Vec<u8>, Vec<u8>)>,
     body: String,
     author_user_id: u128,
     author_display_name: String,
@@ -222,7 +227,23 @@ impl FlowIoHandle {
 
   pub async fn save_to(&self, path: PathBuf) -> Result<()> {
     self
-      .request(|reply| FlowIoRequest::SaveTo { path, reply })
+      .request(|reply| FlowIoRequest::SaveTo {
+        path,
+        allow_compact: false,
+        reply,
+      })
+      .await
+  }
+
+  /// H4/H5: the solo-save variant that may COMPACT an oversized history —
+  /// see `SaveTo::allow_compact`.
+  pub async fn save_to_compacting(&self, path: PathBuf) -> Result<()> {
+    self
+      .request(|reply| FlowIoRequest::SaveTo {
+        path,
+        allow_compact: true,
+        reply,
+      })
       .await
   }
 
@@ -268,6 +289,28 @@ impl FlowIoHandle {
     self
       .request(|reply| FlowIoRequest::CreateComment {
         cell,
+        caret: None,
+        body,
+        author_user_id,
+        author_display_name,
+        reply,
+      })
+      .await
+  }
+
+  /// H9: create a comment anchored to a RANGE inside the cell's text.
+  pub async fn create_comment_anchored(
+    &self,
+    cell: Option<CellId>,
+    caret: Option<(Vec<u8>, Vec<u8>)>,
+    body: String,
+    author_user_id: u128,
+    author_display_name: String,
+  ) -> Result<u128> {
+    self
+      .request(|reply| FlowIoRequest::CreateComment {
+        cell,
+        caret,
         body,
         author_user_id,
         author_display_name,
@@ -432,12 +475,38 @@ fn io_loop(core: &Arc<WriteGate<FlowRuntime>>, receiver: &Receiver<FlowIoRequest
         });
         send_reply(&reply, result);
       },
-      FlowIoRequest::SaveTo { path, reply } => {
+      FlowIoRequest::SaveTo { path, allow_compact, reply } => {
+        // H4/H5 (the A10 cure): a SOLO save whose full-history snapshot has
+        // grown past the threshold re-exports SHALLOW at the current frontier
+        // — file size and save cost get a ceiling long before the 64 MB
+        // refuse-to-open cap. History older than the horizon leaves the file
+        // (checkpoint RECORDS survive; a checkout past the horizon refuses
+        // with words, which the tape already handles). Collab-attached saves
+        // never compact: a returning peer may still need the deep ops.
+        const COMPACT_THRESHOLD_BYTES: usize = 8 * 1024 * 1024;
         let result = fork_off_gate(core)
           .and_then(|fork| {
-            fork
+            let full = fork
               .export(ExportMode::Snapshot)
-              .context("exporting Loro snapshot for .fl0 save")
+              .context("exporting Loro snapshot for .fl0 save")?;
+            if allow_compact && full.len() > COMPACT_THRESHOLD_BYTES {
+              let frontier = fork.state_frontiers();
+              match fork.export(ExportMode::shallow_snapshot(&frontier)) {
+                Ok(shallow) if shallow.len() < full.len() => {
+                  tracing::info!(
+                    full = full.len(),
+                    shallow = shallow.len(),
+                    "compacted .fl0 save past the size threshold"
+                  );
+                  return Ok(shallow);
+                },
+                Ok(_) => {},
+                Err(error) => {
+                  tracing::warn!(%error, "shallow .fl0 compaction failed; saving full history");
+                },
+              }
+            }
+            Ok(full)
           })
           .and_then(|snapshot| flowstate_flow::persistence::save_snapshot_to(&path, &snapshot));
         send_reply(&reply, result);
@@ -482,6 +551,7 @@ fn io_loop(core: &Arc<WriteGate<FlowRuntime>>, receiver: &Receiver<FlowIoRequest
       },
       FlowIoRequest::CreateComment {
         cell,
+        caret,
         body,
         author_user_id,
         author_display_name,
@@ -490,7 +560,7 @@ fn io_loop(core: &Arc<WriteGate<FlowRuntime>>, receiver: &Receiver<FlowIoRequest
         send_reply(
           &reply,
           gate_call(core, GateHolder::DocumentService, |runtime| {
-            runtime.create_flow_comment(cell, &body, author_user_id, &author_display_name)
+            runtime.create_flow_comment_anchored(cell, caret, &body, author_user_id, &author_display_name)
           }),
         );
       },

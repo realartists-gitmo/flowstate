@@ -12,7 +12,7 @@ use gpui::{
 use gpui_component::ActiveTheme as _;
 use gpui_component::PixelsExt as _;
 use gpui_component::button::{Button, ButtonVariants as _};
-use gpui_component::scroll::{Scrollbar, ScrollbarShow};
+use gpui_component::scroll::Scrollbar;
 use gpui_component::{IconName, Sizable as _, WindowExt as _};
 
 use crate::{
@@ -152,6 +152,15 @@ pub struct FlowExternalPresence {
   pub selection_rect: Option<(usize, usize, usize, usize)>,
   /// G2: the peer's in-flight ink draft, board-space.
   pub ink_preview: Vec<(i32, i32)>,
+}
+
+/// C17: one eased camera move — zoom and center lerp together.
+struct CameraAnimation {
+  from_zoom: f32,
+  to_zoom: f32,
+  from_center: BoardPoint,
+  to_center: BoardPoint,
+  started: std::time::Instant,
 }
 
 /// A spoken refusal (F3): message toast + optional cell shake.
@@ -302,6 +311,10 @@ struct RowResizeState {
   live_height: f32,
 }
 
+/// D11: the rich clipboard payload — per-slot paragraph seeds for the copied
+/// rectangle (None = the slot was empty in the copy).
+type RichClipboardGrid = Vec<Vec<Option<Vec<flowstate_document::InputParagraph>>>>;
+
 pub struct FlowEditor {
   /// THE write authority (spec invariant 5): solo and collaborative flows
   /// receive this identical gated handle. Every mutation is a [`FlowIntent`]
@@ -339,6 +352,10 @@ pub struct FlowEditor {
   /// The in-progress ink stroke in board model space (grid-origin relative);
   /// committed as a rigid-body grid-anchored stroke (D6).
   drawing_points: Vec<BoardPoint>,
+  /// True only between an armed tool's mouse-DOWN and its mouse-up/Esc. The
+  /// eraser (and marker) apply while this is live — a bare hover with a tool
+  /// armed must never mark or erase.
+  tool_stroke_live: bool,
   cell_editors: std::collections::HashMap<CellId, Entity<RichTextEditor>>,
   cell_editor_themes: std::collections::HashMap<CellId, (gpui::Hsla, gpui::Hsla, u32)>,
   cell_editor_subscriptions: std::collections::HashMap<CellId, Subscription>,
@@ -420,6 +437,11 @@ pub struct FlowEditor {
   /// E10: the round-metadata form (opened from the ribbon's Round chip).
   round_form: Option<Vec<(flowstate_flow::RoundField, Entity<gpui_component::input::InputState>)>>,
   round_form_subscriptions: Vec<gpui::Subscription>,
+  /// D6: the find bar — matches walk EVERY sheet of the round (Ctrl+F).
+  find_bar: Option<Entity<gpui_component::input::InputState>>,
+  find_subscription: Option<gpui::Subscription>,
+  find_matches: Vec<(SheetId, CellId)>,
+  find_ix: usize,
   /// Painted bounds of the history tape's track (drag math reads it back).
   tape_bounds: std::rc::Rc<std::cell::Cell<Option<Bounds<gpui::Pixels>>>>,
   cell_bounds: std::collections::HashMap<CellId, Bounds<gpui::Pixels>>,
@@ -455,11 +477,14 @@ pub struct FlowEditor {
   /// B1: live edge-autoscroll vector while a drag/marquee hugs the viewport
   /// edge — applied per frame in render until the gesture ends.
   autoscroll: Option<(f32, f32)>,
+  /// C17: an in-flight eased camera move (zoom steps, long cursor jumps) —
+  /// render lerps it out over ~160ms; reduce-motion snaps instead.
+  camera_animation: Option<CameraAnimation>,
   /// D11: the rich twin of the TSV clipboard — the same copy's cells as
   /// paragraph seeds so an intra-app paste keeps styles/highlights. The TSV
   /// string is the fingerprint: if the system clipboard stops matching it, an
   /// external copy replaced it and the rich payload is stale.
-  internal_clipboard: Option<(String, Vec<Vec<Option<Vec<flowstate_document::InputParagraph>>>>)>,
+  internal_clipboard: Option<(String, RichClipboardGrid)>,
   focus_handle: FocusHandle,
 }
 
@@ -502,6 +527,7 @@ impl FlowEditor {
       },
       pen_preset: PenPreset::default(),
       drawing_points: Vec::new(),
+      tool_stroke_live: false,
       cell_editors: std::collections::HashMap::new(),
       cell_editor_themes: std::collections::HashMap::new(),
       cell_editor_subscriptions: std::collections::HashMap::new(),
@@ -541,6 +567,10 @@ impl FlowEditor {
       column_width_subscription: None,
       round_form: None,
       round_form_subscriptions: Vec::new(),
+      find_bar: None,
+      find_subscription: None,
+      find_matches: Vec::new(),
+      find_ix: 0,
       tape_bounds: std::rc::Rc::default(),
       cell_bounds: std::collections::HashMap::new(),
       cell_measurements: std::collections::HashMap::new(),
@@ -559,6 +589,7 @@ impl FlowEditor {
       suppress_drop: false,
       typeover_mode: false,
       autoscroll: None,
+      camera_animation: None,
       internal_clipboard: None,
       focus_handle: cx.focus_handle(),
     }
@@ -711,7 +742,7 @@ impl FlowEditor {
 
   /// P4: re-anchor any of the captured strokes whose resolved position moved,
   /// pinning each back to its pre-change absolute spot (the re-anchor targets
-  /// the real slot geometrically under that spot). AddAnnotation with the
+  /// the real slot geometrically under that spot). `AddAnnotation` with the
   /// SAME id overwrites the record — write-once stays true per key.
   fn compensate_local_ink(&mut self, snapshot: Vec<(flowstate_flow::AnnotationStroke, BoardPoint)>, cx: &mut Context<Self>) {
     if snapshot.is_empty() {
@@ -1108,7 +1139,54 @@ impl FlowEditor {
     let fraction = scrubber.fraction;
     let tape_marks = scrubber.marks.clone();
     let selected_mark = scrubber.selected_mark;
-    let label: SharedString = format!("history · {} / {} ops", scrubber.shown_ops, scrubber.total_ops).into();
+    // G4 (diff half): which historical cells differ from NOW — moved, edited,
+    // or absent from the present. Restoring would change exactly these.
+    let live_sheet = sheet.and_then(|historical| self.board.sheets.iter().find(|live| live.id == historical.id));
+    let changed: HashSet<CellId> = sheet
+      .map(|historical| {
+        let mut changed = HashSet::new();
+        for row in &historical.rows {
+          for cell in row.cells.iter().flatten() {
+            let differs = match live_sheet.and_then(|live| live.find_cell(cell.id)) {
+              None => true,
+              Some(live_cell) => {
+                live_cell.summary.summary_text != cell.summary.summary_text
+                  || live_sheet.and_then(|live| live.cell_position(cell.id)) != historical.cell_position(cell.id)
+              },
+            };
+            if differs {
+              changed.insert(cell.id);
+            }
+          }
+        }
+        changed
+      })
+      .unwrap_or_default();
+    let vanished = live_sheet
+      .map(|live| {
+        live
+          .cells()
+          .filter(|cell| sheet.is_some_and(|historical| historical.find_cell(cell.id).is_none()))
+          .count()
+      })
+      .unwrap_or(0);
+    let label: SharedString = if changed.is_empty() && vanished == 0 {
+      format!("history · {} / {} ops", scrubber.shown_ops, scrubber.total_ops).into()
+    } else {
+      format!(
+        "history · {} / {} ops · restore changes {} card{}{}",
+        scrubber.shown_ops,
+        scrubber.total_ops,
+        changed.len(),
+        if changed.len() == 1 { "" } else { "s" },
+        if vanished > 0 {
+          format!(" and removes {vanished}")
+        } else {
+          String::new()
+        }
+      )
+      .into()
+    };
     let weak = cx.entity().downgrade();
     // C16: replay renders the REAL grid — header band, gridlines, positioned
     // cells, historical ink — read-only, so the past speaks the same visual
@@ -1193,6 +1271,10 @@ impl FlowEditor {
                 .text_size(px(12.0 * zoom))
                 .text_color(flow_theme.text.opacity(if cell.summary.struck { 0.45 } else { 0.9 }))
                 .when(cell.summary.struck, |this| this.line_through())
+                // G4: outline what a restore would change.
+                .when(changed.contains(&cell.id), |this| {
+                  this.border_2().border_color(flow_theme.selection)
+                })
                 .child(SharedString::from(cell.summary.summary_text.to_string()))
                 .into_any_element(),
             );
@@ -1380,13 +1462,13 @@ impl FlowEditor {
     let items: Vec<gpui_component::menu::PopupMenuItem> = if occupied {
       let mut items = vec![
         self.menu_item(cx, if struck { "Unstrike" } else { "Strike" }, |editor, _, cx| {
-          editor.strike_selected(cx)
+          editor.strike_selected(cx);
         }),
         self.menu_item(cx, "Cut", |editor, _, cx| editor.cut_selection(cx)),
         self.menu_item(cx, "Copy", |editor, _, cx| editor.copy_selection(cx)),
         self.menu_item(cx, "Paste", |editor, _, cx| editor.paste(cx)),
         self.menu_item(cx, "Delete card", |editor, window, cx| {
-          editor.delete_selected(window, cx)
+          editor.delete_selected(window, cx);
         }),
       ];
       // Q-21/F2: jump back to the evidence this card was flowed from.
@@ -1414,27 +1496,17 @@ impl FlowEditor {
             let name = if sheet.name.trim().is_empty() { "Untitled".to_string() } else { sheet.name.clone() };
             (sheet.id, name)
           })
-          .collect::<Vec<_>>()
         {
           items.push(self.menu_item(cx, format!("Send to “{name}”"), move |editor, _, cx| {
-            editor.send_cell_to_sheet(cell_id, target, cx)
+            editor.send_cell_to_sheet(cell_id, target, cx);
           }));
         }
       }
       items
     } else {
-      vec![
-        self.menu_item(cx, "New card here", |editor, window, cx| {
-          if let Some((row_ix, column_ix)) = editor.cursor
-            && editor
-              .add_cell_at_slot(row_ix, column_ix, flowstate_flow::CellSeed::Empty, cx)
-              .is_some()
-          {
-            editor.focus_active_cell(window, cx);
-          }
-        }),
-        self.menu_item(cx, "Paste", |editor, _, cx| editor.paste(cx)),
-      ]
+      // An empty slot's creation verb is TYPING (the grid grammar) — the
+      // menu carries only clipboard + structure.
+      vec![self.menu_item(cx, "Paste", |editor, _, cx| editor.paste(cx))]
     };
     let mut trailing: Vec<gpui_component::menu::PopupMenuItem> = vec![
       self.menu_item(cx, "Insert row above", |editor, window, cx| {
@@ -1485,13 +1557,13 @@ impl FlowEditor {
     };
     let items: Vec<gpui_component::menu::PopupMenuItem> = vec![
       self.menu_item(cx, "Rename column…", move |editor, window, cx| {
-        editor.begin_column_rename(column_id, position, window, cx)
+        editor.begin_column_rename(column_id, position, window, cx);
       }),
       self.menu_item(cx, "Column width…", move |editor, window, cx| {
-        editor.begin_column_width_entry(column_id, position, window, cx)
+        editor.begin_column_width_entry(column_id, position, window, cx);
       }),
       self.menu_item(cx, "Autofit width", move |editor, window, cx| {
-        editor.autofit_column(column_id, column_ix, window, cx)
+        editor.autofit_column(column_id, column_ix, window, cx);
       }),
       // E3: the alternation guess finally has an eraser.
       self.menu_item(cx, "Switch side (aff/neg)", move |editor, _, cx| {
@@ -1521,7 +1593,7 @@ impl FlowEditor {
       }),
       // F4/Q-22: the rebuttal is spoken off the flow.
       self.menu_item(cx, "Send column to new document", move |editor, _, cx| {
-        editor.send_column_to_document(column_ix, cx)
+        editor.send_column_to_document(column_ix, cx);
       }),
     ];
     let menu = gpui_component::menu::PopupMenu::build(window, cx, move |mut menu, _, _| {
@@ -1572,7 +1644,7 @@ impl FlowEditor {
     }
     if has_override && let Some(row_id) = row_id {
       items.push(self.menu_item(cx, "Autofit height", move |editor, _, cx| {
-        editor.clear_row_height_override(row_id, cx)
+        editor.clear_row_height_override(row_id, cx);
       }));
     }
     let menu = gpui_component::menu::PopupMenu::build(window, cx, move |mut menu, _, _| {
@@ -1582,6 +1654,163 @@ impl FlowEditor {
       menu
     });
     self.context_menu = Some((position, menu));
+    cx.notify();
+  }
+
+  /// H1: export the whole flow as .xlsx — one worksheet per sheet, headers
+  /// then the grid, so a coach on the Excel workflow opens it natively.
+  pub fn export_xlsx(&mut self, cx: &mut Context<Self>) {
+    let sheets: Vec<flowstate_docx::flow_xlsx::XlsxSheet> = self
+      .board
+      .sheets
+      .iter()
+      .map(|sheet| flowstate_docx::flow_xlsx::XlsxSheet {
+        name: if sheet.name.trim().is_empty() { "Sheet".to_string() } else { sheet.name.clone() },
+        headers: sheet.columns.iter().map(|column| column.label.clone()).collect(),
+        rows: sheet
+          .rows
+          .iter()
+          .map(|row| {
+            row
+              .cells
+              .iter()
+              .map(|slot| slot.as_ref().map(|cell| cell.summary.summary_text.to_string()))
+              .collect()
+          })
+          .collect(),
+      })
+      .collect();
+    let suggested = self
+      .path
+      .as_ref()
+      .and_then(|path| path.file_stem())
+      .map(|stem| format!("{}.xlsx", stem.to_string_lossy()))
+      .unwrap_or_else(|| "flow.xlsx".to_string());
+    let directory = self
+      .path
+      .as_ref()
+      .and_then(|path| path.parent())
+      .map(|parent| parent.to_path_buf())
+      .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")));
+    let prompt = cx.prompt_for_new_path(&directory, Some(&suggested));
+    cx.spawn(async move |editor, cx| {
+      let Ok(Ok(Some(target))) = prompt.await else { return };
+      let result = flowstate_docx::flow_xlsx::write_xlsx(&sheets).and_then(|bytes| std::fs::write(&target, bytes));
+      let _ = editor.update(cx, |editor, cx| match result {
+        Ok(()) => editor.refuse(format!("exported {}", target.display()), None, cx),
+        Err(error) => editor.refuse(format!("xlsx export failed: {error}"), None, cx),
+      });
+    })
+    .detach();
+  }
+
+  /// D6: open (or refocus) the find bar. Matches span EVERY sheet — debaters
+  /// signpost across the whole round, not one sheet.
+  pub fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    if let Some(input) = &self.find_bar {
+      input.focus_handle(cx).focus(window);
+      return;
+    }
+    let input = cx.new(|cx| gpui_component::input::InputState::new(window, cx).placeholder("Find in flow"));
+    input.focus_handle(cx).focus(window);
+    self.find_subscription = Some(cx.subscribe_in(
+      &input,
+      window,
+      |editor: &mut Self, input, event: &gpui_component::input::InputEvent, _window, cx| match event {
+        gpui_component::input::InputEvent::Change => {
+          let query = input.read(cx).value().to_string();
+          editor.recompute_find_matches(&query, cx);
+        },
+        gpui_component::input::InputEvent::PressEnter { .. } => {
+          editor.step_find(true, cx);
+        },
+        _ => {},
+      },
+    ));
+    self.find_bar = Some(input);
+    cx.notify();
+  }
+
+  pub fn close_find(&mut self, cx: &mut Context<Self>) {
+    self.find_bar = None;
+    self.find_subscription = None;
+    self.find_matches.clear();
+    self.find_ix = 0;
+    cx.notify();
+  }
+
+  /// D6: case-insensitive containment over every cell's summary text, in
+  /// sheet → row → column order.
+  fn recompute_find_matches(&mut self, query: &str, cx: &mut Context<Self>) {
+    self.find_matches.clear();
+    self.find_ix = 0;
+    let needle = query.trim().to_lowercase();
+    if !needle.is_empty() {
+      for sheet in &self.board.sheets {
+        for row in &sheet.rows {
+          for slot in row.cells.iter().flatten() {
+            if slot.summary.summary_text.to_lowercase().contains(&needle) {
+              self.find_matches.push((sheet.id, slot.id));
+            }
+          }
+        }
+      }
+    }
+    // Land on the first match immediately (Excel behavior).
+    if let Some(&(_, cell_id)) = self.find_matches.first() {
+      self.jump_to_cell(cell_id, cx);
+    }
+    cx.notify();
+  }
+
+  /// D6: Enter = next match, wrapping; the refusal voice covers an empty set.
+  fn step_find(&mut self, forward: bool, cx: &mut Context<Self>) {
+    if self.find_matches.is_empty() {
+      self.refuse("no matches in this flow", None, cx);
+      return;
+    }
+    let count = self.find_matches.len();
+    self.find_ix = if forward {
+      (self.find_ix + 1) % count
+    } else {
+      (self.find_ix + count - 1) % count
+    };
+    let (_, cell_id) = self.find_matches[self.find_ix];
+    self.jump_to_cell(cell_id, cx);
+  }
+
+  /// G1: land on a cell from the comments rail — activate its sheet, park
+  /// the cursor, flash it.
+  pub fn jump_to_cell(&mut self, cell_id: CellId, cx: &mut Context<Self>) {
+    let located = self
+      .board
+      .sheets
+      .iter()
+      .find_map(|sheet| sheet.cell_position(cell_id).map(|position| (sheet.id, position)));
+    let Some((sheet_id, (row_ix, column_ix))) = located else {
+      self.refuse("that card no longer exists", None, cx);
+      return;
+    };
+    if self.active_sheet != Some(sheet_id) {
+      self.activate_sheet(sheet_id, cx);
+    }
+    self.set_cursor(row_ix, column_ix, cx);
+    // C17: a LONG jump eases the camera so orientation survives; short hops
+    // scroll instantly.
+    let target = self.active_layout().map(|(layout, _)| {
+      let (slot_x, slot_y) = layout.slot_origin(row_ix, column_ix);
+      BoardPoint { x: slot_x, y: slot_y }
+    });
+    let current = self.camera_center_for_session().map(|(x, y)| BoardPoint { x, y });
+    match (target, current) {
+      (Some(target), Some(current))
+        if (target.x - current.x).abs() > 600.0 || (target.y - current.y).abs() > 500.0 =>
+      {
+        self.animate_center_to(target, cx);
+      },
+      _ => self.scroll_cursor_into_view(),
+    }
+    self.cell_flash.insert(cell_id, std::time::Instant::now());
     cx.notify();
   }
 
@@ -2538,6 +2767,12 @@ impl FlowEditor {
     &self.selected_cells
   }
 
+  /// The C3 selection rectangle `(r0, c0, r1, c1)`, if the current selection
+  /// is rectangular (range / marquee / band). Read by the headless nets.
+  pub fn selection_rect(&self) -> Option<(usize, usize, usize, usize)> {
+    self.selection_rect
+  }
+
   /// C3/B7: an irregular or cleared selection has no rectangle and no bands.
   pub(super) fn clear_selection_shape(&mut self) {
     self.selection_rect = None;
@@ -2879,6 +3114,14 @@ impl FlowEditor {
   pub fn undo(&mut self, cx: &mut Context<Self>) {
     if self.handle.undo().is_ok_and(|changed| changed) {
       self.resync_from_runtime(cx);
+      // H6 (partial): "undo shows you what it undid" — park the cursor on a
+      // cell the undo touched (the resync's Delta flash marks the rest). The
+      // full selection-restore rides the recorded .db8 undo port.
+      if let Some((&cell_id, _)) = self.cell_flash.iter().next()
+        && self.board.sheets.iter().any(|sheet| sheet.find_cell(cell_id).is_some())
+      {
+        self.jump_to_cell(cell_id, cx);
+      }
       self.dirty = true;
       cx.emit(FlowEditorEvent::Changed);
       cx.notify();
@@ -2935,13 +3178,22 @@ impl FlowEditor {
     // The I/O service owns the save: fork under the gate (brief), snapshot
     // export + framing + atomic write off it (spec I-9a).
     let io = self.io.clone();
+    // H4/H5: solo saves may compact an oversized history; a live session
+    // never does — a returning peer may still need the deep ops.
+    let allow_compact = !self.session_attached;
     cx.spawn(async move |editor, cx| {
       let write_result = cx
         .background_executor()
         .spawn(async move {
-          io.save_to(path.clone())
-            .await
-            .map_err(std::io::Error::other)?;
+          if allow_compact {
+            io.save_to_compacting(path.clone())
+              .await
+              .map_err(std::io::Error::other)?;
+          } else {
+            io.save_to(path.clone())
+              .await
+              .map_err(std::io::Error::other)?;
+          }
           // G5: every save mints its tier's checkpoint, exactly like .db8
           // revisions — the history tape stops being empty-unless-pinned.
           if let Err(error) = io.create_checkpoint(None, checkpoint_kind).await {
@@ -3037,6 +3289,21 @@ impl FlowEditor {
     }
   }
 
+  /// Inverse of `slot_at_position`: the window position at a slot's center.
+  /// Exists for the headless mouse-gesture nets, which need real screen
+  /// coordinates to drive marquee/fill drags through rendered hit-testing.
+  pub fn slot_center(&self, row_ix: usize, column_ix: usize) -> Option<gpui::Point<gpui::Pixels>> {
+    let sheet = self.active_sheet_ref()?;
+    let layout = GridLayout::compute_to(sheet, &self.cell_measurements, self.ghost_bottom_model());
+    if row_ix >= layout.total_rows() || column_ix >= layout.column_lefts.len() {
+      return None;
+    }
+    let (origin_x, origin_y) = grid_origin_model();
+    let x = (origin_x + layout.column_lefts[column_ix] + layout.column_widths[column_ix] / 2.0) * self.board_zoom + self.viewport_origin.x;
+    let y = (origin_y + layout.row_top(row_ix) + layout.row_height(row_ix) / 2.0) * self.board_zoom + self.viewport_origin.y;
+    Some(point(px(x), px(y)))
+  }
+
   /// Map a pointer position to the (row, column) slot under it.
   fn slot_at_position(&self, position: gpui::Point<gpui::Pixels>) -> Option<(usize, usize)> {
     let point = self.model_point(position);
@@ -3055,18 +3322,29 @@ impl FlowEditor {
 
   /// Shift-press on the grid starts a rubber-band selection anchored at the
   /// slot under the pointer (bare press pans instead).
-  fn begin_marquee(&mut self, position: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
+  pub(crate) fn begin_marquee(&mut self, position: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
     if let Some(slot) = self.slot_at_position(position) {
-      self.marquee_anchor = Some(slot);
-      self.selection_anchor = Some(slot);
+      // Excel law: shift+press EXTENDS from the existing anchor (or the
+      // active cursor) — it never resets the rectangle to the pressed slot.
+      // Resetting made a lasso impossible to widen after mouse-up: the next
+      // shift+press collapsed it to one cell (invisible when re-dragging
+      // down a column, glaring when reaching into the next column).
+      let anchor = self.selection_anchor.or(self.cursor).unwrap_or(slot);
+      self.marquee_anchor = Some(anchor);
+      self.selection_anchor = Some(anchor);
       self.tab_anchor_column = None;
       self.select_cell_range(slot.0, slot.1, cx);
     }
   }
 
+  /// Test twin of the mouse-up handler: the drag ends, the anchor survives.
+  pub(crate) fn end_marquee_for_test(&mut self) {
+    self.marquee_anchor = None;
+  }
+
   /// While shift-dragging: grow the rectangle from the marquee anchor to the
   /// slot under the pointer.
-  fn update_marquee(&mut self, position: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
+  pub(crate) fn update_marquee(&mut self, position: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
     if self.marquee_anchor.is_some() {
       // B1: a marquee dragged to the edge pans the board too.
       self.update_autoscroll(position);
@@ -3621,16 +3899,6 @@ impl FlowEditor {
                 })
                 .group(grip_group.clone())
                 .when(dragging_this, |this| this.opacity(0.4))
-                // C1 (Q-5): the hover wash — a faint selection tint on the slot
-                // under the pointer, on top of the fill, under the content.
-                .child(
-                  div()
-                    .absolute()
-                    .inset_0()
-                    .invisible()
-                    .group_hover(grip_group.clone(), |this| this.visible())
-                    .bg(flow_theme.selection.opacity(0.06)),
-                )
                 .on_children_prepainted({
                   let weak = weak_editor.clone();
                   move |bounds, _, cx| {
@@ -3752,8 +4020,11 @@ impl FlowEditor {
                         .gap(grip_gap)
                         .p(px(2.5 * zoom))
                         .rounded(px(3.0 * zoom))
-                        .bg(cx.theme().popover)
-                        .shadow_sm()
+                        // P6: on-board chrome draws from the FLOW theme, never
+                        // the app theme — the grip is sheet furniture.
+                        .bg(flow_theme.header_bg)
+                        .border_1()
+                        .border_color(flow_theme.chrome_border)
                         .cursor(gpui::CursorStyle::OpenHand)
                         .child(grip_column())
                         .child(grip_column())
@@ -3821,9 +4092,6 @@ impl FlowEditor {
                 .w(width - px(grid_layout::CELL_SLOT_INSET))
                 .h(height - px(grid_layout::CELL_SLOT_INSET))
                 .bg(empty_fill)
-                // C1 (Q-5): hover wash on empty slots too — the grid answers
-                // the pointer everywhere.
-                .hover(|this| this.bg(flow_theme.selection.opacity(0.06)))
                 .when(is_cursor, |this| this.border(px(2.0)).border_color(side_palette.active))
                 // G2: a peer parked on this EMPTY slot rings it in their color
                 // (a cell id could never say this).
@@ -4135,7 +4403,7 @@ impl FlowEditor {
         if editor.take_suppressed_drop() {
           return; // B2: the gesture was Esc-cancelled
         }
-        editor.finish_cell_drop(drag.cell_id, cx)
+        editor.finish_cell_drop(drag.cell_id, cx);
       }))
       .on_drag_move(cx.listener(|editor, event: &DragMoveEvent<RowDrag>, _, cx| {
         if !editor.suppress_drop && event.bounds.contains(&event.event.position) {
@@ -4147,7 +4415,7 @@ impl FlowEditor {
         if editor.take_suppressed_drop() {
           return; // B2
         }
-        editor.finish_row_drop(drag.row_id, cx)
+        editor.finish_row_drop(drag.row_id, cx);
       }))
       .on_drag_move(cx.listener(|editor, event: &DragMoveEvent<ColumnDrag>, _, cx| {
         if !editor.suppress_drop && event.bounds.contains(&event.event.position) {
@@ -4159,7 +4427,7 @@ impl FlowEditor {
         if editor.take_suppressed_drop() {
           return; // B2
         }
-        editor.finish_column_drop(drag.column_id, cx)
+        editor.finish_column_drop(drag.column_id, cx);
       }))
       .on_drag_move(cx.listener(|editor, event: &DragMoveEvent<ColumnResizeDrag>, _, cx| {
         editor.update_column_resize(event.event.position, cx);
@@ -4254,8 +4522,7 @@ impl FlowEditor {
                 .border_color(color.opacity(0.6))
                 .into_any_element(),
             )
-          })
-          .collect::<Vec<_>>(),
+          }),
       )
       .children(row_bar)
       .children(column_bar)
@@ -4732,6 +4999,23 @@ impl Focusable for FlowEditor {
 
 impl Render for FlowEditor {
   fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    // C17: step any in-flight camera ease (zoom + center lerp, ease-out
+    // cubic over 160ms) before this frame's camera application.
+    if let Some(animation) = &self.camera_animation {
+      let t = (animation.started.elapsed().as_secs_f32() / 0.16).min(1.0);
+      let eased = 1.0 - (1.0 - t).powi(3);
+      self.board_zoom = animation.from_zoom + (animation.to_zoom - animation.from_zoom) * eased;
+      self.camera_center = Some(BoardPoint {
+        x: animation.from_center.x + (animation.to_center.x - animation.from_center.x) * eased,
+        y: animation.from_center.y + (animation.to_center.y - animation.from_center.y) * eased,
+      });
+      self.camera_apply_pending = true;
+      if t >= 1.0 {
+        self.camera_animation = None;
+      } else {
+        cx.on_next_frame(window, |_, _, cx| cx.notify());
+      }
+    }
     self.apply_pending_camera_center();
     // gpui's native scroll accumulates the wheel delta UNCLAMPED and only clamps
     // it at paint — but this render reads `board_scroll.offset()` during element
@@ -4818,16 +5102,10 @@ impl Render for FlowEditor {
         self.autoscroll = None;
       }
     }
-    if self.pan_drag.is_some() {
-      let editor = cx.entity();
-      window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
-        // A8: middle-button pans end here too — releasing off-editor used to
-        // leave the pan armed until the next left click.
-        if phase.bubble() && matches!(event.button, MouseButton::Left | MouseButton::Middle) {
-          editor.update(cx, |editor, cx| editor.finish_space_pan(cx));
-        }
-      });
-    }
+    // A8: pans end on release wherever it lands — the off-editor case is the
+    // `on_mouse_up_out` pair on the root element (registering a raw
+    // `window.on_mouse_event` here was a paint-phase API called from render;
+    // release builds hid the debug assert).
     let grid_scroll = self.board_scroll.clone();
     let board_zoom = self.board_zoom;
     self.built_scroll_offset.set(self.board_scroll.offset());
@@ -4892,6 +5170,22 @@ impl Render for FlowEditor {
         if event.keystroke.key == "escape" && editor.cancel_active_gesture(cx) {
           cx.stop_propagation();
           return;
+        }
+        // D6: the find bar closes before anything else on Escape…
+        if event.keystroke.key == "escape" && editor.find_bar.is_some() {
+          editor.close_find(cx);
+          editor.focus_handle.focus(window);
+          cx.stop_propagation();
+          return;
+        }
+        // …and Ctrl+F opens it from anywhere on the flow surface.
+        {
+          let m = event.keystroke.modifiers;
+          if (m.control || m.platform) && event.keystroke.key == "f" {
+            editor.open_find(window, cx);
+            cx.stop_propagation();
+            return;
+          }
         }
         // Escape disarms the ink tool.
         if event.keystroke.key == "escape" && editor.annotation_tool != AnnotationTool::None {
@@ -5155,7 +5449,6 @@ impl Render for FlowEditor {
             }
           }
           cx.stop_propagation();
-          return;
         }
       }))
       .on_key_up(cx.listener(|editor, event: &KeyUpEvent, _, cx| {
@@ -5184,6 +5477,19 @@ impl Render for FlowEditor {
         }),
       )
       .on_mouse_up(
+        MouseButton::Middle,
+        cx.listener(|editor, _: &MouseUpEvent, _, cx| editor.finish_space_pan(cx)),
+      )
+      // A8: a release OFF the editor still ends the pan (and the marquee) —
+      // otherwise the gesture stayed armed until the next click inside.
+      .on_mouse_up_out(
+        MouseButton::Left,
+        cx.listener(|editor, _: &MouseUpEvent, _, cx| {
+          editor.marquee_anchor = None;
+          editor.finish_space_pan(cx);
+        }),
+      )
+      .on_mouse_up_out(
         MouseButton::Middle,
         cx.listener(|editor, _: &MouseUpEvent, _, cx| editor.finish_space_pan(cx)),
       )
@@ -5315,13 +5621,7 @@ impl Render for FlowEditor {
             None => {
               // C14: a real empty state — the verbs live right here instead of
               // a bare sentence pointing at chrome elsewhere.
-              let sheet_types: Vec<String> = self
-                .board
-                .format
-                .sheet_types
-                .iter()
-                .map(|sheet_type| sheet_type.name.clone())
-                .collect();
+              let sheet_types = self.board.format.sheet_types.iter().map(|sheet_type| sheet_type.name.clone());
               div()
                 .size_full()
                 .flex()
@@ -5331,7 +5631,7 @@ impl Render for FlowEditor {
                 .gap(px(10.0))
                 .text_color(cx.theme().muted_foreground)
                 .child("This flow has no sheets yet")
-                .child(div().flex().flex_row().gap(px(8.0)).children(sheet_types.into_iter().enumerate().map(
+                .child(div().flex().flex_row().gap(px(8.0)).children(sheet_types.enumerate().map(
                   |(index, name)| {
                     Button::new(("flow-empty-create-sheet", index))
                       .label(format!("New {name} sheet"))
@@ -5380,8 +5680,21 @@ impl Render for FlowEditor {
         div()
           .absolute()
           .inset_0()
-          .child(Scrollbar::vertical(&self.board_scroll).scrollbar_show(ScrollbarShow::Always))
-          .child(Scrollbar::horizontal(&self.board_scroll).scrollbar_show(ScrollbarShow::Always)),
+          // C18: no forced Always — the flow's scrollbars follow the same
+          // component default (hover/scroll reveal) as every other surface.
+          // P6: but their COLORS come from the flow theme (vendored
+          // thumb/track override) — app-theme thumbs over the sheet read as
+          // foreign chrome, especially with mismatched light/dark palettes.
+          .child(
+            Scrollbar::vertical(&self.board_scroll)
+              .thumb_color(flow_theme.chrome_border)
+              .track_color(flow_theme.header_bg),
+          )
+          .child(
+            Scrollbar::horizontal(&self.board_scroll)
+              .thumb_color(flow_theme.chrome_border)
+              .track_color(flow_theme.header_bg),
+          ),
       )
       // FLOWSTATE_INTENT_LOG: the alpha-calibration overlay.
       .when(Self::intent_log_enabled() && !self.intent_log.is_empty(), |this| {
@@ -5439,6 +5752,67 @@ impl Render for FlowEditor {
                     .child(menu),
                 ),
             ),
+          )
+          .with_priority(1),
+        )
+      })
+      // D6: the find bar — floats top-center, walks matches across sheets.
+      .when_some(self.find_bar.clone(), |this, input| {
+        let count = self.find_matches.len();
+        let current = if count == 0 { 0 } else { self.find_ix + 1 };
+        this.child(
+          gpui::deferred(
+            div()
+              .absolute()
+              .top(px(12.0))
+              .left_0()
+              .right_0()
+              .flex()
+              .justify_center()
+              .child(
+                div()
+                  .flex()
+                  .items_center()
+                  .gap_2()
+                  .p_2()
+                  .w(px(360.0))
+                  .rounded(cx.theme().radius)
+                  .bg(cx.theme().popover)
+                  .border_1()
+                  .border_color(cx.theme().border)
+                  .shadow_lg()
+                  .child(div().flex_1().child(gpui_component::input::Input::new(&input).xsmall().w_full()))
+                  .child(
+                    div()
+                      .text_size(px(10.0))
+                      .text_color(cx.theme().muted_foreground)
+                      .child(format!("{current}/{count}")),
+                  )
+                  .child(
+                    Button::new("flow-find-prev")
+                      .ghost()
+                      .xsmall()
+                      .label("↑")
+                      .on_click(cx.listener(|editor, _, _, cx| editor.step_find(false, cx))),
+                  )
+                  .child(
+                    Button::new("flow-find-next")
+                      .ghost()
+                      .xsmall()
+                      .label("↓")
+                      .on_click(cx.listener(|editor, _, _, cx| editor.step_find(true, cx))),
+                  )
+                  .child(
+                    Button::new("flow-find-close")
+                      .ghost()
+                      .xsmall()
+                      .label("✕")
+                      .on_click(cx.listener(|editor, _, window, cx| {
+                        editor.close_find(cx);
+                        editor.focus_handle.focus(window);
+                      })),
+                  ),
+              ),
           )
           .with_priority(1),
         )

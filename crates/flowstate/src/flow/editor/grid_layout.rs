@@ -90,6 +90,9 @@ impl CellMeasurement {
   }
 }
 
+/// H11: the layout-compute tripwire counter (see `GridLayout::layout_computes`).
+static LAYOUT_COMPUTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Model-space grid geometry for one sheet. Origin (0,0) is the top-left of
 /// the first slot (the render layer adds gutter/header/padding).
 #[derive(Clone, Debug, Default)]
@@ -109,11 +112,21 @@ impl GridLayout {
     Self::compute_to(sheet, measurements, 0.0)
   }
 
+  /// H11 tripwire: how many full layout computes have run this process — the
+  /// excel spec §5 observability counter. A regression that recomputes per
+  /// frame (instead of per gesture/notify) shows up as this counter racing
+  /// the frame count in the soak.
+  #[allow(dead_code, reason = "H11 observability surface — read by soaks/diagnostics, not the render path")]
+  pub fn layout_computes() -> u64 {
+    LAYOUT_COMPUTES.load(std::sync::atomic::Ordering::Relaxed)
+  }
+
   /// D4 row-height law: manual override wins; else autofit = the tallest
   /// occupied cell's measured (or estimated) model height, floored. The ghost
   /// run extends past `min_ghost_bottom` (a model-space y) so a scrolled-down
   /// viewport always finds fresh ghost rows below it.
   pub fn compute_to(sheet: &Sheet, measurements: &HashMap<CellId, CellMeasurement>, min_ghost_bottom: f32) -> Self {
+    LAYOUT_COMPUTES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut column_lefts = Vec::with_capacity(sheet.columns.len());
     let mut column_widths = Vec::with_capacity(sheet.columns.len());
     let mut x = 0.0;
@@ -313,6 +326,7 @@ mod tests {
       row_id: row.id,
       column_id: columns[1].id,
       summary: CellSummary::default(),
+      source: None,
     };
     let cell_id = cell.id;
     row.cells[1] = Some(cell);
@@ -363,5 +377,66 @@ mod tests {
     assert_eq!(measurement.model_height, 80.0);
     assert!(measurement.update(120.0, 4.0));
     assert_eq!(measurement.model_height, 30.0);
+  }
+
+  /// H11: the excel spec §5 "comical load" gate — 25k rows × 16 columns must
+  /// lay out and window in bounded time. Budgets are debug-generous (the
+  /// release soak owns the ≤8ms frame claim); the assert here is a cliff
+  /// tripwire, not a floor.
+  #[test]
+  fn comical_load_layout_is_bounded() {
+    use flowstate_flow::{Cell, CellSummary, GridColumn, GridRow, Sheet};
+    let columns: Vec<GridColumn> = (0..16)
+      .map(|ix| GridColumn {
+        id: uuid::Uuid::new_v4(),
+        label: format!("C{ix}"),
+        side: flowstate_flow::ArgumentSide::One,
+        width: None,
+      })
+      .collect();
+    let rows: Vec<GridRow> = (0..25_000)
+      .map(|_| {
+        let row_id = uuid::Uuid::new_v4();
+        let mut cells: Vec<Option<Cell>> = vec![None; 16];
+        cells[0] = Some(Cell {
+          id: uuid::Uuid::new_v4(),
+          row_id,
+          column_id: columns[0].id,
+          summary: CellSummary::default(),
+          source: None,
+        });
+        GridRow {
+          id: row_id,
+          height_override: None,
+          cells,
+        }
+      })
+      .collect();
+    let sheet = Sheet {
+      id: uuid::Uuid::new_v4(),
+      name: "comical".into(),
+      sheet_type_id: uuid::Uuid::new_v4(),
+      columns,
+      rows,
+      annotations: Vec::new(),
+    };
+    let measurements = HashMap::new();
+    let started = std::time::Instant::now();
+    let layout = GridLayout::compute_to(&sheet, &measurements, 0.0);
+    let compute = started.elapsed();
+    let started = std::time::Instant::now();
+    for offset in 0..100 {
+      let top = (offset * 500) as f32;
+      let _ = layout.visible_rows(top, top + 900.0);
+    }
+    let windowing = started.elapsed();
+    assert!(
+      compute < std::time::Duration::from_millis(250),
+      "full 25k×16 layout compute took {compute:?} (cliff tripwire)"
+    );
+    assert!(
+      windowing < std::time::Duration::from_millis(50),
+      "100 viewport windows took {windowing:?} — visible_rows must stay O(log rows)"
+    );
   }
 }

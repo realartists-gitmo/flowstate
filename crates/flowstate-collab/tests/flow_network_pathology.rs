@@ -139,7 +139,7 @@ mod tests {
       .ok()
       .and_then(|v| v.parse().ok())
       .unwrap_or(50);
-    let mut rng = Rng(0xc4a05_11fe);
+    let mut rng = Rng(0x000c_4a05_11fe);
 
     let seed_runtime = FlowRuntime::new_empty();
     let sheet_type = seed_runtime.board().format.sheet_types[0].id;
@@ -198,7 +198,7 @@ mod tests {
     }
 
     // Final delivery of everything still delayed, then drain to quiescence.
-    for (tgt, bytes) in in_flight.drain(..) {
+    for (tgt, bytes) in in_flight {
       peers[tgt].import_remote_updates(&[bytes.as_slice()]).unwrap();
     }
     drain_to_quiescence(&peers);

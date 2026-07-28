@@ -442,7 +442,7 @@ fn import_classification_feeds_per_cell_streams() {
   assert!(!cell_items.is_empty(), "the edited cell's stream must receive a Replace");
 }
 
-/// The incremental structural paths (local AddCell / DeleteCell patch the
+/// The incremental structural paths (local `AddCell` / `DeleteCell` patch the
 /// retained board instead of rematerializing it) must produce a board and
 /// routing index IDENTICAL to a fresh full materialization at every step —
 /// `verify_board_equivalence` asserts exactly that. Covers the deterministic

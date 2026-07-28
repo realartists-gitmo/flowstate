@@ -300,6 +300,17 @@ impl Render for FlowRibbon {
             .on_click(move |_, _, cx| clear_all_editor.update(cx, |editor, cx| editor.clear_all_annotations(cx))),
           ),
       )
+      // ---- Export (H1) ----
+      .child(
+        ribbon_group(true, cx).child({
+          let editor = self.editor.clone();
+          chip(
+            RibbonChip::new("flow-export-xlsx", "Export", "Export the whole flow as .xlsx — opens in Excel and Sheets")
+              .disabled(!has_active_sheet),
+          )
+          .on_click(move |_, _, cx| editor.update(cx, |editor, cx| editor.export_xlsx(cx)))
+        }),
+      )
       // ---- Round (E10) ----
       .child(
         ribbon_group(true, cx).child({

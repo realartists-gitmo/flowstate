@@ -753,7 +753,7 @@ impl FlowEditor {
     self.scroll_cursor_into_view();
   }
 
-  /// PageUp / PageDown: move the cursor by one viewport of rows.
+  /// `PageUp` / `PageDown`: move the cursor by one viewport of rows.
   pub fn page(&mut self, down: bool, cx: &mut Context<Self>) {
     let Some((max_row, _)) = self.grid_bounds() else { return };
     let step = self.page_rows().max(1);

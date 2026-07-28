@@ -98,10 +98,17 @@ impl Workspace {
         panel
       },
     };
-    let io = self.active_document_id.and_then(|panel_id| self.document_runtimes.get(&panel_id).cloned());
-    let editor = self.active_editor.clone();
     let panel_id = self.active_document_id;
-    panel.update(cx, |panel, cx| panel.set_context(io, editor, panel_id, cx));
+    // G1: the rail serves whichever format is active — the flow arm attaches
+    // the flow io + editor; rich text keeps its original path.
+    if let Some(flow) = self.active_flow.clone() {
+      let io = panel_id.and_then(|id| self.flow_document_runtimes.get(&id).cloned());
+      panel.update(cx, |panel, cx| panel.set_flow_context(io, Some(flow), panel_id, cx));
+    } else {
+      let io = panel_id.and_then(|id| self.document_runtimes.get(&id).cloned());
+      let editor = self.active_editor.clone();
+      panel.update(cx, |panel, cx| panel.set_context(io, editor, panel_id, cx));
+    }
     panel.into_any_element()
   }
 
@@ -601,6 +608,17 @@ impl Workspace {
     let Some(hit) = self.toolkit_hits.get(hit_ix).cloned() else {
       return;
     };
+    // F6: a flow-cell hit deep-links — open the flow AND land on the cell.
+    if let Some(cell) = hit
+      .unit_id
+      .split(":cell:")
+      .nth(1)
+      .and_then(|hex| u128::from_str_radix(hex, 16).ok())
+      .map(uuid::Uuid::from_u128)
+    {
+      self.open_flow_path_at_cell(hit.path, cell, window, cx);
+      return;
+    }
     // T-S2: prefer the durable cursor (survives edits since indexing); the
     // indexed paragraph is the immediate phase-V approximation.
     if let Some(cursor) = hit.paragraph_start_cursor.clone() {

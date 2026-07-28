@@ -650,7 +650,8 @@ impl Workspace {
             .item(flow_color_item(workspace.clone(), "Gridline", |theme| theme.gridline, |theme, value| theme.gridline = value))
             .item(flow_color_item(workspace.clone(), "Chrome border", |theme| theme.chrome_border, |theme, value| theme.chrome_border = value))
             .item(flow_color_item(workspace.clone(), "Cell text", |theme| theme.text, |theme, value| theme.text = value))
-            .item(flow_color_item(workspace.clone(), "Muted text", |theme| theme.muted_text, |theme, value| theme.muted_text = value)),
+            .item(flow_color_item(workspace.clone(), "Muted text", |theme| theme.muted_text, |theme, value| theme.muted_text = value))
+            .item(flow_density_item(workspace.clone())),
         )
         .group(
           SettingGroup::new()

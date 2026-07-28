@@ -2,27 +2,27 @@
 //!
 //! Drop-in replacement for the Tantivy backend behind the same public surface
 //! (`open` / `scan_and_index` / `search_files` / `search_content` /
-//! `start_watcher`). The SeekStorm engine is async (Tokio); this module bridges
+//! `start_watcher`). The `SeekStorm` engine is async (Tokio); this module bridges
 //! it to the synchronous `TubIndex` API with `block_on` at the wrapper boundary
 //! — the tub scan already runs on GPUI's background executor, not a Tokio
 //! thread, so blocking there is exactly what that thread is for.
 //!
 //! Decision ledger for the swap lives in the migration artifact; the load-
 //! bearing picks that shaped this module:
-//!   D1  UnicodeAlphanumericFolded index-wide (folds accents, keeps + - #).
-//!   D3  deletes go by query on `file_id` (no user primary key; doc_id is
+//!   D1  `UnicodeAlphanumericFolded` index-wide (folds accents, keeps + - #).
+//!   D3  deletes go by query on `file_id` (no user primary key; `doc_id` is
 //!       engine-internal and we never store it).
 //!   D4  ONE shared, worker-capped runtime — not one per index.
 //!   D5  one hard commit at end of scan (+ close on shutdown).
-//!   D6  vector field + Model2Vec + Hybrid, same PR (follow-on increment).
+//!   D6  vector field + `Model2Vec` + Hybrid, same PR (follow-on increment).
 //!
 //! The lexical path (open/scan/search) is on the product code path. The
 //! vector/hybrid surface (`search_hybrid`, `create_vector_index`, the vector
-//! schema + Model2Vec meta) is built and test-covered but deliberately off the
+//! schema + `Model2Vec` meta) is built and test-covered but deliberately off the
 //! default path — the tub stays lexical until the per-unit embedding cost is
 //! measured and opted into — so allow those intentionally-prod-unused items
 //! rather than scatter per-item attributes.
-#![allow(dead_code)]
+#![allow(dead_code, reason = "the vector/hybrid surface (D6) is built + test-covered but off the default path until embedding cost is opted into")]
 
 use std::{
   fs,
@@ -79,10 +79,10 @@ pub(crate) mod field {
   pub const MODIFIED_NS: &str = "modified_ns"; // U64
 }
 
-/// The tub schema as SeekStorm sees it. Built by JSON (the idiomatic path — the
+/// The tub schema as `SeekStorm` sees it. Built by JSON (the idiomatic path — the
 /// private `field_id`/`indexed_field_id` are `#[serde(skip)]`). Field roles:
 /// - `file_id` is `index_lexical` so a delete-by-query can select all of a
-///   file's units by its id (D3 — SeekStorm has no user primary key).
+///   file's units by its id (D3 — `SeekStorm` has no user primary key).
 /// - `unit_kind` is a String16 facet: the kind filter is a `facet_filter`, not a
 ///   hand-built boolean union.
 /// - `file_name` is a `completion_source` for autocomplete; also lexically
@@ -118,7 +118,7 @@ fn schema_fields() -> Result<Vec<SchemaField>> {
 }
 
 /// Vector-enabled variant of the schema (D6): `heading` and `body` also carry
-/// `index_vector`, so Model2Vec generates an embedding per unit from that text.
+/// `index_vector`, so `Model2Vec` generates an embedding per unit from that text.
 /// Fields stay `index_lexical` too, which is what hybrid (lexical + vector)
 /// requires. Not the default — enabling it makes every scan embed, a measured
 /// cost the app opts into rather than pays unconditionally.
@@ -138,7 +138,7 @@ fn schema_fields_vectors() -> Result<Vec<SchemaField>> {
   serde_json::from_str(&schema_json_vectors()).map_err(|error| anyhow!("building tub SeekStorm vector schema: {error}"))
 }
 
-/// Vector-enabled meta (D6): Model2Vec internal inference. `PotionBase2M` is the
+/// Vector-enabled meta (D6): `Model2Vec` internal inference. `PotionBase2M` is the
 /// smallest static model (CPU-only, no GPU); scalar-I8 quantization keeps the
 /// vectors compact.
 fn index_meta_vectors() -> IndexMetaObject {
@@ -188,7 +188,7 @@ pub(crate) fn open_or_create(index_path: &Path) -> Result<IndexArc> {
   })
 }
 
-/// Create a fresh vector-enabled index (D6) — Model2Vec inference + the
+/// Create a fresh vector-enabled index (D6) — `Model2Vec` inference + the
 /// `index_vector` schema. Separate from `open_or_create` so the lexical tub is
 /// never forced to embed until the vector cost is measured and opted into.
 pub(crate) fn create_vector_index(index_path: &Path) -> Result<IndexArc> {
@@ -205,7 +205,7 @@ fn is_populated_dir(path: &Path) -> bool {
   fs::read_dir(path).map(|mut entries| entries.next().is_some()).unwrap_or(false)
 }
 
-/// Encode raw bytes for a `Binary` field (SeekStorm stores a base64 string).
+/// Encode raw bytes for a `Binary` field (`SeekStorm` stores a base64 string).
 pub(crate) fn encode_binary(bytes: &[u8]) -> String {
   base64::engine::general_purpose::STANDARD.encode(bytes)
 }
@@ -215,7 +215,7 @@ pub(crate) fn decode_binary(text: &str) -> Option<Vec<u8>> {
 }
 
 /// Normalize a filename into space-separated words so the tokenizer emits
-/// per-word tokens. SeekStorm's Folded tokenizer keeps `-`/`_` *inside* a token
+/// per-word tokens. `SeekStorm`'s Folded tokenizer keeps `-`/`_` *inside* a token
 /// (the same rule that preserves `c++`), so a raw name like `1AR---BioD__hash`
 /// would index as one giant token and a word query ("biod") could never match.
 /// Splitting on non-alphanumerics restores whole-word matching — what filename
@@ -292,7 +292,7 @@ pub(crate) fn document_from_unit(unit: &super::IndexUnit) -> Result<Document> {
 
 /// Delete every document belonging to `file_id` (D3 — no user primary key, so we
 /// select by the lexically-indexed `file_id` field and let the engine resolve
-/// the internal doc_ids). `length` is set high to catch every unit of a file.
+/// the internal `doc_id`s). `length` is set high to catch every unit of a file.
 async fn delete_file_docs(index: &IndexArc, file_id: &str) {
   index
     .delete_documents_by_query(
@@ -334,7 +334,7 @@ pub(crate) fn search(
   search_with_mode(index, query, allowed_kinds, filename_only, limit, SearchMode::Lexical)
 }
 
-/// Hybrid search (D6) — lexical + Model2Vec vector, fused by RRF. Requires an
+/// Hybrid search (D6) — lexical + `Model2Vec` vector, fused by RRF. Requires an
 /// index built with vector inference (see `index_meta_vectors`); against a
 /// lexical-only index it degrades to lexical.
 pub(crate) fn search_hybrid(
@@ -415,6 +415,7 @@ fn search_with_mode(
         hits.push(hit);
       }
     }
+    drop(reader);
     Ok(hits)
   })
 }
@@ -455,7 +456,7 @@ fn hit_from_document(document: &Document, score: f32) -> Option<super::SearchHit
 
 /// One process-wide Tokio runtime shared by every `TubIndex` (D4).
 ///
-/// SeekStorm is async and parallelizes indexing across shards internally, so it
+/// `SeekStorm` is async and parallelizes indexing across shards internally, so it
 /// wants a real multi-thread executor; a runtime *per* index would spin a whole
 /// worker pool per tub and get churned every time the app rebuilds the tub on a
 /// root change. Worker-capped to stay polite on a shared machine (OOM history).
@@ -471,7 +472,7 @@ pub(crate) fn shared_runtime() -> &'static Runtime {
   })
 }
 
-/// Run an async SeekStorm call to completion from synchronous wrapper code.
+/// Run an async `SeekStorm` call to completion from synchronous wrapper code.
 ///
 /// Safe because tub wrapper methods are invoked from GPUI's background executor
 /// (or test threads), never from within the shared runtime's own worker threads,
@@ -574,6 +575,7 @@ mod tests {
         .get_document(result.results[0].doc_id, false, &None, &HashSet::new(), &[])
         .await
         .expect("read stored fields back");
+      drop(reader);
       assert_eq!(fetched.get(field::FILE_ID).and_then(|value| value.as_str()), Some("file-a"));
       let stored_cursor = fetched.get(field::PARAGRAPH_START_CURSOR).and_then(|value| value.as_str()).expect("cursor stored");
       assert_eq!(decode_binary(stored_cursor), Some(vec![1u8, 2, 3, 4]), "binary field round-trips through base64");
@@ -582,9 +584,9 @@ mod tests {
     let _ = fs::remove_dir_all(&base);
   }
 
-  /// D6 proof: hybrid (lexical + Model2Vec vector) surfaces a semantically
+  /// D6 proof: hybrid (lexical + `Model2Vec` vector) surfaces a semantically
   /// related card that a lexical query — sharing no terms with it — cannot.
-  /// Ignored by default: loads the Model2Vec model (heavier + first run may
+  /// Ignored by default: loads the `Model2Vec` model (heavier + first run may
   /// fetch weights). Run explicitly: `cargo test -p flowstate-tub -- --ignored`.
   #[test]
   #[ignore = "loads the Model2Vec model; run explicitly with --ignored"]

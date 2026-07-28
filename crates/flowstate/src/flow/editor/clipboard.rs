@@ -218,11 +218,9 @@ impl FlowEditor {
             .and_then(|row| row.get(delta_col))
             .cloned()
             .flatten();
-          match seed {
-            Some(paragraphs) => {
-              self.place_cell_rich(sheet_id, anchor_row + delta_row, column_ix, paragraphs, cx);
-            },
-            None => {}, // the rich copy says this slot was empty
+          // A `None` seed means the rich copy says this slot was empty.
+          if let Some(paragraphs) = seed {
+            self.place_cell_rich(sheet_id, anchor_row + delta_row, column_ix, paragraphs, cx);
           }
           continue;
         }

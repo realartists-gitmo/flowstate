@@ -318,6 +318,14 @@ pub struct Scrollbar {
     /// This is used to limit the update rate of the scrollbar when it is
     /// being dragged for some complex interactions for reducing CPU usage.
     max_fps: usize,
+    /// FLOWSTATE PATCH: optional thumb color override. When set it replaces the
+    /// `cx.theme().scrollbar_thumb`/`scrollbar_thumb_hover` slots in every
+    /// state, so a scrollbar riding a surface with its own palette (the flow
+    /// sheet) can match that surface instead of the app theme.
+    thumb_color: Option<Hsla>,
+    /// FLOWSTATE PATCH: optional track color override (replaces
+    /// `cx.theme().scrollbar` in the hovered/active bar states).
+    track_color: Option<Hsla>,
 }
 
 impl Scrollbar {
@@ -334,6 +342,8 @@ impl Scrollbar {
             scroll_handle: Rc::new(scroll_handle.clone()),
             max_fps: 120,
             scroll_size: None,
+            thumb_color: None,
+            track_color: None,
         }
     }
 
@@ -387,37 +397,61 @@ impl Scrollbar {
         self
     }
 
+    /// FLOWSTATE PATCH: override the thumb color for every state (replaces the
+    /// theme's `scrollbar_thumb`/`scrollbar_thumb_hover`).
+    pub fn thumb_color(mut self, color: impl Into<Hsla>) -> Self {
+        self.thumb_color = Some(color.into());
+        self
+    }
+
+    /// FLOWSTATE PATCH: override the track color shown while the bar is
+    /// hovered/active (replaces the theme's `scrollbar`).
+    pub fn track_color(mut self, color: impl Into<Hsla>) -> Self {
+        self.track_color = Some(color.into());
+        self
+    }
+
     // Get the width of the scrollbar.
     pub(crate) const fn width() -> Pixels {
         WIDTH
     }
 
-    fn style_for_active(cx: &App) -> (Hsla, Hsla, Hsla, Pixels, Pixels, Pixels) {
+    /// FLOWSTATE PATCH: the thumb color for a state, honoring the override.
+    fn thumb_or(&self, theme_color: Hsla) -> Hsla {
+        self.thumb_color.unwrap_or(theme_color)
+    }
+
+    /// FLOWSTATE PATCH: the track color, honoring the override.
+    fn track_or(&self, theme_color: Hsla) -> Hsla {
+        self.track_color.unwrap_or(theme_color)
+    }
+
+    fn style_for_active(&self, cx: &App) -> (Hsla, Hsla, Hsla, Pixels, Pixels, Pixels) {
         (
-            cx.theme().scrollbar_thumb_hover,
-            cx.theme().scrollbar,
-            cx.theme().border,
+            self.thumb_or(cx.theme().scrollbar_thumb_hover),
+            self.track_or(cx.theme().scrollbar),
+            self.track_or(cx.theme().border),
             THUMB_ACTIVE_WIDTH,
             THUMB_ACTIVE_INSET,
             THUMB_ACTIVE_RADIUS,
         )
     }
 
-    fn style_for_hovered_thumb(cx: &App) -> (Hsla, Hsla, Hsla, Pixels, Pixels, Pixels) {
+    fn style_for_hovered_thumb(&self, cx: &App) -> (Hsla, Hsla, Hsla, Pixels, Pixels, Pixels) {
         (
-            cx.theme().scrollbar_thumb_hover,
-            cx.theme().scrollbar,
-            cx.theme().border,
+            self.thumb_or(cx.theme().scrollbar_thumb_hover),
+            self.track_or(cx.theme().scrollbar),
+            self.track_or(cx.theme().border),
             THUMB_ACTIVE_WIDTH,
             THUMB_ACTIVE_INSET,
             THUMB_ACTIVE_RADIUS,
         )
     }
 
-    fn style_for_hovered_bar(cx: &App) -> (Hsla, Hsla, Hsla, Pixels, Pixels, Pixels) {
+    fn style_for_hovered_bar(&self, cx: &App) -> (Hsla, Hsla, Hsla, Pixels, Pixels, Pixels) {
         (
-            cx.theme().scrollbar_thumb,
-            cx.theme().scrollbar,
+            self.thumb_or(cx.theme().scrollbar_thumb),
+            self.track_or(cx.theme().scrollbar),
             gpui::transparent_black(),
             THUMB_ACTIVE_WIDTH,
             THUMB_ACTIVE_INSET,
@@ -433,8 +467,8 @@ impl Scrollbar {
         };
 
         (
-            cx.theme().scrollbar_thumb,
-            cx.theme().scrollbar,
+            self.thumb_or(cx.theme().scrollbar_thumb),
+            self.track_or(cx.theme().scrollbar),
             gpui::transparent_black(),
             width,
             inset,
@@ -613,20 +647,20 @@ impl Element for Scrollbar {
 
             let (thumb_bg, bar_bg, bar_border, thumb_width, inset, radius) =
                 if state.get().dragged_axis == Some(axis) {
-                    Self::style_for_active(cx)
+                    self.style_for_active(cx)
                 } else if is_hover_to_show && (is_hovered_on_bar || is_hovered_on_thumb) {
                     if is_hovered_on_thumb {
-                        Self::style_for_hovered_thumb(cx)
+                        self.style_for_hovered_thumb(cx)
                     } else {
-                        Self::style_for_hovered_bar(cx)
+                        self.style_for_hovered_bar(cx)
                     }
                 } else if is_offset_changed {
                     self.style_for_normal(cx)
                 } else if is_always_to_show {
                     if is_hovered_on_thumb {
-                        Self::style_for_hovered_thumb(cx)
+                        self.style_for_hovered_thumb(cx)
                     } else {
-                        Self::style_for_hovered_bar(cx)
+                        self.style_for_hovered_bar(cx)
                     }
                 } else {
                     let mut idle_state = self.style_for_idle(cx);
@@ -636,12 +670,12 @@ impl Element for Scrollbar {
                         if is_hovered_on_bar {
                             state.set(state.get().with_last_scroll_time(Some(Instant::now())));
                             idle_state = if is_hovered_on_thumb {
-                                Self::style_for_hovered_thumb(cx)
+                                self.style_for_hovered_thumb(cx)
                             } else {
-                                Self::style_for_hovered_bar(cx)
+                                self.style_for_hovered_bar(cx)
                             };
                         } else if elapsed < FADE_OUT_DELAY {
-                            idle_state.0 = cx.theme().scrollbar_thumb;
+                            idle_state.0 = self.thumb_or(cx.theme().scrollbar_thumb);
 
                             if !state.get().idle_timer_scheduled {
                                 let state = state.clone();
@@ -658,7 +692,7 @@ impl Element for Scrollbar {
                             }
                         } else if elapsed < FADE_OUT_DURATION {
                             let opacity = 1.0 - (elapsed - FADE_OUT_DELAY).powi(10);
-                            idle_state.0 = cx.theme().scrollbar_thumb.opacity(opacity);
+                            idle_state.0 = self.thumb_or(cx.theme().scrollbar_thumb).opacity(opacity);
 
                             window.request_animation_frame();
                         }

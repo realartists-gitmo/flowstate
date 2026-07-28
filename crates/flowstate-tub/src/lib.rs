@@ -783,11 +783,21 @@ fn fl0_index_units(file_id: &str, path: &Path, display_path: &str, file_name: &s
   let mut units = Vec::new();
   for sheet in &board.sheets {
     for cell in sheet.cells() {
-      let body = cell.summary.summary_text.trim().to_string();
+      // F6: summary-mode cells (flowed CARDS) index their FULL text — the
+      // card body was invisible to search when only the tag/cite summary
+      // was indexed. Normal cells' summary already IS their full text.
+      let body = if cell.summary.uses_summary_projection {
+        flowstate_flow::cell_document(document.doc(), cell.id)
+          .map(|projection| projection.text.to_string())
+          .unwrap_or_else(|_| cell.summary.summary_text.to_string())
+      } else {
+        cell.summary.summary_text.to_string()
+      };
+      let body = body.trim().to_string();
       if body.is_empty() {
         continue;
       }
-      let heading = first_non_empty_line(&body).unwrap_or_else(|| "Cell".to_string());
+      let heading = first_non_empty_line(cell.summary.summary_text.trim()).unwrap_or_else(|| "Cell".to_string());
       units.push(IndexUnit {
         file_id: file_id.to_owned(),
         unit_id: format!("{file_id}:cell:{:032x}", cell.id.as_u128()),
