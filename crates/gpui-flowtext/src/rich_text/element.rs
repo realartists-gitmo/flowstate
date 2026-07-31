@@ -519,6 +519,32 @@ impl Element for VirtualBlockElement {
     }
   }
 
+  /// Table CELLS. Without these a table is an announced shape with no reachable
+  /// content: cell text lives on `TableCellParagraph`, outside `document.text`,
+  /// so the paragraph walk never reaches it.
+  ///
+  /// Cells are flat children carrying row/column indices rather than nested
+  /// under `Role::Row` nodes — `push_child` cannot nest, and the indices are
+  /// what a screen reader's table navigation reads anyway.
+  fn a11y_synthetic_children(&mut self, _prepaint: &mut Self::PrepaintState, builder: &mut gpui::A11ySubtreeBuilder) {
+    let Some(info) = self.a11y.as_ref() else {
+      return;
+    };
+    for (ix, cell) in info.cells.iter().enumerate() {
+      let mut node = gpui::accesskit::Node::new(if cell.is_header {
+        gpui::accesskit::Role::ColumnHeader
+      } else {
+        gpui::accesskit::Role::Cell
+      });
+      node.set_row_index(cell.row);
+      node.set_column_index(cell.column);
+      if !cell.text.is_empty() {
+        node.set_value(cell.text.clone());
+      }
+      builder.push_child(builder.synthetic_node_id(ix), node);
+    }
+  }
+
   fn request_layout(
     &mut self,
     _id: Option<&GlobalElementId>,

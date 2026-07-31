@@ -93,6 +93,22 @@ impl RichTextEditor {
 // handed to it must be a character count, and that helper already rounds a
 // mid-codepoint byte offset down rather than panicking.
 
+/// One table cell as assistive technology sees it.
+///
+/// Cells are FLAT children of the table node — synthetic children cannot nest,
+/// so there is no `Role::Row` layer. That is fine: AccessKit conveys the grid
+/// through each cell's row/column index, which is what a screen reader's table
+/// navigation actually reads.
+#[derive(Clone)]
+pub(super) struct A11yTableCell {
+  pub(super) row: usize,
+  pub(super) column: usize,
+  pub(super) text: String,
+  /// True for cells in a header row, so AT announces them as headers and can
+  /// repeat them while navigating the body.
+  pub(super) is_header: bool,
+}
+
 /// What one structural block (image, equation, table) exposes.
 #[derive(Clone)]
 pub(super) struct A11yBlockInfo {
@@ -102,6 +118,32 @@ pub(super) struct A11yBlockInfo {
   pub(super) label: String,
   /// `(rows, columns)` for a table, so AT can announce its dimensions.
   pub(super) table_shape: Option<(usize, usize)>,
+  pub(super) cells: Vec<A11yTableCell>,
+}
+
+/// Flatten a cell's blocks into one string.
+///
+/// Cell text does NOT live in `document.text` — it is carried inline on
+/// `TableCellParagraph`, so the ordinary paragraph walk never sees it and a
+/// table would otherwise be an empty grid to a screen reader. Nested tables are
+/// summarised rather than recursed: a cell announcing an entire inner table
+/// inline would bury the outer row.
+fn a11y_cell_text(cell: &TableCell) -> String {
+  let mut parts: Vec<String> = Vec::new();
+  for block in &cell.blocks {
+    match block {
+      TableCellBlock::Paragraph(paragraph) => {
+        let text = paragraph.text.trim();
+        if !text.is_empty() {
+          parts.push(text.to_string());
+        }
+      },
+      TableCellBlock::Table(inner) => {
+        parts.push(format!("nested table, {} rows, {} columns", inner.rows.len(), inner.columns.len()));
+      },
+    }
+  }
+  parts.join(" ")
 }
 
 #[hotpath::measure_all]
@@ -111,6 +153,7 @@ impl RichTextEditor {
     match self.document.blocks.get(block_ix)? {
       Block::Paragraph(_) => None,
       Block::Image(image) => Some(A11yBlockInfo {
+        cells: Vec::new(),
         role: gpui::Role::Image,
         // Alt text is authored content and already the right name. An image
         // with none is announced as "image" with no description, which is the
@@ -119,6 +162,7 @@ impl RichTextEditor {
         table_shape: None,
       }),
       Block::Equation(equation) => Some(A11yBlockInfo {
+        cells: Vec::new(),
         role: gpui::Role::Math,
         // The LaTeX source is the only textual form of an equation we hold.
         // It is not ideal prose, but it is lossless and lets a reader who knows
@@ -129,10 +173,27 @@ impl RichTextEditor {
       Block::Table(table) => {
         let rows = table.rows.len();
         let columns = table.columns.len();
+        // Column position comes from the row's own cell order rather than the
+        // ColumnId, because a cell's index within its row is what the grid
+        // actually renders; spans are reported so AT can account for them.
+        let cells = table
+          .rows
+          .iter()
+          .enumerate()
+          .flat_map(|(row_ix, row)| {
+            row.cells.iter().enumerate().map(move |(column_ix, cell)| A11yTableCell {
+              row: row_ix,
+              column: column_ix,
+              text: a11y_cell_text(cell),
+              is_header: table.style.header_row && row_ix == 0,
+            })
+          })
+          .collect();
         Some(A11yBlockInfo {
           role: gpui::Role::Table,
           label: format!("Table, {rows} rows, {columns} columns"),
           table_shape: Some((rows, columns)),
+          cells,
         })
       },
     }

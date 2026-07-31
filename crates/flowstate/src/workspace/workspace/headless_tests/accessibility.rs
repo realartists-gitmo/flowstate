@@ -193,6 +193,54 @@ mod tests {
     );
   }
 
+  /// A table must expose its CELLS, not just its shape.
+  ///
+  /// Cell text lives on `TableCellParagraph`, outside `document.text`, so the
+  /// ordinary paragraph walk never reaches it — without per-cell nodes a table
+  /// is an announced "3 rows, 2 columns" containing nothing a screen reader can
+  /// read or navigate.
+  #[gpui::test]
+  fn table_cells_are_reachable(cx: &mut TestAppContext) {
+    let h = support::open_workspace(cx);
+    h.new_document(cx);
+    h.update(cx, |ws, _window, cx| {
+      let editor = ws.active_editor.clone().expect("a document is open");
+      editor.update(cx, |editor, cx| editor.insert_default_table(2, 2, cx));
+    });
+    cx.run_until_parked();
+
+    let tree = h.a11y(cx);
+    assert!(
+      !tree.by_role("Table").is_empty(),
+      "no Role::Table; roles: {:?}\n{}",
+      tree.roles(),
+      tree.dump()
+    );
+
+    // Cells (or header cells) must exist and carry grid coordinates.
+    let cells: Vec<_> = tree
+      .by_role("Cell")
+      .into_iter()
+      .chain(tree.by_role("ColumnHeader"))
+      .collect();
+    assert_eq!(
+      cells.len(),
+      4,
+      "expected 4 cells for a 2x2 table, got {}; roles: {:?}\n{}",
+      cells.len(),
+      tree.roles(),
+      tree.dump()
+    );
+    assert!(
+      cells
+        .iter()
+        .all(|c| c.get("aria").and_then(|a| a.get("row_index")).is_some() && c.get("aria").and_then(|a| a.get("column_index")).is_some()),
+      "a cell was missing its row/column index, so table navigation cannot \
+       place it:\n{}",
+      tree.dump()
+    );
+  }
+
   /// A paragraph's accessibility node id must survive an insert ABOVE it.
   ///
   /// The element id becomes the AccessKit node id, and a changed node id means
