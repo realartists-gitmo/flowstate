@@ -27,9 +27,8 @@ pub(super) struct A11yParagraphInfo {
   pub(super) role: gpui::Role,
   /// Heading depth, when this paragraph is a heading. Maps to `aria_level`.
   pub(super) level: Option<usize>,
-  /// The paragraph's plain text.
-  pub(super) text: String,
-  /// The same text, split at run-style boundaries (and the 255-char limit).
+  /// The paragraph's text, split at run-style boundaries (and the 255-char
+  /// limit). The unsplit string is not retained: only the spans are emitted.
   pub(super) spans: Vec<A11yTextSpan>,
   /// Selection within this paragraph, as CHARACTER indices (AccessKit counts
   /// characters; the editor stores UTF-8 byte offsets).
@@ -68,7 +67,6 @@ impl RichTextEditor {
     Some(A11yParagraphInfo {
       role,
       level,
-      text,
       spans,
       selection,
     })
@@ -324,23 +322,6 @@ fn hsla_to_accesskit_color(color: gpui::Hsla) -> gpui::accesskit::Color {
     blue: byte(rgba.b),
     alpha: byte(rgba.a),
   }
-}
-
-/// Split `text` into AccessKit `TextRun` nodes of at most
-/// [`MAX_CHARS_PER_TEXT_RUN`] characters.
-///
-/// Always yields at least one run, even for an empty paragraph: the platform
-/// text pattern needs a run to anchor a caret to, and a paragraph the caret can
-/// sit in but that exposes no run would make the caret unreportable.
-pub(super) fn a11y_text_runs(text: &str) -> Vec<String> {
-  if text.is_empty() {
-    return vec![String::new()];
-  }
-  let chars: Vec<char> = text.chars().collect();
-  chars
-    .chunks(MAX_CHARS_PER_TEXT_RUN)
-    .map(|chunk| chunk.iter().collect())
-    .collect()
 }
 
 /// Build the AccessKit node for one text run.

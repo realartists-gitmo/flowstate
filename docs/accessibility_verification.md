@@ -47,16 +47,34 @@ gsettings set org.gnome.desktop.a11y.applications screen-reader-enabled true
 gsettings set org.gnome.desktop.a11y.applications screen-reader-enabled false
 ```
 
-With that flipped, flowstate DOES register and expose an accessible hierarchy.
-Confirmed end-to-end under Xvfb: the AT-SPI registry listed `screenshot_probe`
-alongside the desktop's own apps, and walking from its root returned the
-application object and its window child.
+With that flipped, flowstate DOES register: the AT-SPI registry listed
+`screenshot_probe` alongside the desktop's own apps, and its `Name` reads back
+correctly over the bus.
 
-So the delivery path works. What remains unverified is the *quality* of what is
-delivered — reading order, verbosity, whether announcements make sense — which
-needs a human listening, and the full deep tree walk (descending past the window
-requires pairing each child's `(bus_name, path)` tuple, which the quick probe
-above did not do).
+**But the CONTENTS were not reachable, and this is the open question.** A
+recursive walker (correctly pairing each child's `(bus_name, path)` tuple —
+`scratchpad/atspi_walk2.py`, worth rewriting rather than hunting for) reached
+only two nodes: the application object and one unnamed child. `GetRoleName`
+failed on both, while the same call against another running app
+(`psst-gui`) returned `"application"` fine — so the transport is right and the
+problem is on our side.
+
+The leading theory, unproven: **gpui only ships a `TreeUpdate` on a drawn
+frame**, and only when a11y was active at BOTH the start and end of that frame
+(`window.rs:2942-2965`). `screenshot_probe` renders a static document and then
+idles, so if activation lands after its last frame, no tree is ever published —
+the adapter registers, but there is nothing in it. A real app that keeps
+drawing (caret blink, input) would not have this problem, which is why the pass
+below should use `cargo run -p flowstate`, NOT the probe.
+
+An attempt to confirm via gpui's "Accessibility activated" `log::info!` was
+inconclusive: `screenshot_probe` installs no logger, so that output goes nowhere
+regardless. Adding a logger to the probe, or using the real app, would settle
+it.
+
+So: registration is verified, contents are NOT. Resolve that first — it is
+likely a test-harness artifact rather than a product bug, but it has not been
+shown to be.
 
 ## The pass itself
 
