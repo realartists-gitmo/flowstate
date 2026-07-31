@@ -6,7 +6,7 @@ use std::{
 };
 
 use gpui::{
-  App, Application, AssetSource, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyBinding,
+  App, AssetSource, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyBinding,
   ParentElement, PromptButton, PromptHandle, PromptLevel, PromptResponse, Render, RenderablePromptHandle, Result, SharedString, Styled, Window,
   actions, div, prelude::*, px, relative, rgb,
 };
@@ -342,7 +342,9 @@ pub fn run_standalone(mut document_path: Option<PathBuf>) {
   }
   let (open_url_tx, open_url_rx) = async_channel::unbounded();
   let initial_url_tx = open_url_tx.clone();
-  let application = Application::new().with_assets(AppAssets);
+  // `Application::new()` went away when gpui split out gpui_platform; platform
+  // selection now lives there.
+  let application = gpui_platform::application().with_assets(AppAssets);
   application.on_open_urls(move |urls| {
     for url in urls {
       let _ = open_url_tx.try_send(url);

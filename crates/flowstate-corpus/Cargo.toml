@@ -11,6 +11,7 @@ flowstate-document = { version = "0.1.0", path = "../flowstate-document" }
 flowstate-docx = { version = "0.1.0", path = "../flowstate-docx" }
 tempfile.workspace = true
 gpui.workspace = true
+gpui_platform.workspace = true
 gpui-component.workspace = true
 gpui-flowtext = { version = "0.1.0", path = "../gpui-flowtext" }
 hotpath.workspace = true

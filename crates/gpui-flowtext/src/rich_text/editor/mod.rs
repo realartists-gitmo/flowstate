@@ -16,9 +16,12 @@ use crop::Rope;
 use gpui::{
   App, Bounds, ClipboardEntry, ClipboardItem, Context, CursorStyle, DragMoveEvent, Entity, EntityInputHandler, ExternalPaths, FocusHandle,
   Focusable, Image, ImageFormat, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-  PathPromptOptions, Pixels, Point, Render, SharedString, Size, Subscription, Task, Timer, UTF16Selection, Window, actions, div, img, point,
+  PathPromptOptions, Pixels, Point, Render, SharedString, Size, Subscription, Task, UTF16Selection, Window, actions, div, img, point,
   prelude::*, px, relative, rgb, size,
 };
+// gpui dropped its `pub use smol::Timer` re-export in the split to
+// gpui/gpui_platform; take it from smol directly.
+use smol::Timer;
 use gpui_component::ActiveTheme as _;
 use gpui_component::scroll::{Scrollbar, ScrollbarHandle, ScrollbarShow};
 use gpui_component::{VirtualListScrollHandle, v_virtual_list};

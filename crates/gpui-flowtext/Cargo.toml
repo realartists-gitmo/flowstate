@@ -22,6 +22,7 @@ resvg = { workspace = true }
 rustc-hash = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+smol = { workspace = true }
 tempfile = { workspace = true }
 tracing.workspace = true
 typst = { workspace = true }

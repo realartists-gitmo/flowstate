@@ -35,7 +35,7 @@ impl RichTextEditor {
     window: &mut Window,
     cx: &mut Context<Self>,
   ) {
-    window.focus(&self.focus_handle);
+    window.focus(&self.focus_handle, cx);
     if let Some((selection, paragraph_block_ix, byte)) = self.table_cell_selection_at(block_ix, position, window, cx) {
       self.selected_block = Some(selection);
       self.table_cell_block_ix = paragraph_block_ix;
@@ -137,7 +137,7 @@ impl RichTextEditor {
     let Some((column_ix, widths, before)) = self.table_column_resize_hit_at(block_ix, position, window, cx) else {
       return false;
     };
-    window.focus(&self.focus_handle);
+    window.focus(&self.focus_handle, cx);
     self.selected_block = Some(BlockSelection::Table(block_ix));
     self.table_column_resize_drag = Some(TableColumnResizeDrag {
       block_ix,

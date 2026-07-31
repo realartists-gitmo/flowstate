@@ -21,6 +21,7 @@ flowstate-flow = { workspace = true }
 flowstate-tub = { workspace = true }
 futures-util = "0.3"
 gpui = { workspace = true }
+gpui_platform = { workspace = true }
 gpui-component = { workspace = true }
 gpui-component-assets = { workspace = true }
 hotpath = { workspace = true }

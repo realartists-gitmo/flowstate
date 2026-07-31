@@ -1,7 +1,7 @@
 #[hotpath::measure_all]
 impl RichTextEditor {
   fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-    window.focus(&self.focus_handle);
+    window.focus(&self.focus_handle, cx);
     self.image_resize_drag = None;
     self.table_column_resize_drag = None;
     self.clear_drop_preview();

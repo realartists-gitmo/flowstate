@@ -3,6 +3,10 @@ cargo-features = ["profile-rustflags"]
 [workspace]
 members = ["crates/*"]
 default-members = ["crates/flowstate"]
+# vendor/gpui-component is upstream's own (trimmed) workspace, kept intact so
+# its crates' `foo.workspace = true` inheritance still resolves. It must not be
+# absorbed as a member of this workspace.
+exclude = ["vendor/gpui-component"]
 resolver = "3"
 
 [workspace.package]
@@ -31,9 +35,21 @@ flowstate-collab = { version = "0.1.0", path = "crates/flowstate-collab" }
 flowstate-flow = { version = "0.1.0", path = "crates/flowstate-flow" }
 flowstate-tub = { version = "0.1.0", path = "crates/flowstate-tub" }
 gpui-flowtext = { version = "0.1.0", path = "crates/gpui-flowtext" }
-gpui = "0.2.2"
-gpui-component = "0.5.1"
-gpui-component-assets = "0.5.1"
+# gpui is consumed from zed's git tree, not crates.io: the published 0.2.2
+# (2025-10-22) predates the accessibility work (crates/gpui/src/window/a11y.rs,
+# AccessKit integration) that flowstate requires, and zed has not cut a new
+# crates.io release since. The pinned rev is the one upstream gpui-component
+# main pins in its own lockfile, so component and framework are known-compatible.
+# Keep in lockstep with vendor/gpui-component/Cargo.toml — see the PIN note there.
+gpui = { git = "https://github.com/zed-industries/zed", rev = "1a246efd7e1b83ab568ec5e3e6c1a43a42e1abba" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "1a246efd7e1b83ab568ec5e3e6c1a43a42e1abba", features = [
+  "font-kit",
+  "x11",
+  "wayland",
+  "runtime_shaders",
+] }
+gpui-component = { path = "vendor/gpui-component/crates/ui" }
+gpui-component-assets = { path = "vendor/gpui-component/crates/assets" }
 gpui-symbols = { version = "0.6.1", features = ["component"] }
 hotpath = "0.16.1"
 ignore = "0.4.25"
@@ -59,6 +75,9 @@ resvg = "0.45.1"
 rusqlite = { version = "0.40.0", features = ["bundled"] }
 rustc-hash = "2.1.2"
 serde = { version = "1.0.228", features = ["derive"] }
+# Was reached via gpui's `pub use smol::Timer` before the gpui crate split;
+# now declared directly. See crates/gpui-flowtext/src/rich_text/editor/mod.rs.
+smol = "2"
 serde_json = "1.0.150"
 sha2 = "0.10"
 tantivy = "0.26.1"
@@ -87,7 +106,15 @@ zstd = "0.13.3"
 # rebuild retreats a large concurrent branch (the 80-195s dirty-history undo
 # regime). One added method; re-apply on generic-btree upgrades.
 generic-btree = { path = "vendor/generic-btree" }
-gpui-component = { path = "vendor/gpui-component" }
+# gpui-symbols still declares `gpui = "0.2.2"` against crates.io. Without this
+# patch cargo would link BOTH the crates.io 0.2.2 gpui and the git gpui, and the
+# two `gpui::Element`/`gpui::Pixels` types would not unify at the one
+# gpui_symbols::Icon call site (crates/flowstate/src/workspace/icons.rs).
+#
+# `version = "=0.2.2"` is load-bearing: zed's tree contains two packages named
+# `gpui` (the real one at 0.2.2 and a 0.0.0 stub), and a patch entry that
+# matches both is an error.
+gpui = { git = "https://github.com/zed-industries/zed", rev = "1a246efd7e1b83ab568ec5e3e6c1a43a42e1abba", version = "=0.2.2" }
 # §perf: vendored to add `LoroDoc::query_text_id_positions`, a single-pass batch
 # resolver for many text cursor ids. Upstream Loro 1.13 only offers per-id cursor
 # resolution (`get_cursor_pos`), which is O(elements) each; resolving every
