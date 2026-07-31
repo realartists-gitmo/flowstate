@@ -160,7 +160,7 @@ impl RichTextEditor {
     let delay = self.recovery_write_delay();
     self.recovery_write_in_progress = true;
     cx.spawn(async move |editor, cx| {
-      Timer::after(delay).await;
+      cx.background_executor().timer(delay).await;
       let snapshot_timing = Instant::now();
       let decision = editor
         .update(cx, |editor, cx| {

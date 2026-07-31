@@ -1,7 +1,6 @@
 use std::time::{Duration, Instant};
 
 use flowstate_collab::{net::NetCommand, presence::PRESENCE_KEEPALIVE_SECS};
-use smol::Timer;
 use gpui::{Context};
 
 use super::{Attachment, CollabSession, Connectivity, DetachReason, SessionPhase};
@@ -101,7 +100,7 @@ impl CollabSession {
           Ok(Some(delay)) => delay,
           Ok(None) | Err(_) => break,
         };
-        Timer::after(delay).await;
+        cx.background_executor().timer(delay).await;
         match session.update(cx, |session, cx| session.run_digest_tick(cx)) {
           Ok(true) => {},
           Ok(false) | Err(_) => break,
@@ -117,7 +116,7 @@ impl CollabSession {
     tracing::debug!(session = %session_id, "starting collaboration presence timer");
     cx.spawn(async move |session, cx| {
       loop {
-        Timer::after(Duration::from_secs(PRESENCE_KEEPALIVE_SECS)).await;
+        cx.background_executor().timer(Duration::from_secs(PRESENCE_KEEPALIVE_SECS)).await;
         match session.update(cx, |session, cx| session.run_presence_tick(cx)) {
           Ok(true) => {},
           Ok(false) | Err(_) => break,

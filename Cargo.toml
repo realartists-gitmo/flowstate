@@ -75,9 +75,6 @@ resvg = "0.45.1"
 rusqlite = { version = "0.40.0", features = ["bundled"] }
 rustc-hash = "2.1.2"
 serde = { version = "1.0.228", features = ["derive"] }
-# Was reached via gpui's `pub use smol::Timer` before the gpui crate split;
-# now declared directly. See crates/gpui-flowtext/src/rich_text/editor/mod.rs.
-smol = "2"
 serde_json = "1.0.150"
 sha2 = "0.10"
 tantivy = "0.26.1"

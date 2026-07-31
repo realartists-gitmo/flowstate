@@ -236,7 +236,7 @@ impl RichTextEditor {
     self.pending_typing_prefetch_resume = true;
     let delay = self.typing_prefetch_resume_delay();
     cx.spawn(async move |editor, cx| {
-      Timer::after(delay).await;
+      cx.background_executor().timer(delay).await;
       let _ = editor.update(cx, |editor, cx| {
         editor.pending_typing_prefetch_resume = false;
         if editor.disposed {

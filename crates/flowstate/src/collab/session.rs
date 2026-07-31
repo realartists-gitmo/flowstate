@@ -21,7 +21,6 @@ use flowstate_collab::{
   proto_gossip::GossipMsg,
 };
 use flowstate_fidelity::{self as fidelity, FidelityClass};
-use smol::Timer;
 use gpui::{Context, Entity, EventEmitter, Subscription};
 use loro::{LoroDoc, Subscription as LoroSubscription};
 use uuid::Uuid;
@@ -364,8 +363,8 @@ impl CollabSession {
     let (neighbor_tx, neighbor_rx) = async_channel::bounded(1);
     self.join_neighbor_tx = Some(neighbor_tx.clone());
     self.phase = SessionPhase::Joining(JoinStage::Subscribing);
-    cx.spawn(async move |_, _| {
-      Timer::after(JOIN_FIRST_NEIGHBOR_TIMEOUT).await;
+    cx.spawn(async move |_, cx| {
+      cx.background_executor().timer(JOIN_FIRST_NEIGHBOR_TIMEOUT).await;
       let _ = neighbor_tx.try_send(JoinNeighborSignal::TimedOut);
     })
     .detach();
@@ -495,7 +494,7 @@ impl CollabSession {
     .detach();
 
     cx.spawn(async move |session, cx| {
-      Timer::after(JOIN_SNAPSHOT_TIMEOUT).await;
+      cx.background_executor().timer(JOIN_SNAPSHOT_TIMEOUT).await;
       let detail = "Joining this session timed out while fetching the document snapshot. Check your connection and try again.".to_string();
       let timed_out = session
         .update(cx, |session, cx| {
@@ -1225,7 +1224,7 @@ impl CollabSession {
     }
     self.publish_pump_pending = true;
     cx.spawn(async move |session, cx| {
-      Timer::after(Duration::from_millis(LOCAL_UPDATE_PUBLISH_DEBOUNCE_MS)).await;
+      cx.background_executor().timer(Duration::from_millis(LOCAL_UPDATE_PUBLISH_DEBOUNCE_MS)).await;
       let _ = session.update(cx, |session, cx| {
         session.publish_pump_pending = false;
         session.pump_publish(cx);

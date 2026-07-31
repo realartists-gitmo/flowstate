@@ -355,7 +355,7 @@ impl RichTextEditor {
     self.caret_blink_active = true;
     cx.spawn(async move |editor, cx| {
       loop {
-        Timer::after(Duration::from_millis(530)).await;
+        cx.background_executor().timer(Duration::from_millis(530)).await;
         let keep_running = editor
           .update(cx, |editor, cx| {
             if editor.disposed || !editor.caret_blink_active {
@@ -438,7 +438,7 @@ impl RichTextEditor {
     self.autoscroll_active = true;
     cx.spawn(async move |editor, cx| {
       loop {
-        Timer::after(Duration::from_millis(16)).await;
+        cx.background_executor().timer(Duration::from_millis(16)).await;
         let keep_running = editor
           .update(cx, |editor, cx| {
             if editor.disposed {

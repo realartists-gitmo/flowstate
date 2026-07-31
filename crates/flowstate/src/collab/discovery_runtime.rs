@@ -8,7 +8,6 @@ use flowstate_collab::{
   identity::{PortableIdentitySecret, SignedProfile},
 };
 use futures_util::{FutureExt as _, future::Either};
-use smol::Timer;
 use gpui::{App};
 use iroh::EndpointAddr;
 
@@ -63,7 +62,7 @@ impl DiscoveryRuntime {
     let discovery_paused = settings.collaboration_discovery_paused;
     let (commands, receiver) = async_channel::unbounded();
     cx.borrow_mut()
-      .spawn(async move |_| run_discovery_actor(receiver, dropbox, bluetooth_enabled, discovery_paused))
+      .spawn(async move |cx| run_discovery_actor(cx.background_executor().clone(), receiver, dropbox, bluetooth_enabled, discovery_paused).await)
       .detach();
     Self { commands }
   }
@@ -100,6 +99,10 @@ impl DiscoveryRuntime {
 }
 
 async fn run_discovery_actor(
+  // Taken by value so the refresh tick uses gpui's executor rather than smol's
+  // global reactor thread: under `TestScheduler` a smol timer fires on the
+  // `async-io` thread and trips the "your test is not deterministic" assertion.
+  executor: gpui::BackgroundExecutor,
   receiver: async_channel::Receiver<DiscoveryCommand>,
   dropbox: Option<(flowstate_collab::dropbox::DropboxCredentials, String)>,
   bluetooth_enabled: bool,
@@ -122,7 +125,7 @@ async fn run_discovery_actor(
   let mut bluetooth_cursor = 0_usize;
   loop {
     let command = receiver.recv().boxed();
-    let refresh = Timer::after(DISCOVERY_REFRESH).boxed();
+    let refresh = executor.timer(DISCOVERY_REFRESH).boxed();
     match futures_util::future::select(command, refresh).await {
       Either::Left((Ok(DiscoveryCommand::Upsert(publication)), _)) => {
         let session = publication.session;
