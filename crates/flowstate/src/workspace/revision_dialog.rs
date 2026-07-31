@@ -53,8 +53,8 @@ impl RevisionDialog {
     }
   }
 
-  pub fn focus(&self, window: &mut Window, _: &mut App) {
-    self.focus.focus(window);
+  pub fn focus(&self, window: &mut Window, cx: &mut App) {
+    self.focus.focus(window, cx);
   }
 }
 

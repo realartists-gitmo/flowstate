@@ -12,6 +12,7 @@ pub mod docx_conversion;
 pub mod file_search;
 pub mod flow;
 pub mod logging;
+pub mod pixels_ext;
 pub mod ribbon;
 pub mod rich_text_element;
 pub mod workspace;

@@ -415,7 +415,7 @@ fn style_color_item(
       .child(
         ColorPicker::new(&picker_state)
           .small()
-          .anchor(Corner::TopRight),
+          .anchor(Anchor::TopRight),
       )
       .when(has_pending_change, |this| {
         this.child(

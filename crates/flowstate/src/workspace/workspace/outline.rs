@@ -330,8 +330,11 @@ fn truncate_outline_label(label: &str, width: Pixels, window: &mut Window, cx: &
   // helper defines text_xs as 0.75rem; using the default 1rem style here makes
   // the app-level truncator think the label is much wider than it renders.
   let font_size = window.rem_size() * 0.75;
-  let mut runs = vec![text_style.to_run(label.len())];
+  let runs = vec![text_style.to_run(label.len())];
+  // `truncate_line` now takes the runs by shared slice plus a `TruncateFrom`,
+  // and returns the truncated runs alongside the string; we only need the text.
   cx.text_system()
     .line_wrapper(text_style.font(), font_size)
-    .truncate_line(label.to_string().into(), width, "…", &mut runs)
+    .truncate_line(label.to_string().into(), width, "…", &runs, gpui::TruncateFrom::End)
+    .0
 }

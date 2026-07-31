@@ -8,7 +8,8 @@ use flowstate_collab::{
   identity::{PortableIdentitySecret, SignedProfile},
 };
 use futures_util::{FutureExt as _, future::Either};
-use gpui::{App, Timer};
+use smol::Timer;
+use gpui::{App};
 use iroh::EndpointAddr;
 
 use crate::app_settings::{load_app_settings, load_dropbox_collaboration};

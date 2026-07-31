@@ -6,7 +6,8 @@ use flowstate_collab::{
   presence::{PresenceState, PresenceStore},
 };
 use flowstate_fidelity::{self as fidelity, FidelityClass};
-use gpui::{Context, Timer};
+use smol::Timer;
+use gpui::{Context};
 
 use super::{CollabSession, SessionNotice};
 

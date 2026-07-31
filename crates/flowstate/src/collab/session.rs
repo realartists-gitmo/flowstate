@@ -21,7 +21,8 @@ use flowstate_collab::{
   proto_gossip::GossipMsg,
 };
 use flowstate_fidelity::{self as fidelity, FidelityClass};
-use gpui::{Context, Entity, EventEmitter, Subscription, Timer};
+use smol::Timer;
+use gpui::{Context, Entity, EventEmitter, Subscription};
 use loro::{LoroDoc, Subscription as LoroSubscription};
 use uuid::Uuid;
 

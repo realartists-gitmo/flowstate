@@ -2,7 +2,7 @@ use std::{cell::RefCell, rc::Rc, time::Duration};
 
 use gpui::{
     Anchor, Animation, AnimationExt as _, AnyElement, App, Background, Bounds, Div, Edges,
-    ElementId, InteractiveElement, IntoElement, ParentElement, Pixels, RenderOnce, Role,
+    ElementId, Hsla, InteractiveElement, IntoElement, ParentElement, Pixels, RenderOnce, Role,
     ScrollHandle, SharedString, Stateful, StatefulInteractiveElement as _, StyleRefinement, Styled,
     Window, div, prelude::FluentBuilder as _, px,
 };
@@ -45,7 +45,9 @@ pub struct TabBar {
     children: SmallVec<[Tab; 2]>,
     last_empty_space: AnyElement,
     selected_index: Option<usize>,
-    variant: TabVariant,
+    active_tab_bg: Option<Hsla>,
+    active_tab_fg: Option<Hsla>,
+variant: TabVariant,
     size: Size,
     menu: bool,
     on_click: Option<Rc<dyn Fn(&usize, &mut Window, &mut App) + 'static>>,
@@ -67,6 +69,8 @@ impl TabBar {
             size: Size::default(),
             last_empty_space: div().w_3().into_any_element(),
             selected_index: None,
+            active_tab_bg: None,
+            active_tab_fg: None,
             on_click: None,
             menu: false,
         }
@@ -141,6 +145,18 @@ impl TabBar {
     /// Set the selected index of the TabBar.
     pub fn selected_index(mut self, index: usize) -> Self {
         self.selected_index = Some(index);
+        self
+    }
+
+    /// Override the outer background color used by the selected tab.
+    pub fn active_tab_bg(mut self, bg: Hsla) -> Self {
+        self.active_tab_bg = Some(bg);
+        self
+    }
+
+    /// Override the foreground color used by the selected tab.
+    pub fn active_tab_fg(mut self, fg: Hsla) -> Self {
+        self.active_tab_fg = Some(fg);
         self
     }
 
@@ -467,7 +483,15 @@ impl RenderOnce for TabBar {
                                 .ix(ix)
                                 .tab_bar_prefix(tab_bar_prefix)
                                 .with_variant(self.variant)
-                                .with_size(self.size);
+                                .with_size(self.size)
+                                // FLOWSTATE PATCH: propagate the tab bar's
+                                // selected-tab colour overrides to each tab.
+                                .when_some(self.active_tab_bg, |this, active_bg| {
+                                    this.active_bg(active_bg)
+                                })
+                                .when_some(self.active_tab_fg, |this, active_fg| {
+                                    this.active_fg(active_fg)
+                                });
                             tab.indicator_active = has_indicator;
                             tab.indicator_ready = indicator_ready;
                             tab.indicator_epoch = indicator_epoch;

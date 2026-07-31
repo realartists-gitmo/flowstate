@@ -8,7 +8,7 @@ use gpui_component::button::{Button, ButtonGroup, ButtonVariants as _, Toggle, T
 use gpui_component::h_flex;
 use gpui_component::kbd::Kbd;
 use gpui_component::menu::PopupMenuItem;
-use gpui_component::{ActiveTheme as _, Disableable as _, Icon, IconName, PixelsExt as _, Selectable as _, Sizable as _};
+use gpui_component::{ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _};
 use serde::{Deserialize, Serialize};
 
 use crate::commands::{CommandId, active_first_key_for};

@@ -1611,15 +1611,19 @@ impl Element for TextElement {
         let (display_text, text_color) = if is_empty {
             (
                 &Rope::from(placeholder.as_str()),
-                dim(cx.theme().muted_foreground),
+                // FLOWSTATE PATCH: honour the per-instance colour overrides, but
+                // keep them inside `dim` so a disabled input still fades.
+                dim(state
+                    .placeholder_color
+                    .unwrap_or(cx.theme().muted_foreground)),
             )
         } else if state.masked {
             (
                 &Rope::from(MASK_CHAR.to_string().repeat(text.chars().count())),
-                fg,
+                state.text_color.map_or(fg, dim),
             )
         } else {
-            (&text, fg)
+            (&text, state.text_color.map_or(fg, dim))
         };
 
         // Calculate the width of the line numbers

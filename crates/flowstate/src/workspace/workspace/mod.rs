@@ -9,7 +9,7 @@ use std::{
 };
 
 use gpui::{
-  AnyElement, AnyWindowHandle, App, Context, Corner, DismissEvent, DummyKeyboardMapper, Entity, Focusable, Hsla, InteractiveElement,
+  AnyElement, AnyWindowHandle, Anchor, App, Context, DismissEvent, DummyKeyboardMapper, Entity, Focusable, Hsla, InteractiveElement,
   IntoElement, KeyBinding, Keystroke, MouseButton, NoAction, PathPromptOptions, Pixels, Point, PromptButton, PromptLevel, Render, ScrollHandle,
   SharedString, Subscription, WeakEntity, Window, WindowBounds, WindowDecorations, WindowOptions, anchored, black, deferred, div, prelude::*,
   px,
@@ -27,10 +27,11 @@ use gpui_component::scroll::ScrollableElement;
 use gpui_component::select::{SearchableVec, Select, SelectEvent, SelectState};
 use gpui_component::setting::{SettingField, SettingGroup, SettingItem, SettingPage, Settings};
 use gpui_component::slider::{Slider, SliderEvent, SliderState, SliderValue};
+use crate::pixels_ext::PixelsExt as _;
 use gpui_component::tab::{Tab, TabBar};
 use gpui_component::tree::{TreeItem, TreeState, tree};
 use gpui_component::{
-  ActiveTheme as _, Colorize as _, Disableable, Icon, IconName, PixelsExt, Root, Selectable, Sizable, Theme, ThemeRegistry, TitleBar,
+  ActiveTheme as _, Colorize as _, Disableable, Icon, IconName, Root, Selectable, Sizable, Theme, ThemeRegistry, TitleBar,
   VirtualListScrollHandle, WindowExt as _, h_flex, v_flex,
 };
 use rustc_hash::{FxHashMap, FxHashSet};

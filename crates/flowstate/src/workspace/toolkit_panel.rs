@@ -6,7 +6,8 @@ use std::{
   time::Duration,
 };
 
-use gpui::{App, Context, IntoElement, PathPromptOptions, Pixels, Timer, Window, div, point, prelude::*, px, size};
+use smol::Timer;
+use gpui::{App, Context, IntoElement, PathPromptOptions, Pixels, Window, div, point, prelude::*, px, size};
 use gpui_component::{
   ActiveTheme as _, Icon, IconName, Selectable as _, Sizable,
   button::{Button, ButtonVariants},
@@ -81,7 +82,7 @@ impl Workspace {
         resizable_panel()
           .size(toolkit_width)
           .size_range(toolkit_width..toolkit_range_end)
-          .grow(false)
+          .flex_none()
           .child(if self.toolkit_collapsed {
             self
               .render_collapsed_side_panel("Show toolkit", IconName::PanelRightOpen, |workspace, cx| workspace.toggle_toolkit(cx), cx)

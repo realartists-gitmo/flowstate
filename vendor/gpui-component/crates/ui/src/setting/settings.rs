@@ -40,6 +40,8 @@ pub struct Settings {
     sidebar_style: StyleRefinement,
     default_selected_index: SelectIndex,
     header_style: StyleRefinement,
+    /// FLOWSTATE PATCH: see [`Settings::searchable`].
+    searchable: bool,
 }
 
 impl Settings {
@@ -55,7 +57,19 @@ impl Settings {
             sidebar_style: StyleRefinement::default(),
             default_selected_index: SelectIndex::default(),
             header_style: StyleRefinement::default(),
+            searchable: true,
         }
+    }
+
+    /// FLOWSTATE PATCH: show or hide the sidebar's search box. Default `true`,
+    /// matching upstream.
+    ///
+    /// Flowstate renders settings as an overlay with a 176px sidebar, where the
+    /// search input is too cramped to be useful. Hiding it leaves the filter
+    /// query empty, which `SettingPage` treats as "match everything".
+    pub fn searchable(mut self, searchable: bool) -> Self {
+        self.searchable = searchable;
+        self
     }
 
     /// Set the width of the sidebar, default is `250px`.
@@ -178,12 +192,14 @@ impl Settings {
             .refine_style(&self.sidebar_style)
             .collapsible(false)
             .collapsed(false)
-            .header(
-                div()
-                    .w_full()
-                    .refine_style(&self.header_style)
-                    .child(Input::new(&search_input).prefix(IconName::Search)),
-            )
+            .when(self.searchable, |this| {
+                this.header(
+                    div()
+                        .w_full()
+                        .refine_style(&self.header_style)
+                        .child(Input::new(&search_input).prefix(IconName::Search)),
+                )
+            })
             .child(
                 SidebarMenu::new().children(pages.iter().enumerate().map(|(page_ix, page)| {
                     let is_page_active =

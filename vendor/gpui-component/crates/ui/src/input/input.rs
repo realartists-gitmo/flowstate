@@ -47,6 +47,8 @@ pub struct Input {
     disabled: bool,
     bordered: bool,
     focus_bordered: bool,
+    text_color: Option<Hsla>,
+    placeholder_color: Option<Hsla>,
     tab_index: isize,
     selected: bool,
     content_type: Option<InputContentType>,
@@ -92,6 +94,8 @@ impl Input {
             disabled: false,
             bordered: true,
             focus_bordered: true,
+            text_color: None,
+            placeholder_color: None,
             tab_index: 0,
             selected: false,
             content_type: None,
@@ -172,6 +176,18 @@ impl Input {
     /// Set to disable the input field.
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
+        self
+    }
+
+    /// Override the input text color.
+    pub fn text_color(mut self, color: Hsla) -> Self {
+        self.text_color = Some(color);
+        self
+    }
+
+    /// Override the placeholder text color.
+    pub fn placeholder_color(mut self, color: Hsla) -> Self {
+        self.placeholder_color = Some(color);
         self
     }
 
@@ -353,6 +369,10 @@ impl RenderOnce for Input {
             if state.mode.is_single_line() {
                 state.text_align = text_align;
             }
+
+            // FLOWSTATE PATCH: per-instance colour overrides.
+            state.text_color = self.text_color;
+            state.placeholder_color = self.placeholder_color;
         });
 
         let state = self.state.read(cx);

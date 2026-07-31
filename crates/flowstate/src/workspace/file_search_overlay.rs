@@ -64,7 +64,7 @@ impl FileSearchOverlay {
   }
 
   pub fn focus_search(&self, window: &mut Window, cx: &mut Context<Self>) {
-    self.search_input.focus_handle(cx).focus(window);
+    self.search_input.focus_handle(cx).focus(window, cx);
   }
 
   fn rebuild_index(&mut self, cx: &mut Context<Self>) {

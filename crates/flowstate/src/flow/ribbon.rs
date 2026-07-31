@@ -6,7 +6,7 @@ use gpui::{
 use gpui_component::button::{Button, ButtonVariants, Toggle};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::select::{SearchableVec, Select, SelectEvent, SelectState};
-use gpui_component::{ActiveTheme as _, Disableable, Icon, IconName, PixelsExt, Selectable, Sizable, StyledExt, h_flex, v_flex};
+use gpui_component::{ActiveTheme as _, Disableable, Icon, IconName, Selectable, Sizable, StyledExt, h_flex, v_flex};
 
 use crate::flow::FlowEditor;
 

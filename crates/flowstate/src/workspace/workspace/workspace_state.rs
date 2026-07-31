@@ -644,10 +644,11 @@ impl Workspace {
       return;
     }
     let id = outline_item_id(paragraph_ix);
-    self.outline_tree.update(cx, |tree, _| {
-      if let Some(ix) = tree.item_index_by_id(&id) {
-        tree.scroll_to_item(ix, gpui::ScrollStrategy::Center);
-      }
+    // `reveal_item` replaces our old `item_index_by_id` + `scroll_to_item`
+    // pair: it is a no-op when the id is absent, and additionally expands the
+    // item's collapsed ancestors so the scroll can actually land on it.
+    self.outline_tree.update(cx, |tree, cx| {
+      tree.reveal_item(&id.into(), gpui::ScrollStrategy::Center, cx);
     });
     self.outline_scrolled_paragraph = Some(paragraph_ix);
   }

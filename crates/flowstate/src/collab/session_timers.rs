@@ -1,7 +1,8 @@
 use std::time::{Duration, Instant};
 
 use flowstate_collab::{net::NetCommand, presence::PRESENCE_KEEPALIVE_SECS};
-use gpui::{Context, Timer};
+use smol::Timer;
+use gpui::{Context};
 
 use super::{Attachment, CollabSession, Connectivity, DetachReason, SessionPhase};
 

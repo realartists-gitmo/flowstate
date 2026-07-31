@@ -104,7 +104,7 @@ impl CollabShareDialog {
 
   pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
     if self.mode == CollabDialogMode::Join {
-      self.join_input.focus_handle(cx).focus(window);
+      self.join_input.focus_handle(cx).focus(window, cx);
     }
   }
 

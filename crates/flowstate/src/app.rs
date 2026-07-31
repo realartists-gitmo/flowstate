@@ -363,9 +363,7 @@ pub fn run_standalone(mut document_path: Option<PathBuf>) {
     }
     cx.spawn(async move |cx| {
       while let Ok(url) = open_url_rx.recv().await {
-        let handled = cx
-          .update(|cx| crate::collab::dropbox_oauth::route_callback(&url, cx))
-          .unwrap_or(false);
+        let handled = cx.update(|cx| crate::collab::dropbox_oauth::route_callback(&url, cx));
         if handled {
           continue;
         }

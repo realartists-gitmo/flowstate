@@ -36,7 +36,7 @@ impl Workspace {
         resizable_panel()
           .size(px(112.0))
           .size_range(px(56.0)..px(158.0))
-          .grow(false)
+          .flex_none()
           .child(self.render_ribbon(ribbon_height, cx)),
       )
       .child(
@@ -68,7 +68,7 @@ impl Workspace {
         resizable_panel()
           .size(outline_width)
           .size_range(outline_width..outline_range_end)
-          .grow(false)
+          .flex_none()
           .child(if self.outline_collapsed {
             self
               .render_collapsed_side_panel("Show outline", IconName::PanelLeftOpen, |workspace, cx| workspace.toggle_outline(cx), cx)

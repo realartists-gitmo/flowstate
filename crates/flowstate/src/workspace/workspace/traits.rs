@@ -76,7 +76,7 @@ impl Render for Workspace {
                   anchored()
                     .position(position)
                     .snap_to_window_with_margin(px(8.))
-                    .anchor(Corner::TopLeft)
+                    .anchor(Anchor::TopLeft)
                     .child(menu),
                 ),
             ),

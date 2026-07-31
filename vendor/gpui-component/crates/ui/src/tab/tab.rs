@@ -1,6 +1,7 @@
 use std::{rc::Rc, time::Duration};
 
 use crate::animation::{Lerp, ease_in_out_cubic};
+use crate::menu::{ContextMenuExt as _, PopupMenu};
 use crate::{ActiveTheme, Icon, IconName, Selectable, Sizable, Size, StyledExt, h_flex};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -411,7 +412,11 @@ pub struct Tab {
     /// tab switch. Used to key the selected tab's text color fade so it
     /// restarts in sync with the indicator slide.
     pub(super) indicator_epoch: u64,
+    /// FLOWSTATE PATCH: per-tab overrides for the selected-tab colours.
+    pub(super) active_bg: Option<Hsla>,
+    pub(super) active_fg: Option<Hsla>,
     on_click: Option<Rc<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>>,
+    context_menu: Option<Rc<dyn Fn(PopupMenu, &mut Window, &mut gpui::Context<PopupMenu>) -> PopupMenu + 'static>>,
 }
 
 impl From<&'static str> for Tab {
@@ -459,11 +464,14 @@ impl Default for Tab {
             indicator_active: false,
             indicator_ready: true,
             indicator_epoch: 0,
+            active_bg: None,
+            active_fg: None,
             prefix: None,
             suffix: None,
             variant: TabVariant::default(),
             size: Size::default(),
             on_click: None,
+            context_menu: None,
         }
     }
 }
@@ -553,6 +561,27 @@ impl Tab {
         self
     }
 
+    /// FLOWSTATE PATCH: set the context menu shown on right click.
+    pub fn context_menu(
+        mut self,
+        f: impl Fn(PopupMenu, &mut Window, &mut gpui::Context<PopupMenu>) -> PopupMenu + 'static,
+    ) -> Self {
+        self.context_menu = Some(Rc::new(f));
+        self
+    }
+
+    /// FLOWSTATE PATCH: override the outer background colour when selected.
+    pub fn active_bg(mut self, bg: Hsla) -> Self {
+        self.active_bg = Some(bg);
+        self
+    }
+
+    /// FLOWSTATE PATCH: override the foreground colour when selected.
+    pub fn active_fg(mut self, fg: Hsla) -> Self {
+        self.active_fg = Some(fg);
+        self
+    }
+
     /// Set index to the tab.
     pub(crate) fn ix(mut self, ix: usize) -> Self {
         self.ix = ix;
@@ -611,6 +640,12 @@ impl RenderOnce for Tab {
         } else {
             self.variant.normal(cx)
         };
+        if self.selected && let Some(active_bg) = self.active_bg {
+            tab_style.bg = active_bg.into();
+        }
+        if self.selected && let Some(active_fg) = self.active_fg {
+            tab_style.fg = active_fg;
+        }
         let mut hover_style = self.variant.hovered(self.selected, cx);
         if self.disabled {
             tab_style = self.variant.disabled(self.selected, cx);
@@ -725,7 +760,11 @@ impl RenderOnce for Tab {
             inner_content.into_any_element()
         };
 
-        self.base
+        // FLOWSTATE PATCH: hoisted so the context menu can wrap the finished tab.
+        let context_menu = self.context_menu.clone();
+
+        let tab = self
+            .base
             .id(self.ix)
             .role(Role::Tab)
             .when_some(aria_label, |this, label| this.aria_label(label))
@@ -799,7 +838,14 @@ impl RenderOnce for Tab {
                 this.when_some(self.on_click.clone(), |this, on_click| {
                     this.on_click(move |event, window, cx| on_click(event, window, cx))
                 })
-            })
+            });
+
+        if let Some(context_menu) = context_menu {
+            tab.context_menu(move |menu, window, cx| context_menu(menu, window, cx))
+                .into_any_element()
+        } else {
+            tab.into_any_element()
+        }
     }
 }
 
