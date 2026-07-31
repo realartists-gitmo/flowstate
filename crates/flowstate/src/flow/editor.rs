@@ -1169,6 +1169,10 @@ impl FlowEditor {
       .map(|node| node.children.clone())
       .unwrap_or_default();
     v_flex()
+      // The board is the tree container its boxes are TreeItems of.
+      .id("flow-board")
+      .role(gpui::Role::Tree)
+      .aria_label(self.selected_flow_title())
       .flex_1()
       .overflow_scrollbar()
       .p_4()
@@ -1296,8 +1300,35 @@ impl FlowEditor {
       .unwrap_or_else(|| affirmative_flow_colors(cx));
     let weak = cx.theme().muted_foreground;
     let id_for_click = box_id.clone();
+    // The flow is a column-labelled TREE, not a grid: boxes nest by `level`,
+    // and a box's column is which speech it answers. So the box is a TreeItem
+    // carrying its depth, and the column index + label give the speech
+    // attribution a screen reader otherwise cannot see (it is conveyed purely
+    // by horizontal position and colour).
+    let column_ix = flow_box_column_index(node.level);
+    let a11y_label = {
+      let content = box_node.content.trim();
+      let body = if content.is_empty() {
+        box_node.placeholder.clone().unwrap_or_else(|| "Empty".to_string())
+      } else {
+        content.to_string()
+      };
+      match columns.get(column_ix) {
+        Some(column) if !column.is_empty() => format!("{body}, {column}"),
+        _ => body,
+      }
+    };
+    let a11y_folded = self.folded.contains(&box_id);
+    let a11y_has_children = !node.children.is_empty();
     v_flex()
       .id(("flow-box-cell", stable_element_id(&box_id)))
+      .role(gpui::Role::TreeItem)
+      .aria_label(a11y_label)
+      // `aria_level` is 1-based; `level` is the column depth with the root at -1.
+      .aria_level((node.level.max(0) as usize) + 1)
+      .aria_selected(selected)
+      .aria_column_index(column_ix + 1)
+      .when(a11y_has_children, |this| this.aria_expanded(!a11y_folded))
       .w(px(COLUMN_WIDTH))
       .min_h(px(44.0))
       .p_1()
