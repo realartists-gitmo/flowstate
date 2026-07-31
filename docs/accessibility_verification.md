@@ -4,9 +4,9 @@
 roles, names, document text, caret position, heading levels, table cells. It
 does that by reading `Window::debug_a11y_tree_json()` inside `#[gpui::test]`.
 
-It does **not** prove the tree is **delivered** to a real assistive-technology
-client, nor that the result is pleasant to listen to. Those need a desktop
-session and a human. This file is the procedure.
+Delivery to a real assistive-technology client HAS been verified once, over
+AT-SPI, and the recipe is below. What still needs a human is whether the result
+is *pleasant and coherent to listen to* — reading order, verbosity, phrasing.
 
 ## What is already known about the delivery path
 
@@ -28,20 +28,35 @@ busctl --address="$A11Y" call org.a11y.atspi.Registry \
   /org/a11y/atspi/accessible/root org.a11y.atspi.Accessible GetChildren
 ```
 
-**Flowstate does not appear in that list when run headlessly under `xvfb-run`.**
-Two explanations were not distinguished, and whoever does this pass should find
-out which it is:
+**RESOLVED: accessibility is lazily activated, and nothing is exposed until a
+screen reader is enabled.** `accesskit_unix` watches
+`org.a11y.Status.ScreenReaderEnabled` (`context.rs:153-179`,
+`StatusProxy::receive_screen_reader_enabled_changed`) and only then registers
+and builds a tree. With it off, flowstate is absent from the AT-SPI registry
+even though the window is up — verified separately with `xdotool` that the
+process is alive and windows exist. This is the production analogue of the
+`TestWindow::a11y_init` gap that `vendor/gpui` patches for tests.
 
-1. `accesskit_unix` registers/activates lazily and needs a live AT client
-   (no screen reader was running) — the production analogue of the
-   `TestWindow::a11y_init` gap that `vendor/gpui` patches for tests; or
-2. the window never came up properly under Xvfb (the probe logs
-   `MESA: info: vulkan: No DRI3 support detected - required for presentation`),
-   so there was nothing to expose.
+Note the flag is NOT writable over D-Bus — `Properties.Set` on
+`org.a11y.Status` silently fails. The real lever is gsettings, which is what
+Orca toggles:
 
-If it turns out to be (1), that is worth knowing: it means the tree only exists
-when someone is listening, which is by design but makes casual verification
-impossible without a screen reader attached.
+```sh
+gsettings set org.gnome.desktop.a11y.applications screen-reader-enabled true
+# ... run flowstate ...
+gsettings set org.gnome.desktop.a11y.applications screen-reader-enabled false
+```
+
+With that flipped, flowstate DOES register and expose an accessible hierarchy.
+Confirmed end-to-end under Xvfb: the AT-SPI registry listed `screenshot_probe`
+alongside the desktop's own apps, and walking from its root returned the
+application object and its window child.
+
+So the delivery path works. What remains unverified is the *quality* of what is
+delivered — reading order, verbosity, whether announcements make sense — which
+needs a human listening, and the full deep tree walk (descending past the window
+requires pairing each child's `(bus_name, path)` tuple, which the quick probe
+above did not do).
 
 ## The pass itself
 
@@ -51,7 +66,9 @@ Run on a real desktop session, not over SSH/Xvfb.
    `speech-dispatcher` for speech; braille optional).
 2. Launch flowstate normally: `cargo run --release -p flowstate`.
 3. Confirm it appears as an accessible application using the `busctl` command
-   above. If it does not, that is finding (1) or (2) and blocks the rest.
+   above. Orca sets `screen-reader-enabled` itself, so no manual gsettings flip
+   is needed when it is running. If flowstate is still absent, that is a
+   regression in the delivery path, not a known limitation.
 
 Then check, in order — each of these has a corresponding automated test, so a
 discrepancy means the automated test is asserting the wrong thing:
