@@ -310,6 +310,11 @@ impl Workspace {
       self.sync_zoom_slider(percent, window, cx);
     }
     h_flex()
+      // Landmark: `Role::Status` marks a region whose content is advisory and
+      // changes on its own (collaboration state, zoom, speech word count).
+      .id("status-bar")
+      .role(gpui::Role::Status)
+      .aria_label("Status")
       .h(px(26.0))
       .flex_none()
       .w_full()

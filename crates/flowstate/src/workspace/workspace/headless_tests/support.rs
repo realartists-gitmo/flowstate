@@ -39,6 +39,86 @@ pub struct WorkspaceHarness {
   pub workspace: Entity<Workspace>,
 }
 
+/// A captured accessibility tree, with the queries assertions actually want.
+///
+/// gpui dumps a FLAT map of `ephemeral id -> node`, where each node carries its
+/// `children` as ephemeral ids, so every structural question here is a lookup
+/// through that map rather than a walk of nested json.
+pub struct A11yTree(pub serde_json::Value);
+
+impl A11yTree {
+  fn nodes(&self) -> impl Iterator<Item = (&String, &serde_json::Value)> {
+    self
+      .0
+      .get("nodes")
+      .and_then(|n| n.as_object())
+      .into_iter()
+      .flat_map(|map| map.iter())
+  }
+
+  pub fn len(&self) -> usize {
+    self.nodes().count()
+  }
+
+  /// `aria.role` for a node, e.g. `"Button"`.
+  fn role_of(node: &serde_json::Value) -> Option<&str> {
+    node.get("aria")?.get("role")?.as_str()
+  }
+
+  /// The accessible NAME: `aria.label`, falling back to `aria.value` the way a
+  /// screen reader would when a control has no label of its own.
+  fn name_of(node: &serde_json::Value) -> Option<&str> {
+    let aria = node.get("aria")?;
+    aria
+      .get("label")
+      .and_then(|v| v.as_str())
+      .or_else(|| aria.get("value").and_then(|v| v.as_str()))
+  }
+
+  pub fn by_role(&self, role: &str) -> Vec<&serde_json::Value> {
+    self
+      .nodes()
+      .filter(|(_, n)| Self::role_of(n) == Some(role))
+      .map(|(_, n)| n)
+      .collect()
+  }
+
+  pub fn roles(&self) -> Vec<String> {
+    let mut roles: Vec<String> = self.nodes().filter_map(|(_, n)| Self::role_of(n).map(str::to_string)).collect();
+    roles.sort();
+    roles.dedup();
+    roles
+  }
+
+  /// First node whose accessible name equals `name`.
+  pub fn by_name(&self, name: &str) -> Option<&serde_json::Value> {
+    self.nodes().map(|(_, n)| n).find(|n| Self::name_of(n) == Some(name))
+  }
+
+  pub fn names(&self) -> Vec<String> {
+    self.nodes().filter_map(|(_, n)| Self::name_of(n).map(str::to_string)).collect()
+  }
+
+  /// Nodes that advertise an action but carry no accessible name — the exact
+  /// shape a screen reader announces as an anonymous "button".
+  pub fn actionable_without_name(&self) -> Vec<String> {
+    self
+      .nodes()
+      .filter(|(_, n)| {
+        let acts = n.get("aria").and_then(|a| a.get("on_action")).and_then(|a| a.as_array());
+        let interactive = acts.is_some_and(|a| a.iter().any(|x| x.as_str() == Some("Click")));
+        interactive && Self::name_of(n).is_none()
+      })
+      .map(|(id, n)| format!("{id} ({})", Self::role_of(n).unwrap_or("?")))
+      .collect()
+  }
+
+  /// Pretty-printed dump, for `--nocapture` debugging of a failing assertion.
+  pub fn dump(&self) -> String {
+    serde_json::to_string_pretty(&self.0).unwrap_or_default()
+  }
+}
+
 impl WorkspaceHarness {
   /// Run `f` against the workspace with the window available — the same shape
   /// as a real event handler (workspace lease held, window borrowed).
@@ -48,6 +128,22 @@ impl WorkspaceHarness {
       .window
       .update(cx, |_, window, cx| workspace.update(cx, |ws, cx| f(ws, window, cx)))
       .expect("workspace window is open")
+  }
+
+  /// The window's accessibility tree, as the flat node map gpui dumps.
+  ///
+  /// Only works because `vendor/gpui` patches `TestWindow::a11y_init` to
+  /// activate accessibility — upstream's default is a no-op, which leaves
+  /// `A11y::is_active()` false, so `draw_roots` never calls `begin_frame` and
+  /// this returns `None`. If that patch is ever lost this panics rather than
+  /// silently asserting against an empty tree.
+  pub fn a11y(&self, cx: &mut TestAppContext) -> A11yTree {
+    let json = self
+      .window
+      .update(cx, |_, window, _| window.debug_a11y_tree_json())
+      .expect("workspace window is open")
+      .expect("no a11y tree captured — is the vendor/gpui TestWindow::a11y_init patch still present?");
+    A11yTree(serde_json::from_str(&json).expect("a11y dump is valid json"))
   }
 
   pub fn read<R>(&self, cx: &mut TestAppContext, f: impl FnOnce(&Workspace) -> R) -> R {

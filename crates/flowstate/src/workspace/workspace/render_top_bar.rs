@@ -51,6 +51,13 @@ impl Workspace {
     let show_placeholder = active_ribbon.is_none();
 
     h_flex()
+      // Landmark: the formatting/command strip. `.id()` is required before any
+      // `aria_*` — those live on `StatefulInteractiveElement`, which only exists
+      // for `Stateful<E>` — and a node needs BOTH an id and a role to be
+      // reported at all.
+      .id("ribbon")
+      .role(gpui::Role::Toolbar)
+      .aria_label("Ribbon")
       .relative()
       .h(ribbon_height)
       .min_h(px(56.0))

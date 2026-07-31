@@ -517,7 +517,7 @@ pub fn range_contains_heading(document: &DocumentProjection, range: Range<usize>
 // §perf: not hotpath-measured — a map probe per paragraph per outline pass;
 // the hooks dominated it at scale.
 #[inline]
-fn section_level_and_kind(document: &DocumentProjection, style: ParagraphStyle) -> Option<(usize, SectionKind)> {
+pub fn section_level_and_kind(document: &DocumentProjection, style: ParagraphStyle) -> Option<(usize, SectionKind)> {
   match style {
     ParagraphStyle::Normal => None,
     ParagraphStyle::Custom(slot) => {

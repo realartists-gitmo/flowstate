@@ -468,9 +468,22 @@ impl RenderOnce for Button {
             } else {
                 Role::Button
             })
-            .when_some(self.label.as_ref(), |this, label| {
-                this.aria_label(label.clone())
-            })
+            // FLOWSTATE PATCH: fall back to the tooltip for the accessible name.
+            //
+            // Upstream only names a button when it has a visible `label`, so every
+            // icon-only button reaches assistive technology as an anonymous
+            // "button" (30 of them in flowstate's shell alone). The tooltip is
+            // already the human-readable name for exactly those controls, and
+            // naming an icon button from its tooltip is the conventional mapping.
+            // A real `label` still wins.
+            .when_some(
+                self
+                    .label
+                    .as_ref()
+                    .cloned()
+                    .or_else(|| self.tooltip.as_ref().map(|(text, _)| text.clone())),
+                |this, name| this.aria_label(name),
+            )
             .aria_selected(self.selected)
             .when(!self.disabled, |this| {
                 this.track_focus(

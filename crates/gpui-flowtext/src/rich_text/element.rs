@@ -47,6 +47,12 @@ pub(super) struct VirtualParagraphChunkElement {
   pub(super) chunk_ix: usize,
   pub(super) generation: u64,
   pub(super) layout: WordElementLayout,
+  /// Accessibility description of this paragraph, resolved during
+  /// `request_layout` because `Element::a11y_role` takes only `&self` and so
+  /// cannot read the editor entity itself. `None` when accessibility is
+  /// inactive (the common case — nothing here is observable without assistive
+  /// technology) or when this is a continuation chunk.
+  pub(super) a11y: Option<A11yParagraphInfo>,
 }
 
 #[derive(Clone)]
@@ -195,6 +201,75 @@ impl Element for VirtualParagraphChunkElement {
     None
   }
 
+  /// `Paragraph`, or `Heading` when the paragraph's style resolves to a section
+  /// heading. `None` — meaning no node at all — for continuation chunks and
+  /// whenever accessibility is inactive.
+  fn a11y_role(&self) -> Option<gpui::Role> {
+    self.a11y.as_ref().map(|info| info.role)
+  }
+
+  fn write_a11y_info(&self, node: &mut gpui::accesskit::Node) {
+    if let Some(level) = self.a11y.as_ref().and_then(|info| info.level) {
+      node.set_level(level);
+    }
+  }
+
+  /// Expose the paragraph's text as `TextRun` children, plus the caret /
+  /// selection when it lands in this paragraph.
+  ///
+  /// These are flat leaves under this paragraph's node — `push_child` cannot
+  /// nest — which is exactly the shape AccessKit's text pattern wants: a
+  /// container whose children are runs, with `text_selection` on the container
+  /// pointing into them.
+  fn a11y_synthetic_children(&mut self, _prepaint: &mut Self::PrepaintState, builder: &mut gpui::A11ySubtreeBuilder) {
+    let Some(info) = self.a11y.as_ref() else {
+      return;
+    };
+
+    let chunks = a11y_text_runs(&info.text);
+    let ids: Vec<gpui::accesskit::NodeId> = (0..chunks.len()).map(|ix| builder.synthetic_node_id(ix)).collect();
+
+    for (ix, chunk) in chunks.iter().enumerate() {
+      let mut node = a11y_text_run_node(chunk);
+      // Link the runs so assistive technology treats a chunked paragraph as one
+      // continuous line rather than several unrelated fragments.
+      if ix > 0 {
+        node.set_previous_on_line(ids[ix - 1]);
+      }
+      if ix + 1 < ids.len() {
+        node.set_next_on_line(ids[ix + 1]);
+      }
+      builder.push_child(ids[ix], node);
+    }
+
+    if let Some((start_char, end_char)) = info.selection {
+      // Map an absolute character index onto (run, index-within-run). A position
+      // exactly on a boundary is reported at the END of the earlier run, which
+      // is what AccessKit expects for a caret sitting between two runs.
+      let locate = |char_ix: usize| -> gpui::accesskit::TextPosition {
+        let mut remaining = char_ix;
+        for (ix, chunk) in chunks.iter().enumerate() {
+          let len = chunk.chars().count();
+          if remaining <= len {
+            return gpui::accesskit::TextPosition {
+              node: ids[ix],
+              character_index: remaining,
+            };
+          }
+          remaining -= len;
+        }
+        gpui::accesskit::TextPosition {
+          node: *ids.last().expect("a11y_text_runs always yields at least one run"),
+          character_index: chunks.last().map_or(0, |c| c.chars().count()),
+        }
+      };
+      builder.parent_node().set_text_selection(gpui::accesskit::TextSelection {
+        anchor: locate(start_char),
+        focus: locate(end_char),
+      });
+    }
+  }
+
   fn request_layout(
     &mut self,
     _id: Option<&GlobalElementId>,
@@ -202,6 +277,15 @@ impl Element for VirtualParagraphChunkElement {
     window: &mut Window,
     _cx: &mut App,
   ) -> (LayoutId, Self::RequestLayoutState) {
+    // Resolve accessibility here: `a11y_role()` runs before `prepaint` and gets
+    // only `&self`, so it cannot read the editor entity. Skipped entirely when
+    // no assistive technology is attached.
+    self.a11y = if window.is_a11y_active() {
+      self.editor.read(_cx).a11y_paragraph_info(self.paragraph_ix, self.chunk_ix)
+    } else {
+      None
+    };
+
     let editor = self.editor.clone();
     let paragraph_ix = self.paragraph_ix;
     let chunk_ix = self.chunk_ix;

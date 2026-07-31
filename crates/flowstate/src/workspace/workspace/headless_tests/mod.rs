@@ -15,6 +15,7 @@
 
 mod support;
 
+mod accessibility;
 mod actions;
 mod collab_glue;
 mod dialogs;

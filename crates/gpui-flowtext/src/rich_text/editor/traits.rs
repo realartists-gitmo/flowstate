@@ -40,6 +40,21 @@ impl Render for RichTextEditor {
     div()
       .size_full()
       .id("rich-text-editor")
+      // The document itself. `MultilineTextInput` is what tells assistive
+      // technology to use its *text* review commands (by line, word, character)
+      // rather than treating this as an opaque widget.
+      //
+      // Focus reporting needs `.id()` + `.role()` + `.track_focus()` on the SAME
+      // element — with any one missing, gpui logs `note_focus_without_node` and
+      // the focused node falls back to the window root, so a screen reader would
+      // announce the window instead of the document.
+      //
+      // Deliberately NO `aria_value` here: a screen reader re-reads a focused
+      // control's whole value on every change, which for a 200-page debate case
+      // would re-read the document on every keystroke. Content reaches AT
+      // through the per-paragraph `TextRun`s instead.
+      .role(gpui::Role::MultilineTextInput)
+      .aria_label("Document")
       .relative()
       .bg(self.document.theme.document_background_color)
       .track_focus(&self.focus_handle(cx))
@@ -148,6 +163,7 @@ impl Render for RichTextEditor {
                   chunk_ix,
                   generation,
                   layout: WordElementLayout::default(),
+                  a11y: None,
                 }
                 .into_any_element(),
                 RenderVirtualItem::DocumentProjection(VirtualItem::ParagraphRemainder { paragraph_ix, .. }) => {
@@ -161,6 +177,7 @@ impl Render for RichTextEditor {
                       chunk_ix,
                       generation,
                       layout: WordElementLayout::default(),
+                      a11y: None,
                     }
                     .into_any_element()
                   } else {

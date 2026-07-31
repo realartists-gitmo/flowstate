@@ -6,7 +6,7 @@ default-members = ["crates/flowstate"]
 # vendor/gpui-component is upstream's own (trimmed) workspace, kept intact so
 # its crates' `foo.workspace = true` inheritance still resolves. It must not be
 # absorbed as a member of this workspace.
-exclude = ["vendor/gpui-component"]
+exclude = ["vendor/gpui-component", "vendor/gpui"]
 resolver = "3"
 
 [workspace.package]
@@ -41,7 +41,12 @@ gpui-flowtext = { version = "0.1.0", path = "crates/gpui-flowtext" }
 # crates.io release since. The pinned rev is the one upstream gpui-component
 # main pins in its own lockfile, so component and framework are known-compatible.
 # Keep in lockstep with vendor/gpui-component/Cargo.toml — see the PIN note there.
-gpui = { git = "https://github.com/zed-industries/zed", rev = "1a246efd7e1b83ab568ec5e3e6c1a43a42e1abba" }
+#
+# gpui itself is VENDORED (vendor/gpui) rather than taken from that git tree: the
+# test platform never activates accessibility, so `debug_a11y_tree_json()` is
+# always `None` under `#[gpui::test]`. Everything gpui depends on still comes
+# from the pinned rev — only gpui is local. See vendor/gpui/Cargo.toml.
+gpui = { path = "vendor/gpui" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "1a246efd7e1b83ab568ec5e3e6c1a43a42e1abba", features = [
   "font-kit",
   "x11",
@@ -108,10 +113,9 @@ generic-btree = { path = "vendor/generic-btree" }
 # two `gpui::Element`/`gpui::Pixels` types would not unify at the one
 # gpui_symbols::Icon call site (crates/flowstate/src/workspace/icons.rs).
 #
-# `version = "=0.2.2"` is load-bearing: zed's tree contains two packages named
-# `gpui` (the real one at 0.2.2 and a 0.0.0 stub), and a patch entry that
-# matches both is an error.
-gpui = { git = "https://github.com/zed-industries/zed", rev = "1a246efd7e1b83ab568ec5e3e6c1a43a42e1abba", version = "=0.2.2" }
+# Redirects gpui-symbols, which still declares `gpui = "0.2.2"` against
+# crates.io, onto the vendored copy.
+gpui = { path = "vendor/gpui" }
 # §perf: vendored to add `LoroDoc::query_text_id_positions`, a single-pass batch
 # resolver for many text cursor ids. Upstream Loro 1.13 only offers per-id cursor
 # resolution (`get_cursor_pos`), which is O(elements) each; resolving every
@@ -122,6 +126,15 @@ loro-internal = { path = "vendor/loro-internal" }
 # §act-eleven A11.2: vendored for the 2→1 parse collapse (from_parsed_parts +
 # into_typed_document accessors; upstream 0.1.2 keeps Document internals private).
 rdocx = { path = "vendor/rdocx" }
+
+# Redirects gpui for every crate that reaches it through ZED'S OWN git tree —
+# `gpui_platform`, `gpui_linux`, `gpui_web` and the rest all depend on gpui as a
+# workspace sibling, so without this they resolve the git gpui and the build ends
+# up with TWO gpui crates whose `Window`/`App`/`Element` types do not unify.
+# A `[patch.crates-io]` entry cannot do this — the dependency edge is a git
+# source, so it needs a patch keyed on that source URL.
+[patch."https://github.com/zed-industries/zed"]
+gpui = { path = "vendor/gpui" }
 
 [workspace.lints.clippy]
 correctness = { level = "deny", priority = -1 }

@@ -1041,6 +1041,7 @@ include!("scroll_anchor.rs");
 include!("item_sizes.rs");
 include!("layout_prep.rs");
 include!("chunk_layout.rs");
+include!("accessibility.rs");
 include!("chunk_materialization.rs");
 include!("chunk_navigation.rs");
 include!("chunk_prefetch.rs");
