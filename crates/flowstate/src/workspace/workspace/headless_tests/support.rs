@@ -124,6 +124,28 @@ impl A11yTree {
     self.0.get("nodes")?.get(focus_id)
   }
 
+  /// The STABLE AccessKit id of the paragraph whose text runs contain `text`.
+  ///
+  /// `accesskit_id` is the real node id (a hash of the element's
+  /// `GlobalElementId`), unlike the short `a`/`b`/`c` keys, which are just
+  /// per-dump ordinals and would compare unequal for unrelated reasons.
+  pub fn accesskit_id_of_text(&self, text: &str) -> Option<String> {
+    let nodes = self.0.get("nodes")?.as_object()?;
+    // Find the run carrying the text, then the paragraph that lists it as a child.
+    let run_key = nodes.iter().find_map(|(key, node)| {
+      let aria = node.get("aria")?;
+      (aria.get("role")?.as_str()? == "TextRun" && aria.get("value")?.as_str()?.contains(text)).then(|| key.clone())
+    })?;
+    nodes.iter().find_map(|(_, node)| {
+      let children = node.get("children")?.as_array()?;
+      children
+        .iter()
+        .any(|c| c.as_str() == Some(run_key.as_str()))
+        .then(|| node.get("accesskit_id")?.as_str().map(str::to_string))
+        .flatten()
+    })
+  }
+
   /// Pretty-printed dump, for `--nocapture` debugging of a failing assertion.
   pub fn dump(&self) -> String {
     serde_json::to_string_pretty(&self.0).unwrap_or_default()

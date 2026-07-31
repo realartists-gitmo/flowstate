@@ -182,6 +182,7 @@ impl Render for RichTextEditor {
                   chunk_ix,
                   generation,
                   layout: WordElementLayout::default(),
+                  paragraph_id: paragraph_id_at(&editor.document, paragraph_ix),
                   a11y: None,
                 }
                 .into_any_element(),
@@ -196,6 +197,7 @@ impl Render for RichTextEditor {
                       chunk_ix,
                       generation,
                       layout: WordElementLayout::default(),
+                      paragraph_id: paragraph_id_at(&editor.document, paragraph_ix),
                       a11y: None,
                     }
                     .into_any_element()

@@ -47,6 +47,14 @@ pub(super) struct VirtualParagraphChunkElement {
   pub(super) chunk_ix: usize,
   pub(super) generation: u64,
   pub(super) layout: WordElementLayout,
+  /// DURABLE identity of this paragraph, when known.
+  ///
+  /// The element id becomes the AccessKit node id, and a node id that changes
+  /// means "this node was destroyed and a different one appeared". With a
+  /// POSITIONAL id, inserting one paragraph at the top renumbers every node
+  /// below it and a screen reader re-announces the whole document. Keying on
+  /// `ParagraphId` makes identity follow the paragraph instead.
+  pub(super) paragraph_id: Option<ParagraphId>,
   /// Accessibility description of this paragraph, resolved during
   /// `request_layout` because `Element::a11y_role` takes only `&self` and so
   /// cannot read the editor entity itself. `None` when accessibility is
@@ -197,7 +205,10 @@ impl Element for VirtualParagraphChunkElement {
   type PrepaintState = ();
 
   fn id(&self) -> Option<ElementId> {
-    Some(paragraph_chunk_element_id(self.paragraph_ix, self.chunk_ix))
+    Some(self.paragraph_id.map_or_else(
+      || paragraph_chunk_element_id(self.paragraph_ix, self.chunk_ix),
+      |paragraph_id| durable_paragraph_chunk_element_id(paragraph_id, self.chunk_ix),
+    ))
   }
 
   fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
@@ -660,6 +671,21 @@ fn paragraph_chunk_element_id(paragraph_ix: usize, chunk_ix: usize) -> ElementId
 #[hotpath::measure]
 fn structural_block_element_id(block_ix: usize) -> ElementId {
   ElementId::Integer(STRUCTURAL_BLOCK_ELEMENT_ID_TAG | (block_ix as u64 & !STRUCTURAL_BLOCK_ELEMENT_ID_TAG))
+}
+
+/// Element id derived from the paragraph's DURABLE id rather than its position,
+/// so the AccessKit node id survives inserts and deletes above it.
+///
+/// `ParagraphId` is a `u128` and `ElementId::Integer` is a `u64`, so it is
+/// hashed. The tag bit is cleared to stay out of
+/// `STRUCTURAL_BLOCK_ELEMENT_ID_TAG`'s space.
+#[hotpath::measure]
+fn durable_paragraph_chunk_element_id(paragraph_id: ParagraphId, chunk_ix: usize) -> ElementId {
+  use std::hash::{Hash as _, Hasher as _};
+  let mut hasher = rustc_hash::FxHasher::default();
+  paragraph_id.0.hash(&mut hasher);
+  chunk_ix.hash(&mut hasher);
+  ElementId::Integer(hasher.finish() & !STRUCTURAL_BLOCK_ELEMENT_ID_TAG)
 }
 
 #[hotpath::measure]

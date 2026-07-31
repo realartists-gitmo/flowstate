@@ -193,6 +193,52 @@ mod tests {
     );
   }
 
+  /// A paragraph's accessibility node id must survive an insert ABOVE it.
+  ///
+  /// The element id becomes the AccessKit node id, and a changed node id means
+  /// "destroyed and replaced" to assistive technology. With positional ids,
+  /// typing a new first paragraph renumbered every node below and a screen
+  /// reader re-announced the entire document — the same identity-stability
+  /// class as the `paragraph.initial` bug.
+  #[gpui::test]
+  fn paragraph_node_identity_survives_an_insert_above(cx: &mut TestAppContext) {
+    let h = support::open_workspace(cx);
+    h.new_document(cx);
+    // Two paragraphs, so the one under test is NOT the one being edited.
+    h.update(cx, |ws, _window, cx| {
+      let editor = ws.active_editor.clone().expect("a document is open");
+      editor.update(cx, |editor, cx| {
+        editor.insert_text_command("alpha", cx);
+        editor.insert_paragraph_break_command(cx);
+        editor.insert_text_command("second", cx);
+      });
+    });
+    cx.run_until_parked();
+
+    let before = h.a11y(cx).accesskit_id_of_text("second");
+    assert!(before.is_some(), "could not find the paragraph carrying \"second\"");
+
+    // Add a paragraph at the very top. "second" is untouched, so its durable
+    // identity — and therefore its a11y node id — must not move. (Splitting the
+    // target paragraph itself is a different matter: that genuinely re-identifies
+    // it, which is why the edit here lands on a different paragraph.)
+    h.update(cx, |ws, _window, cx| {
+      let editor = ws.active_editor.clone().expect("a document is open");
+      editor.update(cx, |editor, cx| {
+        editor.move_document_start(cx);
+        editor.insert_paragraph_break_command(cx);
+      });
+    });
+    cx.run_until_parked();
+
+    let after = h.a11y(cx).accesskit_id_of_text("second");
+    assert_eq!(
+      before, after,
+      "the paragraph's a11y node id changed when a paragraph was inserted above it; \
+       assistive technology would treat the whole document as replaced"
+    );
+  }
+
   /// A styled span must be its own run, or a citation reads as part of the card
   /// body. On screen the distinction is colour and weight alone.
   #[gpui::test]
