@@ -10,7 +10,9 @@ use gpui::Pixels;
 /// A trait for converting [`Pixels`] to `f32` and `f64`.
 pub trait PixelsExt {
   fn as_f32(&self) -> f32;
-  fn as_f64(self) -> f64;
+  /// Takes `&self` where upstream's version took `self` — this workspace denies
+  /// `clippy::wrong_self_convention`, and call sites auto-ref either way.
+  fn as_f64(&self) -> f64;
 }
 
 impl PixelsExt for Pixels {
@@ -20,7 +22,7 @@ impl PixelsExt for Pixels {
   }
 
   #[inline]
-  fn as_f64(self) -> f64 {
-    f64::from(self)
+  fn as_f64(&self) -> f64 {
+    f64::from(*self)
   }
 }

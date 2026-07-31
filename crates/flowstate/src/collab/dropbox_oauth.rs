@@ -50,7 +50,7 @@ pub fn route_callback(url: &str, cx: &mut App) -> bool {
     }
     .await;
 
-    let _ = cx.update(|cx| {
+    cx.update(|cx| {
       if result.is_ok() {
         crate::collab::reconfigure_discovery(cx);
       }

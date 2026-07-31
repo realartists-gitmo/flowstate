@@ -717,7 +717,7 @@ fn send_custom_directory_item(workspace: WeakEntity<Workspace>) -> SettingItem {
                   if let Err(error) = save_send_custom_directory(Some(path)) {
                     eprintln!("failed to save send directory setting: {error}");
                   }
-                  let _ = state.update(cx, |state, cx| {
+                  state.update(cx, |state, cx| {
                     state.current_value = value;
                     cx.notify();
                   });

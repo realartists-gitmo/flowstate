@@ -85,6 +85,16 @@ impl WorkspaceHarness {
 /// queue so tests can drive them with `simulate_prompt_answer`.
 pub fn open_workspace(cx: &mut TestAppContext) -> WorkspaceHarness {
   sandbox_root();
+  // The workspace starts the real `flowstate-doc-io` service thread (see
+  // `DocIoHandle::spawn`), which wakes gpui tasks from a non-test thread. Since
+  // the gpui upgrade, `TestScheduler` asserts that all activity happens on the
+  // test thread and otherwise fails the test with "Your test is not
+  // deterministic". `allow_parking` is gpui's sanctioned opt-out for exactly
+  // this shape — "a mix of deterministic and non-deterministic async behavior,
+  // such as when interacting with I/O in an otherwise deterministic test" — and
+  // also lets `run_until_parked` block on that thread's replies instead of
+  // panicking with "Parking forbidden".
+  cx.executor().allow_parking();
   cx.update(|cx| {
     gpui_component::init(cx);
     crate::app::register_rich_text_editor_keybindings(cx);

@@ -1676,10 +1676,10 @@ impl PanelKind {
   fn discard(&self, cx: &mut gpui::AsyncApp) {
     match self {
       PanelKind::Document { editor, .. } => {
-        let _ = editor.update(cx, |editor, cx| editor.discard_recovery_file(cx));
+        editor.update(cx, |editor, cx| editor.discard_recovery_file(cx));
       },
       PanelKind::Flow { editor, .. } => {
-        let _ = editor.update(cx, |editor, _| editor.discard_recovery_file());
+        editor.update(cx, |editor, _| editor.discard_recovery_file());
       },
     }
   }

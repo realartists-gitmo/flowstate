@@ -368,7 +368,7 @@ pub fn run_standalone(mut document_path: Option<PathBuf>) {
           continue;
         }
         let result = flowstate_collab::ticket::SessionTicket::decode_text(&url);
-        let _ = cx.update(|cx| {
+        cx.update(|cx| {
           let Some(window_handle) = cx.active_window() else {
             tracing::warn!("received collaboration deep link without an active window");
             return;

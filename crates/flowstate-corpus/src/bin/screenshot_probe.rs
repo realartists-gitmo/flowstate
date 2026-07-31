@@ -108,7 +108,7 @@ fn main() {
         .timer(std::time::Duration::from_millis(settle_ms))
         .await;
       let _ = window;
-      let _ = cx.update(|cx| cx.quit());
+      cx.update(|cx| cx.quit());
     })
     .detach();
   });

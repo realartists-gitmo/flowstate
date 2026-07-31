@@ -326,7 +326,7 @@ impl CollabManager {
         Ok(Ok(minted)) => {
           tracing::info!(%session_id, inviter = %minted.inviter.id, "created collaboration share ticket");
           let own_endpoint_id = minted.inviter.id;
-          let _ = cx.update_global::<CollabManager, _>(|manager, _| manager.own_endpoint_id = Some(own_endpoint_id));
+          cx.update_global::<CollabManager, _>(|manager, _| manager.own_endpoint_id = Some(own_endpoint_id));
           Ok(SessionTicket::new(session_id, vec![minted.inviter], title, minted.admission))
         },
         Ok(Err(error)) => {
@@ -456,22 +456,22 @@ impl CollabManager {
       Ok(Ok(seed)) => {
         tracing::info!(%session_id, inviter = %seed.inviter.id, "collaboration create-session completed");
         let own_endpoint_id = seed.inviter.id;
-        let _ = cx.update_global::<CollabManager, _>(|manager, _| manager.own_endpoint_id = Some(own_endpoint_id));
-        let _ = session.update(cx, |session, cx| {
+        cx.update_global::<CollabManager, _>(|manager, _| manager.own_endpoint_id = Some(own_endpoint_id));
+        session.update(cx, |session, cx| {
           session.set_admission(seed.admission);
           session.establish_local_peer(&seed.inviter.id, cx);
         });
-        let _ = cx.update_global::<CollabManager, _>(|manager, _| manager.publish_discovery(session_id, seed.inviter));
+        cx.update_global::<CollabManager, _>(|manager, _| manager.publish_discovery(session_id, seed.inviter));
       },
       Ok(Err(error)) => {
         tracing::error!(%session_id, error = %format_args!("{error:#}"), "collaboration create-session failed");
-        let _ = session.update(cx, |session, cx| {
+        session.update(cx, |session, cx| {
           session.detach(DetachReason::Fatal(format!("creating collaboration session failed: {error:#}")), cx);
         });
       },
       Err(error) => {
         tracing::error!(%session_id, error = %error, "collaboration create-session reply channel closed");
-        let _ = session.update(cx, |session, cx| {
+        session.update(cx, |session, cx| {
           session.detach(DetachReason::Fatal(format!("creating collaboration session failed: {error}")), cx);
         });
       },
@@ -597,12 +597,12 @@ impl CollabManager {
       Ok(addr) => {
         tracing::info!(%session_id, peer = %addr.id, "collaboration joined session local peer established");
         let own_endpoint_id = addr.id;
-        let _ = cx.update_global::<CollabManager, _>(|manager, _| manager.own_endpoint_id = Some(own_endpoint_id));
-        let _ = session.update(cx, |session, cx| session.establish_local_peer(&addr.id, cx));
+        cx.update_global::<CollabManager, _>(|manager, _| manager.own_endpoint_id = Some(own_endpoint_id));
+        session.update(cx, |session, cx| session.establish_local_peer(&addr.id, cx));
       },
       Err(error) => {
         tracing::error!(%session_id, error = %error, "collaboration endpoint address unavailable for joined session");
-        let _ = session.update(cx, |session, cx| {
+        session.update(cx, |session, cx| {
           session.detach(DetachReason::Fatal(format!("collaboration endpoint address unavailable: {error}")), cx);
         });
       },

@@ -150,7 +150,7 @@ pub fn install_workspace_close_prompt(workspace: Entity<Workspace>, window: &mut
 
       prompt_open.set(false);
       if should_close {
-        let _ = workspace.update(cx, |workspace, cx| workspace.leave_all_collaboration_sessions(cx));
+        workspace.update(cx, |workspace, cx| workspace.leave_all_collaboration_sessions(cx));
         allow_close.set(true);
         let _ = window_handle.update(cx, |_, window, _| window.remove_window());
       }
