@@ -113,6 +113,17 @@ impl A11yTree {
       .collect()
   }
 
+  /// The node gpui reports as focused, if any.
+  ///
+  /// The dump records it as an ephemeral node id under `gpui_focus`; `None`
+  /// means gpui found no reportable node and fell back to the window root —
+  /// which is exactly the failure that `.id()` + `.role()` + `.track_focus()`
+  /// on one element prevents.
+  pub fn focused_node(&self) -> Option<&serde_json::Value> {
+    let focus_id = self.0.get("gpui_focus").and_then(|f| f.as_str())?;
+    self.0.get("nodes")?.get(focus_id)
+  }
+
   /// Pretty-printed dump, for `--nocapture` debugging of a failing assertion.
   pub fn dump(&self) -> String {
     serde_json::to_string_pretty(&self.0).unwrap_or_default()

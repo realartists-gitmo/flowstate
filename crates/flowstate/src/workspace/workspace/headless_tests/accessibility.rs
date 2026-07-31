@@ -157,6 +157,42 @@ mod tests {
     );
   }
 
+  /// Focus must be REPORTED, not just held.
+  ///
+  /// gpui only reports a focused node when `.id()`, `.role()` and
+  /// `.track_focus()` are all on the SAME element; miss any one and it logs
+  /// `note_focus_without_node` and falls back to the window root — a screen
+  /// reader would then announce "Flowstate" instead of the document, with no
+  /// error anywhere. This asserts the triple is intact on the editor.
+  #[gpui::test]
+  fn focused_editor_is_reported_as_the_focused_node(cx: &mut TestAppContext) {
+    let h = support::open_workspace(cx);
+    h.new_document(cx);
+    h.update(cx, |ws, window, cx| {
+      use gpui::Focusable as _;
+      let editor = ws.active_editor.clone().expect("a document is open");
+      let handle = editor.read(cx).focus_handle(cx);
+      handle.focus(window, cx);
+    });
+    cx.run_until_parked();
+
+    let tree = h.a11y(cx);
+    let focus = tree.focused_node();
+    let focus = focus.unwrap_or_else(|| {
+      panic!(
+        "no focused node reported — the editor is missing one of id/role/track_focus:\n{}",
+        tree.dump()
+      )
+    });
+    let role = focus.get("aria").and_then(|a| a.get("role")).and_then(|r| r.as_str());
+    assert_eq!(
+      role,
+      Some("MultilineTextInput"),
+      "focus landed on {role:?} rather than the document:\n{}",
+      tree.dump()
+    );
+  }
+
   /// A styled span must be its own run, or a citation reads as part of the card
   /// body. On screen the distinction is colour and weight alone.
   #[gpui::test]
