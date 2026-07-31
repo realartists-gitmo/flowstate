@@ -910,12 +910,45 @@ impl ProjectionRuntimeIndex {
     }
   }
 
+  /// Durable ids must be unique across a projection — they are the keys of the
+  /// runtime's `id -> index` maps, so a duplicate makes those maps ambiguous
+  /// (whichever row is written last silently wins). Reported with the offending
+  /// id and both row indices, because the downstream symptom is an index
+  /// mismatch that reads as a splice bug when the splice is innocent.
+  #[cfg(debug_assertions)]
+  fn debug_assert_ids_unique(projection: &DocumentProjection) {
+    let mut seen_paragraphs = FxHashMap::<ParagraphId, usize>::default();
+    for (ix, id) in projection.ids.paragraph_ids.iter().enumerate() {
+      if let Some(first) = seen_paragraphs.insert(*id, ix) {
+        debug_assert!(
+          false,
+          "duplicate ParagraphId {id:?}: rows {first} and {ix} claim the same durable identity \
+           (identity law bug, NOT a splice bug — the id -> index map cannot represent this)"
+        );
+      }
+    }
+    let mut seen_blocks = FxHashMap::<flowstate_document::BlockId, usize>::default();
+    for (ix, id) in projection.ids.block_ids.iter().enumerate() {
+      if let Some(first) = seen_blocks.insert(*id, ix) {
+        debug_assert!(
+          false,
+          "duplicate BlockId {id:?}: rows {first} and {ix} claim the same durable identity \
+           (identity law bug, NOT a splice bug — the id -> index map cannot represent this)"
+        );
+      }
+    }
+  }
+
   /// §act-ten A10.3 oracle: field-by-field equality against a fresh
   /// `from_projection` of the POST-patch projection. Debug builds only —
   /// O(doc), exercised by the convergence/intent fuzz suites.
   #[cfg(debug_assertions)]
   fn debug_assert_matches_fresh(&self, projection: &DocumentProjection) {
     let fresh = Self::from_projection(projection);
+    // Identity uniqueness FIRST: a duplicated id makes the maintained and
+    // rebuilt indexes disagree, and every assertion below then points at the
+    // splice code, which is innocent. Name the real cause.
+    Self::debug_assert_ids_unique(projection);
     debug_assert_eq!(
       self.paragraph_body_unicode_starts, fresh.paragraph_body_unicode_starts,
       "A10.3 splice: paragraph starts diverged"
@@ -6692,6 +6725,10 @@ fn paragraph_metadata_key_at_boundary(doc: &LoroDoc, body: &loro::LoroText, para
   {
     return Some(keys.swap_remove(root_ix));
   }
+  // A boundary-0 constant that has drifted is not honoured here either, matching
+  // `paragraph_ids_by_boundary`; otherwise this writer would keep reusing the
+  // head's record for a row that is no longer the head.
+  keys.retain(|key| key != ROOT_FIRST_PARAGRAPH_ID);
   keys.into_iter().next()
 }
 
@@ -6717,6 +6754,7 @@ fn paragraph_block_key_at_boundary(doc: &LoroDoc, body: &loro::LoroText, blocks:
   {
     return Some(keys.swap_remove(main_ix));
   }
+  keys.retain(|key| key != MAIN_BODY_BLOCK_ID);
   keys.into_iter().next()
 }
 

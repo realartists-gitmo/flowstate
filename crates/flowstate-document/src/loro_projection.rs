@@ -873,6 +873,11 @@ impl<'a> Projector<'a> {
       if pos == 0 && key.as_str() == MAIN_BODY_BLOCK_ID {
         main_body_at_zero = true;
       }
+      // Mirrors the drifted-constant rule in `paragraph_block_ids_by_boundary`;
+      // the tripwire below is what keeps these two in step.
+      if pos != 0 && key.as_str() == MAIN_BODY_BLOCK_ID {
+        continue;
+      }
       paragraph_block_index.entry(pos).or_insert(key);
     }
     if main_body_at_zero {
@@ -1448,6 +1453,24 @@ fn paragraph_ids_by_boundary(doc: &LoroDoc, text: &LoroText) -> FxHashMap<usize,
     if pos == 0 && key.as_str() == ROOT_FIRST_PARAGRAPH_ID {
       root_first_at_zero = true;
     }
+    // The boundary-0 constant names the HEAD, and fabrication mints it for
+    // whatever is first (that is what keeps two independently seeded replicas
+    // agreeing on one canonical first paragraph). Its record is cursor-anchored
+    // though, so it follows its paragraph — and once something is ordered above
+    // the seed, honouring it there gave the drifted row the SAME id the head
+    // fabricates: two rows, one identity, which the `id -> index` maps cannot
+    // represent (the A10.3 splice oracle fired on the disagreement).
+    //
+    // So a drifted constant is simply not honoured; that row falls through to
+    // fabrication and keys off its own preceding newline, like any other
+    // record-less boundary. This is convergent BECAUSE ignoring the record is
+    // indistinguishable from not having it yet — which is exactly what a peer
+    // that has not received this repair write already sees. A rule that instead
+    // changed the HEAD's key based on the record existing somewhere would NOT
+    // converge, since repair writes are local until they sync.
+    if pos != 0 && key.as_str() == ROOT_FIRST_PARAGRAPH_ID {
+      continue;
+    }
     index.entry(pos).or_insert(key);
   }
   if root_first_at_zero {
@@ -1543,6 +1566,14 @@ fn paragraph_block_ids_by_boundary(doc: &LoroDoc, text: &LoroText) -> FxHashMap<
     };
     if pos == 0 && key.as_str() == MAIN_BODY_BLOCK_ID {
       main_body_at_zero = true;
+    }
+    // Same rule as `paragraph_ids_by_boundary`: a drifted boundary-0 constant is
+    // not honoured. The paragraph and block records have INDEPENDENT cursors, so
+    // either can drift on its own — covering only one leaves the other
+    // duplicating (seen as a duplicate `block.body.initial` while
+    // `paragraph.initial` was already unique).
+    if pos != 0 && key.as_str() == MAIN_BODY_BLOCK_ID {
+      continue;
     }
     index.entry(pos).or_insert(key);
   }

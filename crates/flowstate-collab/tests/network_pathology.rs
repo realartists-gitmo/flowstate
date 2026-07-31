@@ -168,12 +168,15 @@ mod tests {
   /// id -> index maps cannot represent that, and the A10.3 splice oracle fires
   /// as "paragraph id index diverged" / "block id index diverged".
   ///
-  /// Ignored, not deleted: it fails for a real product reason, not a flake.
-  /// Un-ignore once boundary-0 identity is unique by construction.
-  /// Other repro configs: peers=2 seeds 25/32/50/51; peers=3 seeds 6/8/12/16/19/20/23/26/36.
+  /// FIXED by not honouring a boundary-0 constant whose record has drifted off
+  /// the head: that row falls through to fabrication and keys off its own
+  /// preceding newline, while the head keeps minting the constants. Convergent
+  /// because ignoring the record is indistinguishable from not having received
+  /// it yet. This seed reproduced it reliably before the fix, as did peers=2
+  /// seeds 32/50/51 and peers=3 seeds 6/8/12/16/19/20/23/26/36; a 600-config
+  /// sweep is clean after it.
   #[test]
-  #[ignore = "known failure: duplicate paragraph.initial identity (boundary-0 key is positional)"]
-  fn duplicate_initial_paragraph_identity_repro() {
+  fn duplicate_initial_paragraph_identity_regression() {
     run_chaos(25, 2, 6, 8);
   }
 
