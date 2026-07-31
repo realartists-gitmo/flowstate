@@ -139,6 +139,25 @@ run_convergence() {
   cargo test -p flowstate-collab --test intent_fuzz --test intent_complexity --test object_table_convergence
 }
 
+
+# --- accessibility: the semantic tree assistive technology actually sees -------
+#
+# This is the SEMANTIC counterpart of `screenshot`. The raster probe compares a
+# machine-local golden (fonts, scale and compositor make it unshareable) and can
+# only say "pixels moved"; this asserts meaning — roles, accessible names, the
+# document text, caret position, heading levels — so it is stable enough to run
+# anywhere and to gate on.
+#
+# Requires the vendor/gpui `TestWindow::a11y_init` patch: upstream's test
+# platform never activates accessibility, so `debug_a11y_tree_json()` returns
+# None and every assertion here would pass vacuously. The harness panics rather
+# than allowing that, so a lost patch fails loudly instead of silently.
+run_a11y() {
+  bold "ACCESSIBILITY — a11y tree assertions (headless)"
+  rule
+  cargo test -p flowstate --lib -- headless_tests::accessibility "$@"
+}
+
 # --- §act-eleven C10: the long-horizon randomized SOAK --------------------------
 # A wide seed sweep at larger op counts than the deterministic CI seeds — the
 # machine is idle-capable and disposable (corpus policy), so let it run for
@@ -347,6 +366,7 @@ run_hotpath_baseline() {
 case "${1:-gate}" in
   fidelity)    shift; run_fidelity "$@" ;;
   convergence) shift; run_convergence "$@" ;;
+  a11y)        shift; run_a11y "$@" ;;
   hotpath)          shift; run_hotpath "$@" ;;
   hotpath-baseline) shift; run_hotpath_baseline "$@" ;;
   bench)       shift; run_bench "$@" ;;
@@ -360,7 +380,7 @@ case "${1:-gate}" in
   soak)           shift; run_soak "$@" ;;
   screenshot)          shift; run_screenshot "$@" ;;
   screenshot-baseline) shift; run_screenshot_baseline "$@" ;;
-  all)            run_fidelity; echo; run_convergence; echo; run_bench ;;
-  gate)           run_fidelity; echo; run_convergence ;;
-  *) echo "usage: $0 {gate|fidelity|convergence|bench|baseline|compare|stable|hotpath|hotpath-baseline|watch|verify|docx-roundtrip|all}" >&2; exit 2 ;;
+  all)            run_fidelity; echo; run_convergence; echo; run_a11y; echo; run_bench ;;
+  gate)           run_fidelity; echo; run_convergence; echo; run_a11y ;;
+  *) echo "usage: $0 {gate|fidelity|convergence|a11y|bench|baseline|compare|stable|hotpath|hotpath-baseline|watch|verify|docx-roundtrip|all}" >&2; exit 2 ;;
 esac

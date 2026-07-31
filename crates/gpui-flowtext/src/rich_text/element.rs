@@ -60,6 +60,9 @@ pub(super) struct VirtualBlockElement {
   pub(super) editor: Entity<RichTextEditor>,
   pub(super) block_ix: usize,
   pub(super) layout: WordElementLayout,
+  /// Accessibility description of this block; see the note on
+  /// `VirtualParagraphChunkElement::a11y` for why it is resolved eagerly.
+  pub(super) a11y: Option<A11yBlockInfo>,
 }
 
 #[derive(Clone)]
@@ -461,6 +464,25 @@ impl Element for VirtualBlockElement {
     None
   }
 
+  /// `Image`, `Math` or `Table` — the non-text content of the document, which
+  /// would otherwise be entirely invisible to assistive technology.
+  fn a11y_role(&self) -> Option<gpui::Role> {
+    self.a11y.as_ref().map(|info| info.role)
+  }
+
+  fn write_a11y_info(&self, node: &mut gpui::accesskit::Node) {
+    let Some(info) = self.a11y.as_ref() else {
+      return;
+    };
+    if !info.label.is_empty() {
+      node.set_label(info.label.clone());
+    }
+    if let Some((rows, columns)) = info.table_shape {
+      node.set_row_count(rows);
+      node.set_column_count(columns);
+    }
+  }
+
   fn request_layout(
     &mut self,
     _id: Option<&GlobalElementId>,
@@ -468,6 +490,12 @@ impl Element for VirtualBlockElement {
     window: &mut Window,
     _cx: &mut App,
   ) -> (LayoutId, Self::RequestLayoutState) {
+    self.a11y = if window.is_a11y_active() {
+      self.editor.read(_cx).a11y_block_info(self.block_ix)
+    } else {
+      None
+    };
+
     let editor = self.editor.clone();
     let block_ix = self.block_ix;
     let layout_cell = self.layout.clone();

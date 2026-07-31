@@ -55,6 +55,25 @@ impl Render for RichTextEditor {
       // through the per-paragraph `TextRun`s instead.
       .role(gpui::Role::MultilineTextInput)
       .aria_label("Document")
+      // Only paragraphs the virtual list has materialized appear in the tree, so
+      // assistive technology needs a way to reach the rest. `ScrollIntoView` is
+      // the sanctioned request for that, and it maps onto the SAME machinery
+      // find-in-document already uses to reveal a match
+      // (`set_active_search_highlight` -> `pending_snap_to_paragraph`). Without
+      // a registered handler the node does not even advertise the action.
+      .on_a11y_action(gpui::AccessibleAction::ScrollIntoView, {
+        // Not `cx.listener`: a11y action listeners take
+        // `Option<&ActionData>` rather than an event reference.
+        let editor = cx.entity().downgrade();
+        move |_data, window, cx| {
+          if let Some(editor) = editor.upgrade() {
+            editor.update(cx, |editor, cx| {
+              let paragraph_ix = editor.selection.normalized().start.paragraph;
+              editor.scroll_to_paragraph(paragraph_ix, window, cx);
+            });
+          }
+        }
+      })
       .relative()
       .bg(self.document.theme.document_background_color)
       .track_focus(&self.focus_handle(cx))
@@ -193,7 +212,21 @@ impl Render for RichTextEditor {
                   Some(Block::Paragraph(_)) | None => None,
                 };
                 let editor_for_down = editor_entity.clone();
+                // Images and equations render through `render_image_block` /
+                // `render_equation_block` (plain divs) rather than
+                // `VirtualBlockElement`, so their accessibility rides this
+                // wrapper. Tables carry theirs on the element itself.
+                let block_a11y = editor.a11y_block_info(block_ix).filter(|_| window.is_a11y_active());
                 div()
+                  .id(("flowtext-block", block_ix))
+                  .when_some(block_a11y, |this, info| {
+                    let labelled = this.role(info.role);
+                    if info.label.is_empty() {
+                      labelled
+                    } else {
+                      labelled.aria_label(info.label)
+                    }
+                  })
                   .size_full()
                   .on_mouse_down(MouseButton::Left, move |event, window, cx| {
                     cx.stop_propagation();
@@ -244,6 +277,7 @@ impl Render for RichTextEditor {
                       editor: editor_entity,
                       block_ix,
                       layout: WordElementLayout::default(),
+                      a11y: None,
                     }
                     .into_any_element(),
                   })

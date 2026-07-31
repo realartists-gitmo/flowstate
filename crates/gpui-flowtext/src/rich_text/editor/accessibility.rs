@@ -89,6 +89,52 @@ impl RichTextEditor {
 // handed to it must be a character count, and that helper already rounds a
 // mid-codepoint byte offset down rather than panicking.
 
+/// What one structural block (image, equation, table) exposes.
+#[derive(Clone)]
+pub(super) struct A11yBlockInfo {
+  pub(super) role: gpui::Role,
+  /// Accessible name. For an image this is its alt text; for an equation, its
+  /// source; for a table, a summary of its shape.
+  pub(super) label: String,
+  /// `(rows, columns)` for a table, so AT can announce its dimensions.
+  pub(super) table_shape: Option<(usize, usize)>,
+}
+
+#[hotpath::measure_all]
+impl RichTextEditor {
+  /// Accessibility description of a structural (non-paragraph) block.
+  pub(super) fn a11y_block_info(&self, block_ix: usize) -> Option<A11yBlockInfo> {
+    match self.document.blocks.get(block_ix)? {
+      Block::Paragraph(_) => None,
+      Block::Image(image) => Some(A11yBlockInfo {
+        role: gpui::Role::Image,
+        // Alt text is authored content and already the right name. An image
+        // with none is announced as "image" with no description, which is the
+        // honest outcome — inventing a name would be worse.
+        label: image.alt_text.to_string(),
+        table_shape: None,
+      }),
+      Block::Equation(equation) => Some(A11yBlockInfo {
+        role: gpui::Role::Math,
+        // The LaTeX source is the only textual form of an equation we hold.
+        // It is not ideal prose, but it is lossless and lets a reader who knows
+        // LaTeX follow the maths, which a bare "equation" does not.
+        label: equation.source.to_string(),
+        table_shape: None,
+      }),
+      Block::Table(table) => {
+        let rows = table.rows.len();
+        let columns = table.columns.len();
+        Some(A11yBlockInfo {
+          role: gpui::Role::Table,
+          label: format!("Table, {rows} rows, {columns} columns"),
+          table_shape: Some((rows, columns)),
+        })
+      },
+    }
+  }
+}
+
 /// Split `text` into AccessKit `TextRun` nodes of at most
 /// [`MAX_CHARS_PER_TEXT_RUN`] characters.
 ///

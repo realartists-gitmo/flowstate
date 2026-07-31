@@ -45,6 +45,12 @@ impl Workspace {
       .child(self.render_left_nav_header("Outline", cx))
       .child(
         div()
+          // The document outline is a navigation TREE, not a list: rows nest by
+          // heading depth. `gpui_component::tree` emits no accessibility of its
+          // own, so both the container role and the per-row roles are ours.
+          .id("outline-tree")
+          .role(gpui::Role::Tree)
+          .aria_label("Document outline")
           .flex_1()
           .w_full()
           .overflow_hidden()
@@ -308,6 +314,15 @@ struct SidebarTreeRow {
 }
 
 fn render_sidebar_tree_row(row: SidebarTreeRow, window: &mut Window, cx: &mut App) -> ListItem {
+  // Tree semantics ride a wrapper because `ListItem` implements `Styled` but
+  // not `StatefulInteractiveElement`, so `.role()`/`aria_*` are unavailable on
+  // it. `aria_level` is 1-based for assistive technology; `depth` is 0-based.
+  let a11y_label = row.label.clone();
+  let a11y_level = row.depth + 1;
+  let a11y_expanded = row.is_folder.then_some(row.is_expanded);
+  let a11y_selected = row.is_active;
+  let a11y_id = row.row_id;
+
   let hierarchy_color = outline_hierarchy_color(row.depth, cx);
   let guide_depths = row.guide.ancestor_depths;
   let label_width = outline_label_width(row.nav_width, row.depth);
@@ -339,6 +354,17 @@ fn render_sidebar_tree_row(row: SidebarTreeRow, window: &mut Window, cx: &mut Ap
     .text_xs()
     .child(
       h_flex()
+        // Tree semantics live on the row's CONTENT, not on the `ListItem`:
+        // `tree()`'s closure must return a concrete `ListItem`, and `ListItem`
+        // implements `Styled` but not `StatefulInteractiveElement`, so
+        // `.role()`/`aria_*` are unavailable on it.
+        // `aria_level` is 1-based for assistive technology; `depth` is 0-based.
+        .id(a11y_id)
+        .role(gpui::Role::TreeItem)
+        .aria_label(a11y_label)
+        .aria_level(a11y_level)
+        .aria_selected(a11y_selected)
+        .when_some(a11y_expanded, |this, expanded| this.aria_expanded(expanded))
         .w_full()
         .min_w_0()
         .overflow_hidden()
