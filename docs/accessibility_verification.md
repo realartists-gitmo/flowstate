@@ -4,9 +4,10 @@
 roles, names, document text, caret position, heading levels, table cells. It
 does that by reading `Window::debug_a11y_tree_json()` inside `#[gpui::test]`.
 
-Delivery to a real assistive-technology client HAS been verified once, over
-AT-SPI, and the recipe is below. What still needs a human is whether the result
-is *pleasant and coherent to listen to* — reading order, verbosity, phrasing.
+Delivery to a real assistive-technology client IS verified — both reading the
+tree and driving the UI through it. Details below. What still needs a human is
+whether the result is *pleasant and coherent to listen to*: reading order,
+verbosity, phrasing.
 
 ## What is already known about the delivery path
 
@@ -51,30 +52,44 @@ With that flipped, flowstate DOES register: the AT-SPI registry listed
 `screenshot_probe` alongside the desktop's own apps, and its `Name` reads back
 correctly over the bus.
 
-**But the CONTENTS were not reachable, and this is the open question.** A
-recursive walker (correctly pairing each child's `(bus_name, path)` tuple —
-`scratchpad/atspi_walk2.py`, worth rewriting rather than hunting for) reached
-only two nodes: the application object and one unnamed child. `GetRoleName`
-failed on both, while the same call against another running app
-(`psst-gui`) returned `"application"` fine — so the transport is right and the
-problem is on our side.
+**CONTENTS ARE CONFIRMED**, against the real binary. `tools/atspi_walk.py`
+walks the tree over the bus; the result on a fresh window is:
 
-The leading theory, unproven: **gpui only ships a `TreeUpdate` on a drawn
-frame**, and only when a11y was active at BOTH the start and end of that frame
-(`window.rs:2942-2965`). `screenshot_probe` renders a static document and then
-idles, so if activation lands after its last frame, no tree is ever published —
-the adapter registers, but there is nothing in it. A real app that keeps
-drawing (caret blink, input) would not have this problem, which is why the pass
-below should use `cargo run -p flowstate`, NOT the probe.
+```
+application "flowstate"
+  frame "Flowstate"
+    push button "Flowstate" / "File" / "Insert" / "Document" / "Collaborate" /
+                "View" / "Share" / "Settings"
+    tool bar "Ribbon"
+      push button "Undo (Ctrl+Z)" / "Pocket (F4)" / "Cite (F8)" / ... (28)
+    "Document outline"
+    tab list -> tab "*Untitled1.db8" -> push button "Close document"
+    "Document"            <- Role::MultilineTextInput + aria_label
+      paragraph           <- the document's paragraph node
+    status bar "Status"
+```
 
-An attempt to confirm via gpui's "Accessibility activated" `log::info!` was
-inconclusive: `screenshot_probe` installs no logger, so that output goes nowhere
-regardless. Adding a logger to the probe, or using the real app, would settle
-it.
+Every name there is one we set: the tooltip fallback on icon buttons, the
+landmark labels, the editor's `aria_label`.
 
-So: registration is verified, contents are NOT. Resolve that first — it is
-likely a test-harness artifact rather than a product bug, but it has not been
-shown to be.
+**The action path is confirmed too.** Querying the "New Doc" button over AT-SPI
+returns `a(sss) 1 "click" "" ""`, and `DoAction(0)` returns `true` — after which
+the tree changes, gaining the ribbon, tab bar and document. So an assistive
+technology client can both read the UI and drive it.
+
+Two gotchas for anyone writing another walker:
+
+* **accesskit does not implement `GetRoleName`** over AT-SPI, only the numeric
+  `GetRole`; nor `org.a11y.atspi.Text` on these nodes. A walker that relies on
+  `GetRoleName` sees `?` everywhere and concludes, wrongly, that nothing is
+  exposed.
+* **`GetChildren` returns `a(so)`** — (bus_name, path) pairs. Each child must be
+  addressed with ITS OWN bus name; reusing the parent's stops the walk at the
+  first level.
+
+Note the tree only publishes on a DRAWN FRAME with a11y active at both its start
+and end (`window.rs:2942-2965`). A static window that stops drawing (like
+`screenshot_probe`) registers but never publishes — use the real binary.
 
 ## The pass itself
 

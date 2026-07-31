@@ -22,10 +22,16 @@ if not addr:
     raise SystemExit("no a11y bus")
 
 
+FAILS = []
+
 def bc(*args):
     r = subprocess.run(["busctl", f"--address={addr}", "--no-pager", *args],
                        capture_output=True, text=True)
-    return r.stdout.strip() if r.returncode == 0 else None
+    if r.returncode != 0:
+        if len(FAILS) < 3:
+            FAILS.append(" ".join(args[:4]) + " -> " + r.stderr.strip()[:160])
+        return None
+    return r.stdout.strip()
 
 
 def call(dest, path, iface, method, *args):
@@ -49,12 +55,33 @@ def children(dest, path):
     return list(zip(toks[0::2], toks[1::2]))
 
 
+# accesskit does NOT implement GetRoleName over AT-SPI, only the numeric
+# GetRole, so these are the AT-SPI2 Atspi_Role values we care about.
+ROLE_NAMES = {
+    23: "frame", 43: "push button", 75: "application", 84: "table cell",
+    28: "heading", 51: "paragraph", 60: "scroll bar", 71: "split pane",
+    82: "table", 88: "tool bar", 91: "tree", 92: "tree item", 94: "document frame",
+    54: "status bar", 34: "list item", 21: "dialog", 62: "section",
+    52: "panel", 96: "text", 4: "text",
+}
+
 def role(dest, path):
     v = call(dest, path, ACC, "GetRoleName")
-    if not v:
+    if v:
+        p = shlex.split(v)
+        if p:
+            return p[-1]
+    n = prop(dest, path, ACC, "Role")
+    if n is None:
+        n = call(dest, path, ACC, "GetRole")
+        if n:
+            toks = shlex.split(n)
+            n = toks[-1] if toks else None
+    try:
+        i = int(n)
+        return ROLE_NAMES.get(i, f"role#{i}")
+    except (TypeError, ValueError):
         return "?"
-    p = shlex.split(v)
-    return p[-1] if p else "?"
 
 
 def text_of(dest, path):
@@ -112,5 +139,9 @@ print("\n=== SUMMARY ===")
 print("nodes visited :", total)
 print("roles         :", dict(sorted(roles.items(), key=lambda kv: -kv[1])))
 print("text nodes    :", len(texts))
+if FAILS:
+    print("first call failures:")
+    for f in FAILS:
+        print("   ", f)
 for t in texts[:10]:
     print("   ", repr(t[:90]))
