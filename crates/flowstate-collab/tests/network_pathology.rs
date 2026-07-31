@@ -49,8 +49,17 @@ mod tests {
   }
 
   impl Peer {
-    fn new(title: &str) -> Self {
-      let core = CrdtRuntime::new_empty(title).expect("runtime");
+    /// `peer_id` is pinned by the caller. `LoroDoc::new()` picks a RANDOM peer
+    /// id, and each peer here seeds its own independent document, so the merged
+    /// order of those concurrent seeds — and of every later concurrent insert —
+    /// is decided by Fugue's peer-id tie-break. With random ids this fuzz
+    /// explored a different interleaving on every run, which made failures
+    /// unreproducible and let real divergences look like flakes.
+    fn new(title: &str, peer_id: u64) -> Self {
+      let doc = loro::LoroDoc::new();
+      doc.set_peer_id(peer_id).expect("peer id");
+      flowstate_document::init_loro_document(&doc, title).expect("init");
+      let core = CrdtRuntime::from_doc(doc, None, None).expect("runtime");
       let (handle, gate) = LocalDocHandle::new(core, LocalWriteConfig::default());
       let exported_vv = {
         let guard = gate.lock(GateHolder::ExportUpdates).expect("gate");
@@ -147,9 +156,41 @@ mod tests {
     delay_rounds: usize,
   }
 
+  /// KNOWN-FAILING repro for the duplicate `paragraph.initial` identity bug.
+  ///
+  /// `stable_boundary_metadata_keys` returns the POSITION-derived constants
+  /// (`paragraph.initial` / `block.body.initial`) for boundary 0, but durable
+  /// metadata records are position-INDEPENDENT — each is cursor-anchored and
+  /// follows its paragraph. So once something is inserted above the paragraph
+  /// holding the `paragraph.initial` record, that record travels down with it
+  /// while the row that is now first has no record and FABRICATES the same
+  /// constant. Two rows then project the same `ParagraphId`/`BlockId`, the
+  /// id -> index maps cannot represent that, and the A10.3 splice oracle fires
+  /// as "paragraph id index diverged" / "block id index diverged".
+  ///
+  /// Ignored, not deleted: it fails for a real product reason, not a flake.
+  /// Un-ignore once boundary-0 identity is unique by construction.
+  /// Other repro configs: peers=2 seeds 25/32/50/51; peers=3 seeds 6/8/12/16/19/20/23/26/36.
+  #[test]
+  #[ignore = "known failure: duplicate paragraph.initial identity (boundary-0 key is positional)"]
+  fn duplicate_initial_paragraph_identity_repro() {
+    run_chaos(25, 2, 6, 8);
+  }
+
+  /// Seed/peer sweep harness for the above:
+  /// `FLOWSTATE_NP_SEED=<n> FLOWSTATE_NP_PEERS=<n> cargo test -p flowstate-collab \
+  ///   --test network_pathology -- --ignored --exact tests::sweep_one`
+  #[test]
+  #[ignore = "sweep harness; driven by FLOWSTATE_NP_SEED / FLOWSTATE_NP_PEERS"]
+  fn sweep_one() {
+    let seed: u64 = std::env::var("FLOWSTATE_NP_SEED").unwrap().parse().unwrap();
+    let peers: usize = std::env::var("FLOWSTATE_NP_PEERS").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
+    run_chaos(seed, peers, 6, 8);
+  }
+
   fn run_chaos(seed: u64, peers_n: usize, rounds: usize, ops_per_round: usize) {
     let mut rng = Rng::new(seed);
-    let mut peers: Vec<Peer> = (0..peers_n).map(|_| Peer::new("chaos")).collect();
+    let mut peers: Vec<Peer> = (0..peers_n).map(|ix| Peer::new("chaos", ix as u64 + 1)).collect();
     let mut network: Vec<Packet> = Vec::new();
 
     for round in 0..rounds {
