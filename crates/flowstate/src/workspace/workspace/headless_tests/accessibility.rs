@@ -157,6 +157,44 @@ mod tests {
     );
   }
 
+  /// A styled span must be its own run, or a citation reads as part of the card
+  /// body. On screen the distinction is colour and weight alone.
+  #[gpui::test]
+  fn styled_spans_split_into_their_own_runs(cx: &mut TestAppContext) {
+    let h = support::open_workspace(cx);
+    h.new_document(cx);
+    h.update(cx, |ws, _window, cx| {
+      let editor = ws.active_editor.clone().expect("a document is open");
+      editor.update(cx, |editor, cx| {
+        editor.insert_text_command("body", cx);
+        // Select the word and mark it with a semantic style (slot 1 = "Cite").
+        editor.select_all(cx);
+        editor.toggle_semantic_style_for_selection(crate::rich_text_element::RunSemanticStyle::Custom(1), cx);
+      });
+    });
+    cx.run_until_parked();
+
+    let tree = h.a11y(cx);
+    let runs = tree.by_role("TextRun");
+    assert!(
+      !runs.is_empty(),
+      "no TextRun nodes at all:\n{}",
+      tree.dump()
+    );
+    // A styled span carries presentation the plain text cannot convey.
+    assert!(
+      runs.iter().any(|n| {
+        let aria = n.get("aria");
+        aria.and_then(|a| a.get("foreground_color")).is_some()
+          || aria.and_then(|a| a.get("underline")).is_some()
+          || aria.and_then(|a| a.get("background_color")).is_some()
+      }),
+      "no run carried any style presentation; a cite would be indistinguishable \
+       from body text:\n{}",
+      tree.dump()
+    );
+  }
+
   /// The flow board is a column-labelled tree, and its speech attribution is
   /// conveyed purely by horizontal position and colour on screen — so without
   /// an explicit column index and label it is unreachable non-visually.

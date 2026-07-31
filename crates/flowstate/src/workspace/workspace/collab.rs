@@ -40,6 +40,10 @@ impl Workspace {
         })
         .child(rendered.clone())
     });
+    // Focus the dialog on open. Without this the dialog appears but keyboard
+    // focus stays wherever it was — behind the modal — so a screen reader keeps
+    // announcing the document and Tab walks the workspace underneath.
+    dialog.focus_handle(cx).focus(window, cx);
     self.comment_dialog = Some(dialog);
     cx.notify();
   }

@@ -29,6 +29,8 @@ pub(super) struct A11yParagraphInfo {
   pub(super) level: Option<usize>,
   /// The paragraph's plain text.
   pub(super) text: String,
+  /// The same text, split at run-style boundaries (and the 255-char limit).
+  pub(super) spans: Vec<A11yTextSpan>,
   /// Selection within this paragraph, as CHARACTER indices (AccessKit counts
   /// characters; the editor stores UTF-8 byte offsets).
   pub(super) selection: Option<(usize, usize)>,
@@ -61,11 +63,13 @@ impl RichTextEditor {
 
     let text = paragraph_text(&self.document, paragraph_ix);
     let selection = self.a11y_selection_in_paragraph(paragraph_ix, &text);
+    let spans = a11y_spans_for_paragraph(&self.document, paragraph_ix);
 
     Some(A11yParagraphInfo {
       role,
       level,
       text,
+      spans,
       selection,
     })
   }
@@ -132,6 +136,132 @@ impl RichTextEditor {
         })
       },
     }
+  }
+}
+
+/// One accessible span of a paragraph: a stretch of text sharing one set of run
+/// styles, already clipped to at most [`MAX_CHARS_PER_TEXT_RUN`] characters.
+#[derive(Clone)]
+pub(super) struct A11yTextSpan {
+  pub(super) text: String,
+  /// Presentation is RESOLVED here rather than stored as raw `RunStyles`:
+  /// `Element::a11y_synthetic_children` gets no `&App`, so it cannot read the
+  /// theme to turn a style slot into a colour.
+  pub(super) underline: bool,
+  pub(super) role_description: Option<&'static str>,
+  pub(super) foreground: Option<gpui::accesskit::Color>,
+  pub(super) background: Option<gpui::accesskit::Color>,
+}
+
+impl A11yTextSpan {
+  fn plain(text: String) -> Self {
+    Self {
+      text,
+      underline: false,
+      role_description: None,
+      foreground: None,
+      background: None,
+    }
+  }
+}
+
+/// Split a paragraph into spans that break at BOTH run-style boundaries and the
+/// 255-character AccessKit limit.
+///
+/// Splitting at style boundaries is what lets a citation, a highlight or an
+/// emphasis be announced as such: those are conveyed on screen purely by colour
+/// and weight, so without a per-span node they are invisible non-visually — a
+/// screen reader would read a card and its citation as one undifferentiated
+/// block.
+pub(super) fn a11y_spans_for_paragraph(document: &DocumentProjection, paragraph_ix: usize) -> Vec<A11yTextSpan> {
+  let Some(paragraph) = document.paragraphs.get(paragraph_ix) else {
+    return vec![A11yTextSpan::plain(String::new())];
+  };
+  let text = paragraph_text(document, paragraph_ix);
+  let mut spans = Vec::new();
+  let mut byte = 0_usize;
+  for run in &paragraph.runs {
+    let end = (byte + run.len).min(text.len());
+    if byte >= end {
+      byte = end;
+      continue;
+    }
+    // Run lengths are byte counts; snap to a char boundary defensively so a
+    // malformed length cannot panic the whole projection.
+    let slice = &text[snap_to_char_boundary(&text, byte)..snap_to_char_boundary(&text, end)];
+    for chunk in split_chars(slice, MAX_CHARS_PER_TEXT_RUN) {
+      spans.push(resolve_a11y_span(chunk, run.styles, document));
+    }
+    byte = end;
+  }
+  if spans.is_empty() {
+    spans.push(A11yTextSpan::plain(String::new()));
+  }
+  spans
+}
+
+fn snap_to_char_boundary(text: &str, byte: usize) -> usize {
+  let mut byte = byte.min(text.len());
+  while byte > 0 && !text.is_char_boundary(byte) {
+    byte -= 1;
+  }
+  byte
+}
+
+fn split_chars(text: &str, max: usize) -> Vec<String> {
+  if text.is_empty() {
+    return vec![String::new()];
+  }
+  text.chars().collect::<Vec<char>>().chunks(max).map(|c| c.iter().collect()).collect()
+}
+
+/// Resolve a run's styles into the properties AccessKit understands.
+///
+/// `Role::TextRun` is KEPT rather than swapping in `Role::Mark`/`Role::Comment`:
+/// synthetic children are flat leaves, so a `Mark` node could not CONTAIN the
+/// run, and changing the role would drop the span out of the text pattern that
+/// makes caret tracking and review commands work. Style is conveyed through
+/// properties instead, which is what those properties are for.
+fn resolve_a11y_span(text: String, styles: RunStyles, document: &DocumentProjection) -> A11yTextSpan {
+  let mut span = A11yTextSpan::plain(text);
+  span.underline = styles.direct_underline;
+  if styles.strikethrough {
+    // AccessKit has no strikethrough property, and `role_description` is the
+    // only channel that reaches the user. A struck span in a debate card is
+    // material — it is text the speaker did NOT read.
+    span.role_description = Some("struck through");
+  }
+  // Slot -> theme lookup mirrors `layout/format.rs`, including the `& 0x7f`
+  // mask, so the accessible presentation matches what is painted.
+  let theme = &document.theme;
+  if let Some(HighlightStyle::Custom(slot)) = styles.highlight {
+    let color = theme
+      .custom_highlight_styles
+      .get(&(slot & 0x7f))
+      .map_or(theme.default_highlight_color, |style| style.color);
+    span.background = Some(hsla_to_accesskit_color(color));
+  }
+  if let RunSemanticStyle::Custom(slot) = styles.semantic
+    && let Some(style) = theme.custom_semantic_styles.get(&(slot & 0x7f))
+  {
+    if let Some(color) = style.color {
+      span.foreground = Some(hsla_to_accesskit_color(color));
+    }
+    if !matches!(style.underline, None | Some(ThemeUnderline::None)) {
+      span.underline = true;
+    }
+  }
+  span
+}
+
+fn hsla_to_accesskit_color(color: gpui::Hsla) -> gpui::accesskit::Color {
+  let rgba = gpui::Rgba::from(color);
+  let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+  gpui::accesskit::Color {
+    red: byte(rgba.r),
+    green: byte(rgba.g),
+    blue: byte(rgba.b),
+    alpha: byte(rgba.a),
   }
 }
 

@@ -266,6 +266,14 @@ impl Render for FileSearchOverlay {
       .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
       .child(
         v_flex()
+          // Hand-rolled `.occlude()` scrim, not the gpui-component dialog layer,
+          // so `Role::Dialog` and the focus trap are ours to add. `SearchInput`
+          // would be the tighter role but this panel is a modal containing a
+          // search field plus a results list, not a bare field.
+          .id("file-search-overlay")
+          .role(gpui::Role::Dialog)
+          .aria_label("Search files")
+          .tab_group()
           .w(px(680.0))
           .max_w_full()
           .max_h(px(520.0))

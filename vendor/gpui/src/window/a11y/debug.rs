@@ -247,6 +247,27 @@ fn node_to_json(
     if !node.word_starts().is_empty() {
         aria.insert("word_starts".into(), json!(node.word_starts().to_vec()));
     }
+    // Span presentation. A citation or highlight is distinguished from body
+    // text ONLY by these, so without them a test cannot tell whether styled
+    // spans reached assistive technology at all.
+    let color_json = |c: &accesskit::Color| {
+        json!(format!("#{:02x}{:02x}{:02x}{:02x}", c.red, c.green, c.blue, c.alpha))
+    };
+    if let Some(c) = node.foreground_color() {
+        aria.insert("foreground_color".into(), color_json(&c));
+    }
+    if let Some(c) = node.background_color() {
+        aria.insert("background_color".into(), color_json(&c));
+    }
+    if let Some(underline) = node.underline() {
+        aria.insert(
+            "underline".into(),
+            json!({
+                "style": format!("{:?}", underline.style),
+                "color": color_json(&underline.color),
+            }),
+        );
+    }
     if let Some(sel) = node.text_selection() {
         let pos = |p: &accesskit::TextPosition| {
             json!({

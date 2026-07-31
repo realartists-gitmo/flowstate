@@ -225,6 +225,18 @@ impl Workspace {
       .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
       .child(
         v_flex()
+          // This overlay is a hand-rolled `.occlude()` scrim rather than the
+          // gpui-component dialog layer, so it gets no `Role::Dialog` for free.
+          // Without it assistive technology has no way to know a modal opened,
+          // and reads it as more page content behind nothing.
+          //
+          // `tab_group()` keeps Tab cycling INSIDE the panel: an untrapped modal
+          // lets focus walk out into the workspace behind the scrim, where
+          // controls are visible to AT but unreachable by mouse.
+          .id("settings-overlay")
+          .role(gpui::Role::Dialog)
+          .aria_label(title)
+          .tab_group()
           .w(px(840.0))
           .h(px(580.0))
           .max_w_full()

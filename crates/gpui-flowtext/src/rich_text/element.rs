@@ -229,11 +229,36 @@ impl Element for VirtualParagraphChunkElement {
       return;
     };
 
-    let chunks = a11y_text_runs(&info.text);
+    // Spans break at run-style boundaries as well as the 255-char limit, so a
+    // citation or highlight is its own node carrying its own presentation.
+    let chunks: Vec<&str> = info.spans.iter().map(|span| span.text.as_str()).collect();
     let ids: Vec<gpui::accesskit::NodeId> = (0..chunks.len()).map(|ix| builder.synthetic_node_id(ix)).collect();
 
     for (ix, chunk) in chunks.iter().enumerate() {
+      let span = &info.spans[ix];
       let mut node = a11y_text_run_node(chunk);
+      if span.underline {
+        // Colour the decoration with the span's own foreground when it has one,
+        // so an underline inherits the style it belongs to.
+        node.set_underline(gpui::accesskit::TextDecoration {
+          style: gpui::accesskit::TextDecorationStyle::Solid,
+          color: span.foreground.unwrap_or(gpui::accesskit::Color {
+            red: 0,
+            green: 0,
+            blue: 0,
+            alpha: 255,
+          }),
+        });
+      }
+      if let Some(description) = span.role_description {
+        node.set_role_description(description);
+      }
+      if let Some(color) = span.foreground {
+        node.set_foreground_color(color);
+      }
+      if let Some(color) = span.background {
+        node.set_background_color(color);
+      }
       // Link the runs so assistive technology treats a chunked paragraph as one
       // continuous line rather than several unrelated fragments.
       if ix > 0 {
