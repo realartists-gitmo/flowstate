@@ -9,7 +9,7 @@ use std::sync::Arc;
 use anyhow::bail;
 use serde::{Deserialize, Serialize};
 
-use crate::format::{ArgumentSide, CellId, ColumnId, FlowFormat, RowId, SheetId, SheetTypeId, StrokeId};
+use crate::format::{CellId, ColumnId, FlowFormat, RowId, SheetId, StrokeId};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AnnotationOriginator(pub String);
@@ -135,13 +135,12 @@ pub struct CellSource {
   pub cursor: Option<Vec<u8>>,
 }
 
-/// A sheet column as materialized (per-sheet records seeded from the sheet
-/// type at creation; user columns join the same list).
+/// A sheet column as materialized (seeded from the format's default run at
+/// creation; user columns join the same list).
 #[derive(Clone, Debug, PartialEq)]
 pub struct GridColumn {
   pub id: ColumnId,
   pub label: String,
-  pub side: ArgumentSide,
   /// Manual width override; `None` = automatic.
   pub width: Option<f32>,
 }
@@ -166,7 +165,6 @@ impl GridRow {
 pub struct Sheet {
   pub id: SheetId,
   pub name: String,
-  pub sheet_type_id: SheetTypeId,
   pub columns: Vec<GridColumn>,
   pub rows: Vec<GridRow>,
   pub annotations: Vec<AnnotationStroke>,
@@ -230,8 +228,6 @@ impl Sheet {
 pub struct FlowBoardProjection {
   pub format: FlowFormat,
   pub sheets: Vec<Sheet>,
-  /// E10: round identity from `flow.meta` (LWW per field).
-  pub round: RoundMetadata,
 }
 
 /// A cheap, stable drift signature for a board — a soak/self-check tripwire so
@@ -249,49 +245,9 @@ pub fn board_hash(board: &FlowBoardProjection) -> u64 {
 impl Default for FlowBoardProjection {
   fn default() -> Self {
     Self {
-      format: FlowFormat::policy_debate(),
+      format: FlowFormat::spreadsheet(),
       sheets: Vec::new(),
-      round: RoundMetadata::default(),
     }
-  }
-}
-
-/// E10: the round's identity — "round 3 vs Northwestern, judge X, we won" —
-/// six LWW string fields under `flow.meta`. Empty string = unset.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct RoundMetadata {
-  pub tournament: String,
-  pub round: String,
-  pub opponent: String,
-  pub judge: String,
-  pub side: String,
-  pub result: String,
-}
-
-impl RoundMetadata {
-  pub fn is_empty(&self) -> bool {
-    self.tournament.is_empty()
-      && self.round.is_empty()
-      && self.opponent.is_empty()
-      && self.judge.is_empty()
-      && self.side.is_empty()
-      && self.result.is_empty()
-  }
-
-  /// A compact one-line identity for tab titles and recents:
-  /// "Aldrich R3 vs Northwestern".
-  pub fn summary(&self) -> Option<String> {
-    let mut parts: Vec<String> = Vec::new();
-    if !self.tournament.is_empty() {
-      parts.push(self.tournament.clone());
-    }
-    if !self.round.is_empty() {
-      parts.push(format!("R{}", self.round.trim_start_matches(['r', 'R'])));
-    }
-    if !self.opponent.is_empty() {
-      parts.push(format!("vs {}", self.opponent));
-    }
-    (!parts.is_empty()).then(|| parts.join(" "))
   }
 }
 
@@ -306,11 +262,6 @@ impl FlowBoardProjection {
     let mut ids = HashSet::new();
     if !ids.insert(self.format.id) {
       bail!("duplicate format id");
-    }
-    for sheet_type in &self.format.sheet_types {
-      if !ids.insert(sheet_type.id) || sheet_type.columns.is_empty() {
-        bail!("invalid sheet type {}", sheet_type.name);
-      }
     }
     for sheet in &self.sheets {
       if !ids.insert(sheet.id) {
@@ -363,10 +314,9 @@ impl FlowBoardProjection {
 pub enum FlowDefect {
   SheetMissingFromOrder { sheet: SheetId },
   OrderEntryMissingSheet { entry: String },
-  SheetTypeUnknown { sheet: SheetId },
   ColumnMissingFromOrder { sheet: SheetId, column: ColumnId },
   OrderEntryMissingColumn { sheet: SheetId, entry: String },
-  ColumnsSeededFromType { sheet: SheetId },
+  ColumnsSeededFromFormat { sheet: SheetId },
   OrderEntryInvalidRow { sheet: SheetId, entry: String },
   /// A cell referenced a row absent from `row_order`; the row was
   /// materialized as a phantom at the bottom of the grid (repair pass writes
@@ -387,10 +337,9 @@ impl std::fmt::Display for FlowDefect {
     match self {
       Self::SheetMissingFromOrder { sheet } => write!(f, "sheet {sheet} was missing from the order list"),
       Self::OrderEntryMissingSheet { entry } => write!(f, "sheet order entry `{entry}` has no record"),
-      Self::SheetTypeUnknown { sheet } => write!(f, "sheet {sheet} references an unknown sheet type"),
       Self::ColumnMissingFromOrder { sheet, column } => write!(f, "column {column} was missing from sheet {sheet}'s order"),
       Self::OrderEntryMissingColumn { sheet, entry } => write!(f, "column order entry `{entry}` in sheet {sheet} has no record"),
-      Self::ColumnsSeededFromType { sheet } => write!(f, "sheet {sheet} had no live columns; seeded from its sheet type"),
+      Self::ColumnsSeededFromFormat { sheet } => write!(f, "sheet {sheet} had no live columns; seeded from the format's default run"),
       Self::OrderEntryInvalidRow { sheet, entry } => write!(f, "row order entry `{entry}` in sheet {sheet} is not a row id"),
       Self::RowMissingFromOrder { sheet, row } => write!(f, "row {row} was missing from sheet {sheet}'s order"),
       Self::CellRowInvalid { cell } => write!(f, "cell {cell} had no usable row address"),

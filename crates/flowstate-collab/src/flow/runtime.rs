@@ -641,14 +641,14 @@ impl FlowRuntime {
       let Some(record) = loro_schema::sheet_record(&self.doc, sheet.id) else {
         continue;
       };
-      // Type-fallback columns become canonical records.
+      // Format-fallback columns become canonical records.
       if let Ok(column_order) = loro_schema::sheet_column_order(&record)
         && column_order.is_empty()
         && !sheet.columns.is_empty()
         && self.repair_allowed(&format!("grid/{}/columns", sheet.id), MAX_REPAIR_ATTEMPTS)
       {
         for column in &sheet.columns {
-          if loro_schema::ensure_column_record(&record, column.id, &column.label, column.side).is_ok() {
+          if loro_schema::ensure_column_record(&record, column.id, &column.label).is_ok() {
             let _ = column_order.insert(column_order.len(), column.id.to_string());
           }
         }
@@ -1025,9 +1025,8 @@ impl FlowRuntime {
         sheet_id,
         column_id,
         label,
-        side,
         before: None,
-      } => self.incremental_append_column(*sheet_id, *column_id, label.clone(), *side),
+      } => self.incremental_append_column(*sheet_id, *column_id, label.clone()),
       // Pure metadata: one field on one row/column/sheet, no cell touched.
       FlowIntent::SetRowHeight { sheet_id, row_id, height } => self.incremental_patch_row(*sheet_id, *row_id, |row| row.height_override = *height),
       FlowIntent::SetColumnWidth { sheet_id, column_id, width } => self.incremental_patch_column(*sheet_id, *column_id, |column| column.width = *width),
@@ -1046,7 +1045,7 @@ impl FlowRuntime {
     }
   }
 
-  fn incremental_append_column(&mut self, sheet_id: SheetId, column_id: ColumnId, label: String, side: flowstate_flow::ArgumentSide) -> bool {
+  fn incremental_append_column(&mut self, sheet_id: SheetId, column_id: ColumnId, label: String) -> bool {
     let Some(sheet) = self.board.sheets.iter_mut().find(|sheet| sheet.id == sheet_id) else {
       return false;
     };
@@ -1056,7 +1055,6 @@ impl FlowRuntime {
     sheet.columns.push(flowstate_flow::GridColumn {
       id: column_id,
       label,
-      side,
       width: None,
     });
     for row in &mut sheet.rows {

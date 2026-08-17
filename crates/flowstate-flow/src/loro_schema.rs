@@ -5,11 +5,11 @@
 //! "flow.meta"           Map    format (postcard, immutable) · schema_version=3 ·
 //!                              document_id · created_at / modified_at
 //! "flow.sheet_order"    MovableList<String>   board order of sheet uuids
-//! "flow.sheets_by_id"   Map → {sheet}: id · name (LWW) · sheet_type_id ·
+//! "flow.sheets_by_id"   Map → {sheet}: id · name (LWW) ·
 //!                              "row_order"     MovableList<String> (sheet-global rows) ·
 //!                              "column_order"  MovableList<String> ·
 //!                              "columns_by_id" Map → {column}: id · label (LWW) ·
-//!                                              side · width (LWW, absent = auto) ·
+//!                                              width (LWW, absent = auto) ·
 //!                              "row_heights"   Map row uuid → f64 (LWW per key)
 //! "flow.cells_by_id"    Map → {cell}: id · sheet_id · row_id (LWW) ·
 //!                              column_id (LWW) ·
@@ -27,7 +27,7 @@
 use loro::{ContainerTrait as _, LoroDoc, LoroMap, LoroMovableList, LoroResult, LoroValue, ValueOrContainer};
 use uuid::Uuid;
 
-use crate::format::{ArgumentSide, CellId, ColumnId, FlowFormat, RowId, SheetId, SheetTypeId};
+use crate::format::{CellId, ColumnId, FlowFormat, RowId, SheetId};
 
 pub const META_MAP: &str = "flow.meta";
 pub const SHEET_ORDER: &str = "flow.sheet_order";
@@ -50,17 +50,6 @@ pub const SCHEMA_VERSION: i64 = 3;
 pub const META_FORMAT_KEY: &str = "format";
 pub const META_SCHEMA_VERSION_KEY: &str = "schema_version";
 pub const META_DOCUMENT_ID_KEY: &str = "document_id";
-/// E10: round metadata — each field its own LWW key under `flow.meta`, so
-/// concurrent edits to different fields never clobber each other. Values are
-/// plain strings; empty = unset.
-pub const META_ROUND_KEYS: [&str; 6] = [
-  "round.tournament",
-  "round.round",
-  "round.opponent",
-  "round.judge",
-  "round.side",
-  "round.result",
-];
 
 /// One-time creation of a fresh .fl0 v3 document. The format is immutable by
 /// law: written exactly once here, never rewritten by any executor.
@@ -129,8 +118,8 @@ pub fn annotations_map(doc: &LoroDoc) -> LoroMap {
   doc.get_map(ANNOTATIONS_MAP)
 }
 
-/// Create (or fetch) a sheet record, seeding its columns from the sheet type
-/// definition (format columns are copied in — the format stays a pure
+/// Create (or fetch) a sheet record, seeding its columns from the format's
+/// default column run (format columns are copied in — the format stays a pure
 /// template; renames/moves/widths are uniform across seeded and user
 /// columns). Sheets are born with ZERO rows: ghost rows are render-only and
 /// materialize via `InsertRows` on first touch.
@@ -138,13 +127,11 @@ pub fn ensure_sheet_record(
   doc: &LoroDoc,
   sheet_id: SheetId,
   name: &str,
-  sheet_type_id: SheetTypeId,
   seed_columns: &[crate::format::ColumnDefinition],
 ) -> anyhow::Result<LoroMap> {
   let sheet = sheets_map(doc).ensure_mergeable_map(&sheet_id.to_string())?;
   sheet.insert("id", sheet_id.to_string())?;
   sheet.insert("name", name)?;
-  sheet.insert("sheet_type_id", sheet_type_id.to_string())?;
   sheet.ensure_mergeable_movable_list(ROW_ORDER_KEY)?;
   let column_order = sheet.ensure_mergeable_movable_list(COLUMN_ORDER_KEY)?;
   sheet.ensure_mergeable_map(COLUMNS_BY_ID_KEY)?;
@@ -153,7 +140,7 @@ pub fn ensure_sheet_record(
   // id converges: both peers write the identical seed).
   if column_order.is_empty() {
     for definition in seed_columns {
-      ensure_column_record(&sheet, definition.id, &definition.label, definition.side)?;
+      ensure_column_record(&sheet, definition.id, &definition.label)?;
       column_order.insert(column_order.len(), definition.id.to_string())?;
     }
   }
@@ -180,12 +167,11 @@ pub fn sheet_row_heights(sheet: &LoroMap) -> LoroResult<LoroMap> {
   sheet.ensure_mergeable_map(ROW_HEIGHTS_KEY)
 }
 
-pub fn ensure_column_record(sheet: &LoroMap, column_id: ColumnId, label: &str, side: ArgumentSide) -> LoroResult<LoroMap> {
+pub fn ensure_column_record(sheet: &LoroMap, column_id: ColumnId, label: &str) -> LoroResult<LoroMap> {
   let columns = sheet.ensure_mergeable_map(COLUMNS_BY_ID_KEY)?;
   let column = columns.ensure_mergeable_map(&column_id.to_string())?;
   column.insert("id", column_id.to_string())?;
   column.insert("label", label)?;
-  column.insert("side", side_str(side))?;
   Ok(column)
 }
 
@@ -200,21 +186,6 @@ pub fn column_record(sheet: &LoroMap, column_id: ColumnId) -> Option<LoroMap> {
 /// are ≥ `MIN_COLUMN_WIDTH`, so `0.0` can never collide with a set width.
 pub fn set_column_width(column: &LoroMap, width: Option<f32>) -> LoroResult<()> {
   column.insert("width", f64::from(width.unwrap_or(0.0)))
-}
-
-pub fn side_str(side: ArgumentSide) -> &'static str {
-  match side {
-    ArgumentSide::One => "one",
-    ArgumentSide::Two => "two",
-  }
-}
-
-pub fn parse_side(value: &str) -> Option<ArgumentSide> {
-  match value {
-    "one" => Some(ArgumentSide::One),
-    "two" => Some(ArgumentSide::Two),
-    _ => None,
-  }
 }
 
 /// The durable flow id embedded in a cell's flow map — namespaced so cell

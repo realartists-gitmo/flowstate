@@ -34,14 +34,12 @@ mod tests {
   /// the source's final cell text, and the drip target cell.
   fn drip_pair(edits: usize) -> Result<(String, Vec<Vec<u8>>, FlowGate, CellId)> {
     let source_runtime = FlowRuntime::new_empty();
-    let sheet_type = source_runtime.board().format.sheet_types[0].id;
     let (source_handle, source_gate) = FlowDocHandle::new(source_runtime);
     let sheet = Uuid::from_u128(0xf10c_0001);
     source_handle
       .apply(&FlowIntent::CreateSheet {
         sheet_id: sheet,
         name: "Drip".into(),
-        sheet_type_id: sheet_type,
       })
       .map_err(|error| anyhow::anyhow!("seed sheet rejected: {error}"))?;
     let row = Uuid::from_u128(0xf10c_1002);
@@ -266,14 +264,12 @@ mod tests {
   #[test]
   fn pump_publish_drains_exactly_once() -> Result<()> {
     let runtime = FlowRuntime::new_empty();
-    let sheet_type = runtime.board().format.sheet_types[0].id;
     let (handle, gate) = FlowDocHandle::new(runtime);
     let sheet = Uuid::from_u128(0xf10c_0003);
     handle
       .apply(&FlowIntent::CreateSheet {
         sheet_id: sheet,
         name: "Pump".into(),
-        sheet_type_id: sheet_type,
       })
       .map_err(|error| anyhow::anyhow!("seed sheet rejected: {error}"))?;
     let row = Uuid::from_u128(0xf10c_1004);

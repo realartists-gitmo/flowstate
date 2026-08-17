@@ -166,14 +166,12 @@ mod tests {
 
   fn seeded_board(cell_count: usize, rng: &mut Rng) -> (SheetId, Vec<CellId>, Vec<RowId>, Vec<ColumnId>, Vec<u8>) {
     let seed_runtime = FlowRuntime::new_empty();
-    let sheet_type = seed_runtime.board().format.sheet_types[0].id;
     let (seed_handle, _gate) = FlowDocHandle::new(seed_runtime);
     let sheet: SheetId = rng.uuid();
     seed_handle
       .apply(&FlowIntent::CreateSheet {
         sheet_id: sheet,
         name: "TextFuzz".into(),
-        sheet_type_id: sheet_type,
       })
       .unwrap();
     // Rows for every cell plus spare empties so random moves usually land.

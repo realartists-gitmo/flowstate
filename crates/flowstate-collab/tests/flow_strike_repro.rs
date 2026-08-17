@@ -63,10 +63,9 @@ mod tests {
   /// that diverges.
   fn scenario(strike_on_a: bool, ensure_on_a: bool, strike_on_b: bool, ensure_on_b: bool) -> bool {
     let seed_runtime = FlowRuntime::new_empty();
-    let sheet_type = seed_runtime.board().format.sheet_types[0].id;
     let (seed, _gate) = FlowDocHandle::new(seed_runtime);
     let sheet = Uuid::from_u128(1);
-    seed.apply(&FlowIntent::CreateSheet { sheet_id: sheet, name: "S".into(), sheet_type_id: sheet_type }).unwrap();
+    seed.apply(&FlowIntent::CreateSheet { sheet_id: sheet, name: "S".into() }).unwrap();
     let row = Uuid::from_u128(2);
     seed.apply(&FlowIntent::InsertRows { sheet_id: sheet, before: None, row_ids: vec![row] }).unwrap();
     let column = seed.board_projection().unwrap().sheet(sheet).unwrap().columns[0].id;

@@ -142,11 +142,10 @@ mod tests {
     let mut rng = Rng(0x000c_4a05_11fe);
 
     let seed_runtime = FlowRuntime::new_empty();
-    let sheet_type = seed_runtime.board().format.sheet_types[0].id;
     let (seed_handle, _gate) = FlowDocHandle::new(seed_runtime);
     let sheet = rng.uuid();
     seed_handle
-      .apply(&FlowIntent::CreateSheet { sheet_id: sheet, name: "Chaos".into(), sheet_type_id: sheet_type })
+      .apply(&FlowIntent::CreateSheet { sheet_id: sheet, name: "Chaos".into() })
       .unwrap();
     seed_handle
       .apply(&FlowIntent::InsertRows { sheet_id: sheet, before: None, row_ids: (0..3).map(|_| rng.uuid()).collect() })

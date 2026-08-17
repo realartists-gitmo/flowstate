@@ -42,11 +42,10 @@ mod tests {
 
   fn two_peers() -> (FlowDocHandle, FlowDocHandle, SheetId) {
     let seed_runtime = FlowRuntime::new_empty();
-    let sheet_type = seed_runtime.board().format.sheet_types[0].id;
     let (seed, _gate) = FlowDocHandle::new(seed_runtime);
     let sheet = uuid(1);
     seed
-      .apply(&FlowIntent::CreateSheet { sheet_id: sheet, name: "Mass".into(), sheet_type_id: sheet_type })
+      .apply(&FlowIntent::CreateSheet { sheet_id: sheet, name: "Mass".into() })
       .unwrap();
     seed
       .apply(&FlowIntent::InsertRows { sheet_id: sheet, before: None, row_ids: (0..4).map(uuid).collect() })

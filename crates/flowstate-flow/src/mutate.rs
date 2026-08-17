@@ -33,19 +33,11 @@ pub struct MutationReport {
 
 pub fn execute_intent(doc: &LoroDoc, board: &FlowBoardProjection, intent: &FlowIntent) -> anyhow::Result<MutationReport> {
   match intent {
-    FlowIntent::CreateSheet {
-      sheet_id,
-      name,
-      sheet_type_id,
-    } => {
+    FlowIntent::CreateSheet { sheet_id, name } => {
       if board.sheet(*sheet_id).is_some() {
         bail!("sheet {sheet_id} already exists");
       }
-      let definition = board
-        .format
-        .sheet_type(*sheet_type_id)
-        .context("unknown sheet type")?;
-      ensure_sheet_record(doc, *sheet_id, name, *sheet_type_id, &definition.columns)?;
+      ensure_sheet_record(doc, *sheet_id, name, &board.format.default_columns)?;
       sheet_order(doc).insert(sheet_order(doc).len(), sheet_id.to_string())?;
       Ok(MutationReport::default())
     },
@@ -223,7 +215,6 @@ pub fn execute_intent(doc: &LoroDoc, board: &FlowBoardProjection, intent: &FlowI
       sheet_id,
       column_id,
       label,
-      side,
       before,
     } => {
       let sheet = board.sheet(*sheet_id).context("unknown sheet")?;
@@ -231,7 +222,7 @@ pub fn execute_intent(doc: &LoroDoc, board: &FlowBoardProjection, intent: &FlowI
         bail!("column {column_id} already exists");
       }
       let record = sheet_record(doc, *sheet_id).context("unknown sheet record")?;
-      ensure_column_record(&record, *column_id, label, *side)?;
+      ensure_column_record(&record, *column_id, label)?;
       let order = sheet_column_order(&record)?;
       let entries = list_strings(&order);
       let index = match before {
@@ -250,14 +241,6 @@ pub fn execute_intent(doc: &LoroDoc, board: &FlowBoardProjection, intent: &FlowI
       let record = sheet_record(doc, *sheet_id).context("unknown sheet record")?;
       let column = column_record(&record, *column_id).context("unknown column record")?;
       column.insert("label", label.as_str())?;
-      Ok(MutationReport::default())
-    },
-    FlowIntent::SetColumnSide { sheet_id, column_id, side } => {
-      let sheet = board.sheet(*sheet_id).context("unknown sheet")?;
-      sheet.column_index(*column_id).context("unknown column")?;
-      let record = sheet_record(doc, *sheet_id).context("unknown sheet record")?;
-      let column = column_record(&record, *column_id).context("unknown column record")?;
-      column.insert("side", loro_schema::side_str(*side))?;
       Ok(MutationReport::default())
     },
     FlowIntent::MoveColumn { sheet_id, column_id, before } => {
@@ -506,12 +489,6 @@ pub fn execute_intent(doc: &LoroDoc, board: &FlowBoardProjection, intent: &FlowI
     },
     FlowIntent::ClearAnnotations { scope, originator } => {
       clear_annotations(doc, scope, originator)?;
-      Ok(MutationReport::default())
-    },
-    // E10: one LWW write per field — trims to keep "unset" = empty.
-    FlowIntent::SetRoundField { field, value } => {
-      let meta = doc.get_map(loro_schema::META_MAP);
-      meta.insert(field.key(), value.trim())?;
       Ok(MutationReport::default())
     },
     // Q-21/F2: provenance blob, LWW on the cell record.

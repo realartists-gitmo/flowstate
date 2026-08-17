@@ -14,10 +14,9 @@ mod tests {
   #[test]
   fn board_hash_is_stable_and_discriminating() {
     let (handle, _gate) = FlowDocHandle::new(FlowRuntime::new_empty());
-    let sheet_type = handle.board_projection().unwrap().format.sheet_types[0].id;
     let sheet = Uuid::new_v4();
     handle
-      .apply(&FlowIntent::CreateSheet { sheet_id: sheet, name: "H".into(), sheet_type_id: sheet_type })
+      .apply(&FlowIntent::CreateSheet { sheet_id: sheet, name: "H".into() })
       .unwrap();
 
     let before = handle.board_projection().unwrap();
@@ -47,10 +46,9 @@ mod tests {
     let _ = flowstate_fidelity::take_violations(); // clear any prior
 
     let (handle, _gate) = FlowDocHandle::new(FlowRuntime::new_empty());
-    let sheet_type = handle.board_projection().unwrap().format.sheet_types[0].id;
     let sheet = Uuid::new_v4();
     handle
-      .apply(&FlowIntent::CreateSheet { sheet_id: sheet, name: "Fidelity".into(), sheet_type_id: sheet_type })
+      .apply(&FlowIntent::CreateSheet { sheet_id: sheet, name: "Fidelity".into() })
       .unwrap();
     let rows: Vec<Uuid> = (0..6).map(|_| Uuid::new_v4()).collect();
     handle

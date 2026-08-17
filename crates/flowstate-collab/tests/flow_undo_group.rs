@@ -15,14 +15,12 @@ mod tests {
   fn grouped_strikes_revert_with_one_undo_500x() {
     for round in 0..500 {
       let runtime = FlowRuntime::new_empty();
-      let sheet_type = runtime.board().format.sheet_types[0].id;
       let (handle, _gate) = FlowDocHandle::new(runtime);
       let sheet = Uuid::from_u128(1);
       handle
         .apply(&FlowIntent::CreateSheet {
           sheet_id: sheet,
           name: "G".into(),
-          sheet_type_id: sheet_type,
         })
         .unwrap();
       let rows = [Uuid::from_u128(0x10), Uuid::from_u128(0x11)];

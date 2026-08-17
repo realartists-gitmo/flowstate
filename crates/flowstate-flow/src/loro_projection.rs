@@ -116,13 +116,8 @@ pub fn board_from_loro_cached(
       continue;
     };
     let name = map_string(&record, "name").unwrap_or_default();
-    let sheet_type_id = map_uuid(&record, "sheet_type_id");
-    let definition = sheet_type_id.and_then(|id| format.sheet_type(id));
-    if sheet_type_id.is_none() || definition.is_none() {
-      defects.push(FlowDefect::SheetTypeUnknown { sheet: sheet_id });
-    }
 
-    // ---- columns: order ∩ records; stragglers appended; type fallback -----
+    // ---- columns: order ∩ records; stragglers appended; format fallback ---
     let mut columns: Vec<GridColumn> = Vec::new();
     let mut column_seen: HashSet<ColumnId> = HashSet::new();
     let columns_map = loro_schema::child_map(&record, loro_schema::COLUMNS_BY_ID_KEY);
@@ -159,18 +154,13 @@ pub fn board_from_loro_cached(
       }
     }
     if columns.is_empty() {
-      // No live column records: fall back to the sheet type template (a
+      // No live column records: fall back to the format's default run (a
       // projection-space seed — the repair pass writes it for real).
-      let Some(definition) = definition else {
-        // No columns AND no template: the sheet cannot render; skip it.
-        continue;
-      };
-      defects.push(FlowDefect::ColumnsSeededFromType { sheet: sheet_id });
-      for column in &definition.columns {
+      defects.push(FlowDefect::ColumnsSeededFromFormat { sheet: sheet_id });
+      for column in &format.default_columns {
         columns.push(GridColumn {
           id: column.id,
           label: column.label.clone(),
-          side: column.side,
           width: None,
         });
       }
@@ -289,7 +279,6 @@ pub fn board_from_loro_cached(
     sheets.push(Sheet {
       id: sheet_id,
       name,
-      sheet_type_id: sheet_type_id.unwrap_or_default(),
       columns,
       rows: grid_rows,
       annotations,
@@ -297,32 +286,9 @@ pub fn board_from_loro_cached(
   }
 
   Ok(MaterializedBoard {
-    board: FlowBoardProjection {
-      format,
-      sheets,
-      round: read_round_metadata(doc),
-    },
+    board: FlowBoardProjection { format, sheets },
     defects,
   })
-}
-
-/// E10: the six LWW round fields, missing keys = empty.
-fn read_round_metadata(doc: &LoroDoc) -> crate::projection::RoundMetadata {
-  let meta = doc.get_map(loro_schema::META_MAP);
-  let read = |key: &str| -> String {
-    match meta.get(key) {
-      Some(loro::ValueOrContainer::Value(loro::LoroValue::String(value))) => value.to_string(),
-      _ => String::new(),
-    }
-  };
-  crate::projection::RoundMetadata {
-    tournament: read("round.tournament"),
-    round: read("round.round"),
-    opponent: read("round.opponent"),
-    judge: read("round.judge"),
-    side: read("round.side"),
-    result: read("round.result"),
-  }
 }
 
 struct Placement {
@@ -418,9 +384,6 @@ fn grid_column(column_id: ColumnId, record: &LoroMap) -> GridColumn {
   GridColumn {
     id: column_id,
     label: map_string(record, "label").unwrap_or_default(),
-    side: map_string(record, "side")
-      .and_then(|value| loro_schema::parse_side(&value))
-      .unwrap_or(crate::format::ArgumentSide::One),
     // `0.0` (and absent) = auto width; see `set_column_width` — the register
     // is always written, with `0.0` as the "auto" sentinel.
     width: map_f64(record, "width").filter(|value| *value > 0.0).map(|value| value as f32),

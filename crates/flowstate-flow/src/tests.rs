@@ -8,14 +8,13 @@ use flowstate_document::{InputParagraph, InputRun, RunStyles};
 use uuid::Uuid;
 
 use crate::{
-  AnnotationOriginator, AnnotationStroke, ArgumentSide, CellId, CellSeed, ColumnId, FlowDocument, FlowDefect, FlowIntent, GridAnchor, RowId,
+  AnnotationOriginator, AnnotationStroke, CellId, CellSeed, ColumnId, FlowDocument, FlowDefect, FlowIntent, GridAnchor, RowId,
   SheetId, StrokePoint, StrokeRect, StrokeStyle, loro_projection, loro_schema,
 };
 
 fn document_with_sheet() -> (FlowDocument, SheetId) {
   let mut document = FlowDocument::new();
-  let sheet_type = document.projection().format.sheet_types[0].id;
-  let sheet = document.create_sheet("Case", sheet_type).unwrap();
+  let sheet = document.create_sheet("Case").unwrap();
   (document, sheet)
 }
 
@@ -99,9 +98,8 @@ fn assert_converged(a: &FlowDocument, b: &FlowDocument) {
 #[test]
 fn sheet_crud_and_order() {
   let mut document = FlowDocument::new();
-  let sheet_type = document.projection().format.sheet_types[0].id;
-  let first = document.create_sheet("Aff", sheet_type).unwrap();
-  let second = document.create_sheet("Neg", sheet_type).unwrap();
+  let first = document.create_sheet("Aff").unwrap();
+  let second = document.create_sheet("Neg").unwrap();
   assert_eq!(
     document
       .projection()
@@ -129,7 +127,7 @@ fn sheet_crud_and_order() {
 }
 
 #[test]
-fn create_sheet_seeds_columns_from_its_type() {
+fn create_sheet_seeds_columns_from_defaults() {
   let (document, sheet) = document_with_sheet();
   let projected: Vec<String> = document
     .projection()
@@ -139,8 +137,10 @@ fn create_sheet_seeds_columns_from_its_type() {
     .iter()
     .map(|column| column.label.clone())
     .collect();
-  let expected: Vec<String> = document.projection().format.sheet_types[0]
-    .columns
+  let expected: Vec<String> = document
+    .projection()
+    .format
+    .default_columns
     .iter()
     .map(|column| column.label.clone())
     .collect();
@@ -239,9 +239,7 @@ fn column_lifecycle_add_rename_move_resize_delete() {
   let (mut document, sheet) = document_with_sheet();
   let base_len = document.projection().sheet(sheet).unwrap().columns.len();
   let first = column_id(&document, sheet, 0);
-  let added = document
-    .add_column(sheet, "Overview", ArgumentSide::One, Some(first))
-    .unwrap();
+  let added = document.add_column(sheet, "Overview", Some(first)).unwrap();
   {
     let sheet_ref = document.projection().sheet(sheet).unwrap();
     assert_eq!(sheet_ref.columns.len(), base_len + 1);
@@ -344,8 +342,7 @@ fn ensure_cell_editable_keeps_the_canonical_tag_style() {
 #[test]
 fn the_last_column_cannot_be_deleted() {
   let mut document = FlowDocument::new();
-  let sheet_type = document.projection().format.sheet_types[0].id;
-  let sheet = document.create_sheet("Case", sheet_type).unwrap();
+  let sheet = document.create_sheet("Case").unwrap();
   let columns: Vec<ColumnId> = document
     .projection()
     .sheet(sheet)
@@ -682,9 +679,8 @@ fn annotations_add_clear_delete() {
 #[test]
 fn delete_sheet_sweeps_its_ink() {
   let mut document = FlowDocument::new();
-  let sheet_type = document.projection().format.sheet_types[0].id;
-  let doomed = document.create_sheet("Doomed", sheet_type).unwrap();
-  let kept = document.create_sheet("Kept", sheet_type).unwrap();
+  let doomed = document.create_sheet("Doomed").unwrap();
+  let kept = document.create_sheet("Kept").unwrap();
   let doomed_row = document.append_row(doomed).unwrap();
   let kept_row = document.append_row(kept).unwrap();
   let doomed_col = column_id(&document, doomed, 0);
@@ -773,8 +769,7 @@ fn concurrent_ink_add_vs_clear_converges() {
 #[test]
 fn concurrent_sheet_delete_vs_rename_converges() {
   let mut a = FlowDocument::new();
-  let sheet_type = a.projection().format.sheet_types[0].id;
-  let sheet = a.create_sheet("Case", sheet_type).unwrap();
+  let sheet = a.create_sheet("Case").unwrap();
   let mut b = FlowDocument::from_snapshot(&a.snapshot().unwrap()).unwrap();
 
   a.delete_sheet(sheet).unwrap();
@@ -788,10 +783,9 @@ fn concurrent_sheet_delete_vs_rename_converges() {
 #[test]
 fn concurrent_sheet_moves_converge() {
   let mut a = FlowDocument::new();
-  let sheet_type = a.projection().format.sheet_types[0].id;
-  let s1 = a.create_sheet("One", sheet_type).unwrap();
-  let s2 = a.create_sheet("Two", sheet_type).unwrap();
-  let s3 = a.create_sheet("Three", sheet_type).unwrap();
+  let s1 = a.create_sheet("One").unwrap();
+  let s2 = a.create_sheet("Two").unwrap();
+  let s3 = a.create_sheet("Three").unwrap();
   let mut b = FlowDocument::from_snapshot(&a.snapshot().unwrap()).unwrap();
 
   a.move_sheet(s3, Some(s1)).unwrap();
@@ -839,7 +833,6 @@ fn random_intent(rng: &mut Lcg, document: &FlowDocument) -> Option<FlowIntent> {
     0 => Some(FlowIntent::CreateSheet {
       sheet_id: rng.uuid(),
       name: format!("Sheet {}", rng.pick(1000)),
-      sheet_type_id: board.format.sheet_types[rng.pick(board.format.sheet_types.len())].id,
     }),
     1 => sheet.map(|sheet| FlowIntent::RenameSheet {
       sheet_id: sheet.id,
@@ -891,7 +884,6 @@ fn random_intent(rng: &mut Lcg, document: &FlowDocument) -> Option<FlowIntent> {
       sheet_id: sheet.id,
       column_id: rng.uuid(),
       label: format!("Col {}", rng.pick(100)),
-      side: if rng.pick(2) == 0 { ArgumentSide::One } else { ArgumentSide::Two },
       before: None,
     }),
     8 => sheet.and_then(|sheet| {
@@ -1054,8 +1046,7 @@ fn seeded_multi_peer_determinism() {
   for seed in [3_u64, 17, 4242, 90210] {
     let mut rng = Lcg(seed);
     let mut base = FlowDocument::new();
-    let sheet_type = base.projection().format.sheet_types[0].id;
-    base.create_sheet("Fuzz", sheet_type).unwrap();
+    base.create_sheet("Fuzz").unwrap();
     let snapshot = base.snapshot().unwrap();
     let mut peers = [
       FlowDocument::from_snapshot(&snapshot).unwrap(),
@@ -1114,14 +1105,7 @@ fn synthetic_flow(rows: usize, extra_cols: usize, seed: u64) -> (FlowDocument, S
   let (mut document, sheet) = document_with_sheet();
   let mut rng = Lcg(seed);
   for i in 0..extra_cols {
-    document
-      .add_column(
-        sheet,
-        format!("Extra {i}"),
-        if i.is_multiple_of(2) { ArgumentSide::One } else { ArgumentSide::Two },
-        None,
-      )
-      .unwrap();
+    document.add_column(sheet, format!("Extra {i}"), None).unwrap();
   }
   let columns: Vec<ColumnId> = document.projection().sheet(sheet).unwrap().columns.iter().map(|column| column.id).collect();
   for r in 0..rows {

@@ -28,7 +28,7 @@ mod tests {
   use flowstate_collab::local_write::GateHolder;
   use flowstate_document::{InputParagraph, InputRun, RunStyles};
   use flowstate_flow::{
-    AnnotationOriginator, AnnotationStroke, ArgumentSide, CellId, CellSeed, ColumnId, FlowIntent, GridAnchor, RowId, SheetId, StrokePoint,
+    AnnotationOriginator, AnnotationStroke, CellId, CellSeed, ColumnId, FlowIntent, GridAnchor, RowId, SheetId, StrokePoint,
     StrokeRect, StrokeStyle,
   };
   use uuid::Uuid;
@@ -64,8 +64,8 @@ mod tests {
       ));
       for (ix, column) in sheet.columns.iter().enumerate() {
         lines.push(format!(
-          "  col[{ix}] {} label={:?} side={:?} width={:?}",
-          column.id, column.label, column.side, column.width
+          "  col[{ix}] {} label={:?} width={:?}",
+          column.id, column.label, column.width
         ));
       }
       for (ix, row) in sheet.rows.iter().enumerate() {
@@ -187,14 +187,12 @@ mod tests {
     let mut rng = Rng(0xf10c_5eed_0001);
 
     let seed_runtime = FlowRuntime::new_empty();
-    let sheet_type = seed_runtime.board().format.sheet_types[0].id;
     let (seed_handle, _gate) = FlowDocHandle::new(seed_runtime);
     let sheet = rng.uuid();
     seed_handle
       .apply(&FlowIntent::CreateSheet {
         sheet_id: sheet,
         name: "Fuzz".into(),
-        sheet_type_id: sheet_type,
       })
       .unwrap();
     seed_handle
@@ -374,7 +372,6 @@ mod tests {
                 sheet_id: sheet,
                 column_id: rng.uuid(),
                 label: format!("Col r{round}"),
-                side: if rng.below(2) == 0 { ArgumentSide::One } else { ArgumentSide::Two },
                 before: if columns.is_empty() || rng.below(2) == 0 {
                   None
                 } else {

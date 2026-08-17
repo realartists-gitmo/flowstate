@@ -22,14 +22,12 @@ fn paragraphs(text: &str) -> Vec<InputParagraph> {
 
 fn handle_with_sheet() -> (FlowDocHandle, SheetId) {
   let runtime = FlowRuntime::new_empty();
-  let sheet_type = runtime.board().format.sheet_types[0].id;
   let (handle, _gate) = FlowDocHandle::new(runtime);
   let sheet = Uuid::new_v4();
   handle
     .apply(&FlowIntent::CreateSheet {
       sheet_id: sheet,
       name: "Case".into(),
-      sheet_type_id: sheet_type,
     })
     .unwrap();
   (handle, sheet)
@@ -142,7 +140,6 @@ fn every_intent_class_commits_through_the_gate() {
       sheet_id: sheet,
       column_id: overview,
       label: "Overview".into(),
-      side: flowstate_flow::ArgumentSide::One,
       before: Some(col0),
     })
     .unwrap();
@@ -512,7 +509,6 @@ fn incremental_structural_matches_full_materialization() {
       sheet_id: sheet,
       column_id: Uuid::new_v4(),
       label: "New Speech".into(),
-      side: flowstate_flow::ArgumentSide::Two,
       before: None,
     })
     .unwrap();
@@ -532,13 +528,11 @@ fn incremental_structural_matches_full_materialization() {
 #[test]
 fn from_flow_document_seeds_board_equal_to_materialization() {
   let mut document = flowstate_flow::FlowDocument::new();
-  let sheet_type = document.projection().format.sheet_types[0].id;
   let sheet = Uuid::new_v4();
   document
     .apply_intent(&FlowIntent::CreateSheet {
       sheet_id: sheet,
       name: "s".into(),
-      sheet_type_id: sheet_type,
     })
     .unwrap();
   let rows: Vec<RowId> = (0..3).map(|_| Uuid::new_v4()).collect();
@@ -574,13 +568,11 @@ fn from_flow_document_runtime_is_writable() {
   use gpui_flowtext::{InsertTextIntent, LocalIntent, LocalWriteAuthority as _, TextAnchor};
 
   let mut document = flowstate_flow::FlowDocument::new();
-  let sheet_type = document.projection().format.sheet_types[0].id;
   let sheet = Uuid::new_v4();
   document
     .apply_intent(&FlowIntent::CreateSheet {
       sheet_id: sheet,
       name: "s".into(),
-      sheet_type_id: sheet_type,
     })
     .unwrap();
   let rows: Vec<RowId> = (0..2).map(|_| Uuid::new_v4()).collect();
@@ -973,14 +965,12 @@ mod cell_authority_tests {
 #[test]
 fn history_scrubber_replays_the_lamport_prefix() {
   let runtime = FlowRuntime::new_empty();
-  let sheet_type = runtime.board().format.sheet_types[0].id;
   let (handle, _gate) = FlowDocHandle::new(runtime);
   let sheet = Uuid::from_u128(0x51);
   handle
     .apply(&FlowIntent::CreateSheet {
       sheet_id: sheet,
       name: "History".into(),
-      sheet_type_id: sheet_type,
     })
     .unwrap();
   let col0 = column(&handle, sheet, 0);

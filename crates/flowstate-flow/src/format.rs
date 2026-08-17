@@ -1,97 +1,47 @@
-//! The immutable flow FORMAT: which sheets a flow can contain and which
-//! speech columns each sheet type carries. Written once into `flow.meta` at
-//! document creation (flow architecture spec Part 2.1) and never mutated —
-//! every peer materializes against the same definition.
+//! The immutable flow FORMAT: the plain spreadsheet definition written once
+//! into `flow.meta` at document creation (flow architecture spec Part 2.1)
+//! and never mutated — every peer materializes against the same definition.
+//! A spreadsheet has no sheet "types": every sheet is a plain grid whose
+//! columns are seeded from the format's default column run (A, B, C, …) and
+//! are then free-form (renamed, moved, resized, added, deleted).
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub type FormatId = Uuid;
-pub type SheetTypeId = Uuid;
 pub type SheetId = Uuid;
 pub type ColumnId = Uuid;
 pub type RowId = Uuid;
 pub type CellId = Uuid;
 pub type StrokeId = Uuid;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ArgumentSide {
-  One,
-  Two,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ColumnDefinition {
   pub id: ColumnId,
   pub label: String,
-  pub side: ArgumentSide,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SheetTypeDefinition {
-  pub id: SheetTypeId,
-  pub name: String,
-  pub columns: Vec<ColumnDefinition>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FlowFormat {
   pub id: FormatId,
   pub name: String,
-  pub sheet_types: Vec<SheetTypeDefinition>,
+  /// The default column run a NEW sheet is seeded with (A, B, C, …). Copied
+  /// into the sheet at creation; afterwards they are ordinary columns.
+  pub default_columns: Vec<ColumnDefinition>,
 }
 
 impl FlowFormat {
-  pub fn policy_debate() -> Self {
-    let affirmative = sheet_type(
-      "Affirmative",
-      &[
-        ("1AC", ArgumentSide::One),
-        ("1NC", ArgumentSide::Two),
-        ("2AC", ArgumentSide::One),
-        ("Block", ArgumentSide::Two),
-        ("1AR", ArgumentSide::One),
-        ("2NR", ArgumentSide::Two),
-        ("2AR", ArgumentSide::One),
-      ],
-    );
-    let negative = sheet_type(
-      "Negative",
-      &[
-        ("1NC", ArgumentSide::Two),
-        ("2AC", ArgumentSide::One),
-        ("Block", ArgumentSide::Two),
-        ("1AR", ArgumentSide::One),
-        ("2NR", ArgumentSide::Two),
-        ("2AR", ArgumentSide::One),
-      ],
-    );
+  pub fn spreadsheet() -> Self {
     Self {
       id: Uuid::new_v4(),
-      name: "Policy Debate".into(),
-      sheet_types: vec![affirmative, negative],
+      name: "Spreadsheet".into(),
+      default_columns: ["A", "B", "C", "D", "E"]
+        .iter()
+        .map(|label| ColumnDefinition {
+          id: Uuid::new_v4(),
+          label: (*label).into(),
+        })
+        .collect(),
     }
-  }
-
-  pub fn sheet_type(&self, id: SheetTypeId) -> Option<&SheetTypeDefinition> {
-    self
-      .sheet_types
-      .iter()
-      .find(|definition| definition.id == id)
-  }
-}
-
-fn sheet_type(name: &str, columns: &[(&str, ArgumentSide)]) -> SheetTypeDefinition {
-  SheetTypeDefinition {
-    id: Uuid::new_v4(),
-    name: name.into(),
-    columns: columns
-      .iter()
-      .map(|(label, side)| ColumnDefinition {
-        id: Uuid::new_v4(),
-        label: (*label).into(),
-        side: *side,
-      })
-      .collect(),
   }
 }

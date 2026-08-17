@@ -7,7 +7,7 @@
 use loro::{ExportMode, LoroDoc, UndoManager, VersionVector};
 use uuid::Uuid;
 
-use crate::format::{ArgumentSide, ColumnId, FlowFormat, RowId, SheetId, SheetTypeId};
+use crate::format::{ColumnId, FlowFormat, RowId, SheetId};
 use crate::intents::{AnnotationScope, CellSeed, FlowIntent};
 use crate::loro_schema;
 use crate::mutate::{self, MutationReport};
@@ -37,7 +37,7 @@ impl Default for FlowDocument {
 
 impl FlowDocument {
   pub fn new() -> Self {
-    Self::with_format(FlowFormat::policy_debate())
+    Self::with_format(FlowFormat::spreadsheet())
   }
 
   pub fn with_format(format: FlowFormat) -> Self {
@@ -49,7 +49,6 @@ impl FlowDocument {
       board: FlowBoardProjection {
         format,
         sheets: Vec::new(),
-        round: crate::projection::RoundMetadata::default(),
       },
       defects: Vec::new(),
       undo_manager,
@@ -167,12 +166,11 @@ impl FlowDocument {
 /// Grid conveniences: thin intent wrappers that mint fresh ids. New code that
 /// already holds ids constructs [`FlowIntent`]s directly.
 impl FlowDocument {
-  pub fn create_sheet(&mut self, name: impl Into<String>, sheet_type_id: SheetTypeId) -> anyhow::Result<SheetId> {
+  pub fn create_sheet(&mut self, name: impl Into<String>) -> anyhow::Result<SheetId> {
     let sheet_id = Uuid::new_v4();
     self.apply_intent(&FlowIntent::CreateSheet {
       sheet_id,
       name: name.into(),
-      sheet_type_id,
     })?;
     Ok(sheet_id)
   }
@@ -235,19 +233,12 @@ impl FlowDocument {
       .map(|_| ())
   }
 
-  pub fn add_column(
-    &mut self,
-    sheet_id: SheetId,
-    label: impl Into<String>,
-    side: ArgumentSide,
-    before: Option<ColumnId>,
-  ) -> anyhow::Result<ColumnId> {
+  pub fn add_column(&mut self, sheet_id: SheetId, label: impl Into<String>, before: Option<ColumnId>) -> anyhow::Result<ColumnId> {
     let column_id = Uuid::new_v4();
     self.apply_intent(&FlowIntent::AddColumn {
       sheet_id,
       column_id,
       label: label.into(),
-      side,
       before,
     })?;
     Ok(column_id)
