@@ -483,17 +483,13 @@ impl Workspace {
     cx.notify();
   }
 
-  fn insert_toolkit_hit(&mut self, hit_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+  fn insert_toolkit_hit(&mut self, hit_ix: usize, _window: &mut Window, cx: &mut Context<Self>) {
     let Some(hit) = self.toolkit_hits.get(hit_ix).cloned() else {
       return;
     };
     if let Some(editor) = self.active_editor.clone() {
       let paragraphs = toolkit_hit_insert_paragraphs(&hit);
       editor.update(cx, |editor, cx| editor.insert_toolkit_text_at_caret(paragraphs, cx));
-      return;
-    }
-    if let Some(editor) = self.active_flow.clone() {
-      editor.update(cx, |editor, cx| editor.insert_toolkit_text(&hit.title, &hit.insert_text, window, cx));
     }
   }
 

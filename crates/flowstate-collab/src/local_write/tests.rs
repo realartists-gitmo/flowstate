@@ -543,21 +543,25 @@ fn replace_matches_commits_canonically_and_undoes_as_one_unit() {
       start: TextAnchor::new(paragraph, 0),
       end: TextAnchor::new(paragraph, 3),
       styles: None,
+      replacement_override: None,
     },
     super::intents::ReplaceMatch {
       start: TextAnchor::new(paragraph, 10),
       end: TextAnchor::new(paragraph, 13),
       styles: None,
+      replacement_override: None,
     },
     super::intents::ReplaceMatch {
       start: TextAnchor::new(paragraph, 19),
       end: TextAnchor::new(paragraph, 22),
       styles: None,
+      replacement_override: None,
     },
     super::intents::ReplaceMatch {
       start: TextAnchor::new(second, 0),
       end: TextAnchor::new(second, 3),
       styles: None,
+      replacement_override: None,
     },
   ];
   let outcome = handle
@@ -601,16 +605,19 @@ fn replace_matches_edge_cases() {
         start: TextAnchor::new(paragraph, 2),
         end: TextAnchor::new(paragraph, 6),
         styles: None,
+        replacement_override: None,
       },
       super::intents::ReplaceMatch {
         start: TextAnchor::new(paragraph, 4),
         end: TextAnchor::new(paragraph, 8),
         styles: None,
+        replacement_override: None,
       },
       super::intents::ReplaceMatch {
         start: TextAnchor::new(paragraph, 8),
         end: TextAnchor::new(paragraph, 8),
         styles: None,
+        replacement_override: None,
       },
     ],
     replacement: String::new(),
@@ -624,6 +631,7 @@ fn replace_matches_edge_cases() {
       start: TextAnchor::new(paragraph, 0),
       end: TextAnchor::new(paragraph, 2),
       styles: None,
+      replacement_override: None,
     }],
     replacement: "a\nb".into(),
   });
@@ -636,6 +644,7 @@ fn replace_matches_edge_cases() {
       start: TextAnchor::new(paragraph, 3),
       end: TextAnchor::new(paragraph, 3),
       styles: None,
+      replacement_override: None,
     }],
     replacement: "y".into(),
   });
@@ -2624,6 +2633,7 @@ fn recorded_inverse_fast_undo_round_trips_mass_replace() {
       start: TextAnchor::new(projection.ids.paragraph_ids[range.start.paragraph], range.start.byte),
       end: TextAnchor::new(projection.ids.paragraph_ids[range.end.paragraph], range.end.byte),
       styles: None,
+      replacement_override: None,
     })
     .collect();
 

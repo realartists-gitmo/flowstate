@@ -325,55 +325,6 @@ mod tests {
     );
   }
 
-  /// The flow board is a column-labelled tree, and its speech attribution is
-  /// conveyed purely by horizontal position and colour on screen — so without
-  /// an explicit column index and label it is unreachable non-visually.
-  #[gpui::test]
-  fn flow_board_exposes_a_tree(cx: &mut TestAppContext) {
-    let h = support::open_workspace(cx);
-    h.update(cx, |ws, window, cx| ws.new_flow(window, cx));
-    cx.run_until_parked();
-
-    // A fresh flow panel shows the empty state ("choose a debate style"); the
-    // BOARD only exists once a flow has been added, so add one.
-    h.update(cx, |ws, window, cx| {
-      let panel = ws.flow_panels.first().cloned().expect("a flow panel is open");
-      let editor = panel.read(cx).editor();
-      editor.update(cx, |editor, cx| {
-        editor.add_flow(
-          flowstate_flow::DebateStyleFlow {
-            name: "Test flow".to_string(),
-            columns: vec!["1AC".to_string(), "1NC".to_string()],
-            columns_switch: None,
-            invert: false,
-            starter_boxes: None,
-          },
-          window,
-          cx,
-        );
-      });
-    });
-    cx.run_until_parked();
-
-    let tree = h.a11y(cx);
-    assert!(
-      !tree.by_role("Tree").is_empty(),
-      "flow board did not expose Role::Tree; roles: {:?}\n{}",
-      tree.roles(),
-      tree.dump()
-    );
-    // The box carries its column so speech attribution — conveyed on screen by
-    // horizontal position and colour alone — is available non-visually.
-    let items = tree.by_role("TreeItem");
-    assert!(
-      items
-        .iter()
-        .any(|n| n.get("aria").and_then(|a| a.get("column_index")).is_some()),
-      "no flow TreeItem carried a column index:\n{}",
-      tree.dump()
-    );
-  }
-
   /// Diagnostic: print the whole tree. Not an assertion — this is how you see
   /// what assistive technology actually gets.
   /// `cargo test -p flowstate --lib -- --ignored --nocapture dump_a11y_tree`

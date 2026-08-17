@@ -423,6 +423,7 @@ fn main() {
               start: TextAnchor::new(id, 0),
               end: TextAnchor::new(id, 1),
               styles: None,
+              replacement_override: None,
             });
           }
           paragraph_ix += 1;

@@ -13,19 +13,6 @@ impl Workspace {
     format!("Untitled{index}.db8")
   }
 
-  fn next_untitled_flow_title(&self, cx: &App) -> String {
-    let used = self
-      .flow_panels
-      .iter()
-      .filter_map(|panel| untitled_flow_index(panel.read(cx).title_text().as_ref()))
-      .collect::<HashSet<_>>();
-    let mut index = 1usize;
-    while used.contains(&index) {
-      index += 1;
-    }
-    format!("Untitled{index}.fl0")
-  }
-
   fn render_document_tab_bar_prefix(&self, _active_index: usize, _tab_count: usize, cx: &mut Context<Self>) -> impl IntoElement {
     let workspace = cx.entity().downgrade();
     h_flex()
@@ -40,9 +27,6 @@ impl Workspace {
             menu
               .item(file_menu_item(workspace.clone(), "Doc", false, |workspace, window, cx| {
                 workspace.new_document(window, cx);
-              }))
-              .item(file_menu_item(workspace.clone(), "Flow", false, |workspace, window, cx| {
-                workspace.new_flow(window, cx);
               }))
           }),
       )
@@ -68,7 +52,6 @@ impl Workspace {
     // dispatch grows beyond direct callbacks, keep the buttons mapped to
     // `CommandId::NewDocument` and `CommandId::OpenDemoDocument`.
     let new_doc = cx.listener(|workspace, _, window, cx| workspace.new_document(window, cx));
-    let new_flow = cx.listener(|workspace, _, window, cx| workspace.new_flow(window, cx));
     let open_document = cx.listener(|workspace, _, window, cx| workspace.prompt_open_document(window, cx));
     let open_search = cx.listener(|workspace, _, window, cx| workspace.open_file_search_overlay(window, cx));
     let recent_documents = self
@@ -100,13 +83,6 @@ impl Workspace {
               .label("New Doc")
               .primary()
               .on_click(new_doc),
-          )
-          .child(
-            Button::new("empty-new-flow")
-              .icon(Icon::new(IconName::Plus).text_color(cx.theme().primary_foreground))
-              .label("New Flow")
-              .primary()
-              .on_click(new_flow),
           )
           .child(
             Button::new("empty-open-document")

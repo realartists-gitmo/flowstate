@@ -50,7 +50,7 @@ struct Cli {
   #[command(subcommand)]
   command: Option<CliCommand>,
 
-  /// Optional path to the `.db8`, `.docx`, `.pdf`, or `.fl0` document to open.
+  /// Optional path to the `.db8`, `.docx`, or `.pdf` document to open.
   #[arg(value_name = "PATH")]
   path: Option<PathBuf>,
 

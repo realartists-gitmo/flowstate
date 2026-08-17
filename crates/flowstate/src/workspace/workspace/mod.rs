@@ -23,7 +23,6 @@ use gpui_component::input::{Input, InputEvent, InputState, NumberInput, NumberIn
 use gpui_component::list::ListItem;
 use gpui_component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_component::resizable::{ResizableState, h_resizable, resizable_panel, v_resizable};
-use gpui_component::scroll::ScrollableElement;
 use gpui_component::select::{SearchableVec, Select, SelectEvent, SelectState};
 use gpui_component::setting::{SettingField, SettingGroup, SettingItem, SettingPage, Settings};
 use gpui_component::slider::{Slider, SliderEvent, SliderState, SliderValue};

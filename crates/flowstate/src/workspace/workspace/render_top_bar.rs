@@ -40,13 +40,6 @@ impl Workspace {
         .iter()
         .find(|panel| panel.read(cx).id() == active_id)
         .map(|panel| panel.read(cx).ribbon().into_any_element())
-        .or_else(|| {
-          self
-            .flow_panels
-            .iter()
-            .find(|panel| panel.read(cx).id() == active_id)
-            .map(|panel| panel.read(cx).ribbon().into_any_element())
-        })
     });
     let show_placeholder = active_ribbon.is_none();
 
@@ -78,14 +71,6 @@ impl Workspace {
             panel.read(cx).ribbon().update(cx, |ribbon, cx| {
               ribbon.set_height(ribbon_height, cx);
               ribbon.set_workspace_context(workspace, panel_id, speech_active, speech_send_enabled, cx);
-            });
-          } else if let Some(panel) = self
-            .flow_panels
-            .iter()
-            .find(|panel| panel.read(cx).id() == active_id)
-          {
-            panel.read(cx).ribbon().update(cx, |ribbon, cx| {
-              ribbon.set_height(ribbon_height, cx);
             });
           }
         }

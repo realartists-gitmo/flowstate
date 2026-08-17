@@ -383,6 +383,7 @@ mod tests {
                 start: TextAnchor::new(target, byte),
                 end: TextAnchor::new(target, byte + ch.len_utf8()),
                 styles: (rng.below(3) == 0).then(|| random_styles(rng)),
+                replacement_override: None,
               });
             }
           }

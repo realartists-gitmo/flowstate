@@ -20,7 +20,7 @@ impl Workspace {
       .h_full()
       .overflow_hidden()
       .bg(cx.theme().background)
-      .when(!(self.document_panels.is_empty() && self.flow_panels.is_empty()), |this| {
+      .when(!self.document_panels.is_empty(), |this| {
         this.child(self.render_document_tab_bar(active_index, cx))
       })
       .child(
@@ -36,10 +36,7 @@ impl Workspace {
           .when_some(self.active_editor.clone(), |this, editor| {
             this.child(div().flex_1().overflow_hidden().child(editor))
           })
-          .when_some(self.active_flow.clone(), |this, editor| {
-            this.child(div().flex_1().overflow_hidden().child(editor))
-          })
-          .when(self.active_editor.is_none() && self.active_flow.is_none(), |this| {
+          .when(self.active_editor.is_none(), |this| {
             this.child(self.render_empty_state(cx))
           }),
       )

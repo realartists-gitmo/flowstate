@@ -168,7 +168,6 @@ impl PanelKind {
   fn panel_id(&self, cx: &App) -> Uuid {
     match self {
       PanelKind::Document { panel, .. } => panel.read(cx).id(),
-      PanelKind::Flow { panel, .. } => panel.read(cx).id(),
     }
   }
 }
@@ -278,16 +277,6 @@ async fn resolve_dirty_window_close(
 fn collaboration_save_prompt_for_panel(panel: &PanelKind, cx: &App) -> CollaborationSavePrompt {
   match panel {
     PanelKind::Document { editor, .. } => {
-      let editor = editor.read(cx);
-      if editor.document_path().is_none() {
-        CollaborationSavePrompt::Pathless
-      } else if editor.has_unsaved_changes() {
-        CollaborationSavePrompt::Dirty
-      } else {
-        CollaborationSavePrompt::Clean
-      }
-    },
-    PanelKind::Flow { editor, .. } => {
       let editor = editor.read(cx);
       if editor.document_path().is_none() {
         CollaborationSavePrompt::Pathless

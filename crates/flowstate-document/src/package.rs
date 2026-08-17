@@ -228,6 +228,46 @@ pub struct AssetChunk {
   pub metadata: Vec<u8>,
 }
 
+/// `Session` = an explicit save, `Auto` = autosave grain (thinned over time).
+/// Pre-tier records deserialize as `Session` — they were explicit saves.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RevisionKind {
+  Named,
+  #[default]
+  Session,
+  Auto,
+}
+
+impl RevisionKind {
+  #[must_use]
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::Named => "named",
+      Self::Session => "session",
+      Self::Auto => "auto",
+    }
+  }
+
+  #[must_use]
+  pub fn from_str_or_session(kind: &str) -> Self {
+    match kind {
+      "named" => Self::Named,
+      "auto" => Self::Auto,
+      _ => Self::Session,
+    }
+  }
+
+  #[must_use]
+  pub fn default_title(self) -> &'static str {
+    match self {
+      Self::Named => "Named checkpoint",
+      Self::Session => "Saved",
+      Self::Auto => "Autosave",
+    }
+  }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PackageRevision {
   pub revision_id: u128,

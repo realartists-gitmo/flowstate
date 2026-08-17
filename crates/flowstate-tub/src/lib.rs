@@ -35,7 +35,6 @@ const WRITER_MEMORY_BYTES: usize = 96_000_000;
 pub enum FileKind {
   Db8,
   Docx,
-  Fl0,
 }
 
 impl FileKind {
@@ -44,7 +43,6 @@ impl FileKind {
     match self {
       Self::Db8 => "db8",
       Self::Docx => "docx",
-      Self::Fl0 => "fl0",
     }
   }
 }
@@ -1142,7 +1140,6 @@ fn file_kind_from_str(extension: &str) -> Option<FileKind> {
   match extension.to_ascii_lowercase().as_str() {
     "db8" => Some(FileKind::Db8),
     "docx" => Some(FileKind::Docx),
-    "fl0" => Some(FileKind::Fl0),
     _ => None,
   }
 }

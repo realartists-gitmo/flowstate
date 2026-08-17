@@ -20,5 +20,4 @@ mod actions;
 mod collab_glue;
 mod dialogs;
 mod documents;
-mod flows_and_keystrokes;
 mod tabs_and_overlays;

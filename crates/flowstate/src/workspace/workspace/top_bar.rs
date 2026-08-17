@@ -195,9 +195,6 @@ fn file_top_bar_button(has_document: bool, cx: &mut Context<Workspace>) -> impl 
             .item(file_menu_item(workspace.clone(), "New Doc", false, |workspace, window, cx| {
               workspace.new_document(window, cx);
             }))
-            .item(file_menu_item(workspace.clone(), "New Flow", false, |workspace, window, cx| {
-              workspace.new_flow(window, cx);
-            }))
             .item(PopupMenuItem::new("New Window").on_click(|_, _, cx| {
               open_workspace_window(None, cx);
             }))

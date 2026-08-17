@@ -746,7 +746,6 @@ impl Workspace {
       WorkspaceSettingsSection::General => {
         self.autosave_enabled = false;
         self.autosave_document_generations.clear();
-        self.autosave_flow_in_flight.clear();
         for panel in &self.document_panels {
           let editor = panel.read(cx).editor();
           editor.update(cx, |editor, cx| {

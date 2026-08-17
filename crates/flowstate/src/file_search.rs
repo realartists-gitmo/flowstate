@@ -6,8 +6,8 @@ use std::{
 
 use fff_search::{FFFMode, FilePickerOptions, FuzzySearchOptions, PaginationArgs, QueryParser, file_picker::FilePicker};
 
-const SUPPORTED_DOCUMENT_EXTENSIONS: [&str; 4] = ["db8", "docx", "pdf", "fl0"];
-const EXTENSION_CONSTRAINTS: &str = "*.db8 *.docx *.pdf *.fl0";
+const SUPPORTED_DOCUMENT_EXTENSIONS: [&str; 3] = ["db8", "docx", "pdf"];
+const EXTENSION_CONSTRAINTS: &str = "*.db8 *.docx *.pdf";
 const SEARCH_OVERSAMPLE_FACTOR: usize = 16;
 
 #[derive(Clone, Debug)]
@@ -338,13 +338,12 @@ mod tests {
     write_file(dir.path(), "alpha.db8");
     write_file(dir.path(), "beta.docx");
     write_file(dir.path(), "gamma.pdf");
-    write_file(dir.path(), "delta.fl0");
     write_file(dir.path(), "notes.txt");
     write_file(dir.path(), ".hidden/secret.db8");
     write_file(dir.path(), "~$locked.docx");
 
     let search = DocumentFileSearch::new(dir.path().to_path_buf()).unwrap();
-    assert_eq!(search.indexed_file_count(), 4);
+    assert_eq!(search.indexed_file_count(), 3);
 
     let hits = search.search("", 10);
     let names = hits
@@ -352,7 +351,7 @@ mod tests {
       .filter_map(|hit| hit.path.file_name().and_then(|name| name.to_str()))
       .collect::<Vec<_>>();
 
-    assert_eq!(names, vec!["alpha.db8", "beta.docx", "delta.fl0", "gamma.pdf"]);
+    assert_eq!(names, vec!["alpha.db8", "beta.docx", "gamma.pdf"]);
   }
 
   #[test]

@@ -79,7 +79,12 @@ impl RichTextEditor {
           .paragraphs
           .get(range.start.paragraph)
           .map(|paragraph| styles_at_byte(paragraph, range.start.byte));
-        matches.push(ReplaceMatch { start, end, styles });
+        matches.push(ReplaceMatch {
+          start,
+          end,
+          styles,
+          replacement_override: None,
+        });
       } else {
         cross_paragraph_ranges.push(range);
       }

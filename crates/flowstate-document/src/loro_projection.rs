@@ -14,7 +14,7 @@ use loro::{
 use rustc_hash::FxHashMap;
 
 use crate::{
-  BLOCKS_BY_ID, FLOW_TEXT_KEY, FLOWS_BY_ID, MAIN_BODY_BLOCK_ID, MARK_DIRECT_UNDERLINE, MARK_HIGHLIGHT_STYLE, MARK_PARAGRAPH_STYLE,
+  BLOCKS_BY_ID, FLOW_ID_KEY, FLOW_TEXT_KEY, FLOWS_BY_ID, MAIN_BODY_BLOCK_ID, MARK_DIRECT_UNDERLINE, MARK_HIGHLIGHT_STYLE, MARK_PARAGRAPH_STYLE,
   MARK_RUN_SEMANTIC_STYLE, MARK_STRIKETHROUGH, MARK_VERT_ALIGN, OBJECT_REPLACEMENT, PARAGRAPHS_BY_ID, ROOT, ROOT_BODY_FLOW_ID,
   ROOT_FIRST_PARAGRAPH_ID, SECTIONS_BY_ID, TABLE_CELLS_BY_ID, TABLE_COLUMN_ORDER, TABLE_COLUMNS_BY_ID, TABLE_KEY, TABLE_ROW_ORDER,
   flowstate_document_theme, parse_cell_loro_id, parse_column_loro_id, parse_row_loro_id,
@@ -112,6 +112,56 @@ pub fn materialize_body_region(
     false,
     |block, defects| projector.object_block(block, defects),
   )?;
+  Ok(RegionRows {
+    blocks,
+    paragraph_ids,
+    block_ids,
+    defects,
+  })
+}
+
+/// Materialize ONE self-contained flow — a flow map that owns its whole text
+/// and (optionally) a scoped paragraph registry, with NO object blocks — into
+/// rows. This is the cell-rich-text materializer for the debate flow (flow
+/// architecture spec Part 2.1): each .fl0 cell embeds the exact .db8 flow
+/// shape plus a per-cell `paragraphs_by_id` registry, and projects through the
+/// SAME [`Projector::walk_flow_delta`] law as the body, so coalescing, style
+/// defaults, fabrication, and defect reporting cannot drift between the two
+/// document types.
+///
+/// Single-flow documents carry no block registry: block ids are derived from
+/// paragraph ids (`BlockId(paragraph_id.0)`), stable across peers because the
+/// paragraph ids are.
+pub fn materialize_single_flow(doc: &LoroDoc, flow: &LoroMap, paragraph_registry: Option<&LoroMap>) -> io::Result<RegionRows> {
+  let flow_id = map_string(flow, FLOW_ID_KEY)?;
+  let text = child_text(flow, FLOW_TEXT_KEY)?.ok_or_else(|| invalid(format!("flow `{flow_id}` has no text container")))?;
+  let boundary_ids = paragraph_registry
+    .map(|registry| paragraph_ids_by_boundary_in(doc, registry, &text))
+    .unwrap_or_default();
+  let delta = crate::streaming_delta::streaming_to_delta(&text);
+  let no_objects = BTreeMap::new();
+  let mut blocks = Vec::new();
+  let mut paragraph_ids = Vec::new();
+  let mut defects = Vec::new();
+  Projector::walk_flow_delta(
+    &text,
+    delta,
+    0,
+    &no_objects,
+    &flow_id,
+    Some(&boundary_ids),
+    None,
+    Some(&mut paragraph_ids),
+    None,
+    &mut blocks,
+    &mut defects,
+    false,
+    // A single flow has no object registry, so the empty position map above
+    // means this can never fire; if it somehow does, fail loudly rather than
+    // fabricate an object into a text-only cell.
+    |_, _| Err(invalid(format!("single flow `{flow_id}` contains an object block"))),
+  )?;
+  let block_ids = paragraph_ids.iter().map(|id| BlockId(id.0)).collect();
   Ok(RegionRows {
     blocks,
     paragraph_ids,
@@ -1393,11 +1443,29 @@ fn push_paragraph_projection_metadata(
 /// except boundary 0 always prefers `ROOT_FIRST_PARAGRAPH_ID` when it anchors there.
 #[hotpath::measure]
 fn paragraph_ids_by_boundary(doc: &LoroDoc, text: &LoroText) -> FxHashMap<usize, String> {
-  let mut index: FxHashMap<usize, String> = FxHashMap::default();
   let root = doc.get_map(ROOT);
   let Some(paragraphs) = child_map(&root, PARAGRAPHS_BY_ID).ok().flatten() else {
-    return index;
+    return FxHashMap::default();
   };
+  paragraph_ids_by_boundary_in(doc, &paragraphs, text)
+}
+
+/// Registry-parameterized core of [`paragraph_ids_by_boundary`]: builds the
+/// boundary→paragraph-record-key index from an EXPLICIT paragraph registry map
+/// rather than the body's `ROOT/PARAGRAPHS_BY_ID`. This is what lets a nested,
+/// self-contained flow (a debate-flow CELL's rich text — flow architecture
+/// spec Part 2.1) carry its OWN scoped registry: scoping keeps a cell
+/// keystroke O(cell paragraphs), not O(all paragraphs on the board). The
+/// selection law is identical (cursor-container filter, sorted-key first-wins,
+/// root-first special case, dead-anchor fallbacks) because the body path
+/// delegates here — one implementation, two roots.
+#[allow(
+  clippy::implicit_hasher,
+  reason = "the index is shared with the internal flow walker, whose boundary indexes are FxHashMap by construction"
+)]
+#[hotpath::measure]
+pub fn paragraph_ids_by_boundary_in(doc: &LoroDoc, paragraphs: &LoroMap, text: &LoroText) -> FxHashMap<usize, String> {
+  let mut index: FxHashMap<usize, String> = FxHashMap::default();
   // §act-five P4: ONE pass over the paragraph registry. The old shape scanned it
   // TWICE (once inside `boundary_cursor_positions`, once in the loop) and decoded
   // each cursor twice (there, then again in `live_cursor_pos`). Gather the decoded
@@ -1407,11 +1475,11 @@ fn paragraph_ids_by_boundary(doc: &LoroDoc, text: &LoroText) -> FxHashMap<usize,
   // dead-anchor / id-less-cursor fallbacks are all preserved bit-identically.
   let container = text.id();
   // §perf-heaven T4: consume the sorted keys by value (no per-key clone).
-  let sorted_keys = map_keys(&paragraphs);
+  let sorted_keys = map_keys(paragraphs);
   let mut cands: Vec<(String, Option<Cursor>, Option<Cursor>)> = Vec::with_capacity(sorted_keys.len());
   let mut ids: Vec<ID> = Vec::new();
   for key in sorted_keys {
-    let Some(record) = child_map(&paragraphs, &key).ok().flatten() else {
+    let Some(record) = child_map(paragraphs, &key).ok().flatten() else {
       continue;
     };
     let decode = |field: &str| {
@@ -1589,7 +1657,10 @@ fn map_keys(map: &LoroMap) -> Vec<String> {
   keys
 }
 
-fn loro_id_u128(id: &str) -> u128 {
+/// blake3 hash of the whole key. Public because it is the SINGLE derivation
+/// shared by projections (fabricated ids), repair writers, and executors that
+/// must invert projection ids back to record keys.
+pub fn loro_id_u128(id: &str) -> u128 {
   if let Some(value) = id
     .rsplit('.')
     .next()

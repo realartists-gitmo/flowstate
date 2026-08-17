@@ -17,7 +17,6 @@ fff-search = { workspace = true }
 flowstate-document = { workspace = true }
 flowstate-docx = { workspace = true }
 flowstate-collab = { workspace = true }
-flowstate-flow = { workspace = true }
 flowstate-tub = { workspace = true }
 futures-util = "0.3"
 gpui = { workspace = true }
@@ -50,7 +49,6 @@ hotpath = [
   "hotpath/hotpath",
   "flowstate-document/hotpath",
   "flowstate-docx/hotpath",
-  "flowstate-flow/hotpath",
   "flowstate-collab/hotpath",
 ]
 hotpath-cpu = [
@@ -58,7 +56,6 @@ hotpath-cpu = [
   "hotpath/hotpath-cpu",
   "flowstate-document/hotpath-cpu",
   "flowstate-docx/hotpath-cpu",
-  "flowstate-flow/hotpath-cpu",
   "flowstate-collab/hotpath-cpu",
 ]
 hotpath-alloc = [
@@ -66,7 +63,6 @@ hotpath-alloc = [
   "hotpath/hotpath-alloc",
   "flowstate-document/hotpath-alloc",
   "flowstate-docx/hotpath-alloc",
-  "flowstate-flow/hotpath-alloc",
   "flowstate-collab/hotpath-alloc",
 ]
 profiler = ["hotpath", "hotpath-alloc", "hotpath-cpu"]

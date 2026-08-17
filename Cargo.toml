@@ -31,8 +31,8 @@ fff-search = "0.8.2-nightly.ffb39a8"
 flowstate-document = { version = "0.1.0", path = "crates/flowstate-document" }
 flowstate-docx = { version = "0.1.0", path = "crates/flowstate-docx" }
 flowstate-fidelity = { version = "0.1.0", path = "crates/flowstate-fidelity" }
-flowstate-collab = { version = "0.1.0", path = "crates/flowstate-collab" }
 flowstate-flow = { version = "0.1.0", path = "crates/flowstate-flow" }
+flowstate-collab = { version = "0.1.0", path = "crates/flowstate-collab" }
 flowstate-tub = { version = "0.1.0", path = "crates/flowstate-tub" }
 gpui-flowtext = { version = "0.1.0", path = "crates/gpui-flowtext" }
 # gpui is consumed from zed's git tree, not crates.io: the published 0.2.2

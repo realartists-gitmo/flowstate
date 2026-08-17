@@ -56,12 +56,3 @@ fn untitled_index(title: &str) -> Option<usize> {
   number.parse::<usize>().ok().filter(|index| *index > 0)
 }
 
-#[hotpath::measure]
-fn untitled_flow_index(title: &str) -> Option<usize> {
-  let title = title.strip_suffix(".fl0").unwrap_or(title);
-  let number = title.strip_prefix("Untitled")?;
-  if number.is_empty() {
-    return None;
-  }
-  number.parse::<usize>().ok().filter(|index| *index > 0)
-}

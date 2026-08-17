@@ -10,14 +10,17 @@ pub mod table_topology;
 
 pub use gpui_flowtext::*;
 pub use loro_import::{
-  ImportedLoroDocument, document_to_loro, import_document_projection, import_paragraphs_as_loro, write_imported_document_as_loro_db8,
+  ImportedLoroDocument, document_to_loro, import_document_projection, import_paragraphs_as_loro, paragraph_style_value,
+  replace_single_flow_from_document, write_imported_document_as_loro_db8,
 };
 pub use loro_projection::{
-  ChangedContainerOwner, RegionRows, document_from_loro, document_from_loro_with_defects, materialize_body_region, materialize_table_block,
-  object_input_blocks_for_ids, object_input_blocks_from_loro, owner_of_changed_container, section_page_attrs,
+  ChangedContainerOwner, RegionRows, document_from_loro, document_from_loro_with_defects, loro_id_u128, materialize_body_region,
+  materialize_single_flow, materialize_table_block, object_input_blocks_for_ids, object_input_blocks_from_loro, owner_of_changed_container,
+  paragraph_ids_by_boundary_in, section_page_attrs,
 };
 pub use loro_schema::{
   BLOCKS_BY_ID, BODY_FLOW_ID, COMMENTS_BY_ID, FLOW_ATTRS_KEY, FLOW_ID_KEY, FLOW_KIND_KEY, FLOW_TEXT_KEY, FLOWS_BY_ID, MAIN_BODY_BLOCK_ID,
+  configure_text_styles,
   MARK_DIRECT_UNDERLINE, MARK_HIGHLIGHT_STYLE, MARK_PARAGRAPH_STYLE, MARK_RUN_SEMANTIC_STYLE, MARK_STRIKETHROUGH, MARK_VERT_ALIGN, META,
   OBJECT_REPLACEMENT, PARAGRAPHS_BY_ID, PageNumberFormat, REPLICAS_BY_ID, ROOT, ROOT_BODY_FLOW_ID, ROOT_FIRST_PARAGRAPH_ID,
   SECTION_ATTR_COLUMNS, SECTION_ATTR_FOOTER_FLOW_ID, SECTION_ATTR_HEADER_FLOW_ID, SECTION_ATTR_MARGIN_BOTTOM, SECTION_ATTR_MARGIN_LEFT,
@@ -31,8 +34,8 @@ pub use loro_schema::{
 };
 pub use package::{
   AssetChunk, ChunkRef, DEFAULT_UPDATE_SEGMENT_COMPACTION_THRESHOLD, DocumentPackage, DocumentPackageManifest, IntegrityIndexEntry,
-  LORO_PACKAGE_FORMAT_VERSION, LORO_SCHEMA_VERSION, PackageRevision, ProjectionCacheChunk, SchemaMigrationRecord, SearchUnitChunk,
-  ThumbnailChunk, loro_db8_bytes, read_loro_db8, write_loro_db8,
+  LORO_PACKAGE_FORMAT_VERSION, LORO_SCHEMA_VERSION, PackageRevision, ProjectionCacheChunk, RevisionKind, SchemaMigrationRecord,
+  SearchUnitChunk, ThumbnailChunk, loro_db8_bytes, read_loro_db8, write_loro_db8,
 };
 pub use projection_defects::{ProjectionDefect, TableTopologyKind};
 

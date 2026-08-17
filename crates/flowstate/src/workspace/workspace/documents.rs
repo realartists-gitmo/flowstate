@@ -163,10 +163,8 @@ impl Workspace {
       document_runtimes: FxHashMap::default(), // §perf: FxHash for trusted Uuid keys
       pending_authority_panels: FxHashSet::default(),
       document_runtime_flush_pending: FxHashSet::default(), // §perf: FxHash for trusted Uuid keys
-      flow_panels: Vec::new(),
       active_document_id: None,
       active_editor: None,
-      active_flow: None,
       ribbon_collapsed: false,
       outline_collapsed: false,
       toolkit_collapsed: false,
@@ -202,7 +200,6 @@ impl Workspace {
       autosave_enabled: load_autosave(),
       autosave_document_generations: FxHashMap::default(), // §perf: FxHash for trusted Uuid keys
       autosave_pending_generation: FxHashMap::default(),   // §act-five P9-throttle debounce
-      autosave_flow_in_flight: FxHashSet::default(),       // §perf: FxHash for trusted Uuid keys
       collaboration_dialog: None,
       revision_dialog: None,
       comment_dialog: None,
@@ -362,7 +359,6 @@ impl Workspace {
     ));
     self.active_document_id = Some(id);
     self.active_editor = Some(editor);
-    self.active_flow = None;
     self.document_panels.push(panel.clone());
     Ok(panel)
   }
@@ -1075,6 +1071,7 @@ impl Workspace {
       .document_panels
       .iter()
       .find(|panel| panel.read(cx).id() == panel_id)
+      .cloned()
       .map(|panel| {
         let editor = panel.read(cx).editor();
         PanelKind::Document { panel, editor }

@@ -14,7 +14,7 @@
 use std::ops::Range;
 
 use crate::{
-  BlockId, ColumnId, DocumentOffset, DocumentProjection, EditorSelection, InputBlock, InputBlockAlignment, InputImageSizing, InputParagraph,
+  BlockId, CellId, ColumnId, DocumentOffset, DocumentProjection, EditorSelection, InputBlock, InputBlockAlignment, InputImageSizing, InputParagraph,
   InputTableCell, InputTableColumnWidth, InputTableRow, ParagraphId, ParagraphStyle, ProjectionPatchBatch, RowId, RunStyles, SelectionAffinity,
   VisualGravity,
 };
@@ -179,6 +179,11 @@ pub struct ReplaceMatch {
   pub start: TextAnchor,
   pub end: TextAnchor,
   pub styles: Option<RunStyles>,
+  /// R12-B: this match's effective replacement when it differs from the
+  /// intent's shared `replacement` — regex capture expansion (`$1`) makes
+  /// every match's replacement distinct. `None` = use the shared string.
+  /// Same structural-character law as the shared replacement.
+  pub replacement_override: Option<String>,
 }
 
 /// Replace every anchored same-paragraph match with `replacement` (find &
@@ -280,6 +285,50 @@ pub enum TableIntent {
   },
 }
 
+/// Fine-grained cell-text edit. Addressing is cell-local POSITIONAL
+/// (paragraph-in-cell index + byte), pinned by `expected_text_hash`: the op
+/// REJECTS (never mis-splices) when the cell's text changed since the
+/// editor's snapshot, and the editor re-resolves and retries. Cells
+/// containing nested tables refuse (positional addressing cannot see object
+/// anchors) and stay on the whole-cell path.
+#[derive(Clone, Debug)]
+pub struct TableCellTextIntent {
+  pub table: BlockId,
+  pub cell: CellId,
+  /// Hash of the cell's canonical flow text at the editor's snapshot.
+  /// In-process only — never serialized.
+  pub expected_text_hash: u64,
+  pub op: TableCellTextOp,
+}
+
+/// One cell-text operation. Positions are `(paragraph index within the cell,
+/// BYTE offset within that paragraph's text)`.
+#[derive(Clone, Debug)]
+pub enum TableCellTextOp {
+  Insert {
+    paragraph: usize,
+    byte: usize,
+    text: String,
+    style_override: Option<RunStyles>,
+  },
+  Delete {
+    start: (usize, usize),
+    end: (usize, usize),
+  },
+  Split {
+    at: (usize, usize),
+    inherited_style: ParagraphStyle,
+  },
+  /// Join paragraph `second` into the one before it.
+  Join { second: usize },
+  SetMarks {
+    start: (usize, usize),
+    end: (usize, usize),
+    styles: RunStyles,
+  },
+  SetParagraphStyle { paragraph: usize, style: ParagraphStyle },
+}
+
 /// The complete intent vocabulary. Single dispatch point for the write path,
 /// fuzzing, and counters; the per-intent structs above are the public API
 /// surface behind [`LocalWriteAuthority`].
@@ -303,6 +352,7 @@ pub enum LocalIntent {
   ReplaceImageCaption(ReplaceImageCaptionIntent),
   SetImageLayout(SetImageLayoutIntent),
   Table(TableIntent),
+  TableCellText(TableCellTextIntent),
 }
 
 impl LocalIntent {
@@ -329,6 +379,7 @@ impl LocalIntent {
       Self::ReplaceImageCaption(_) => "replace-image-caption",
       Self::SetImageLayout(_) => "set-image-layout",
       Self::Table(_) => "table-op",
+      Self::TableCellText(_) => "table-cell-text",
     }
   }
 

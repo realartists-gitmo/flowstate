@@ -35,6 +35,8 @@ pub struct RuntimeCommentMessage {
   pub body: String,
   pub created_at_unix_secs: i64,
   pub updated_at_unix_secs: i64,
+  /// C-S1: tombstoned by its author — render "message deleted", keep shape.
+  pub deleted: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]

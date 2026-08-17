@@ -260,7 +260,7 @@ impl Workspace {
   }
 
   fn dirty_panels(&self, cx: &App) -> Vec<PanelKind> {
-    let mut panels = self
+    self
       .document_panels
       .iter()
       .filter_map(|panel| {
@@ -273,8 +273,7 @@ impl Workspace {
           editor: panel_state.editor(),
         })
       })
-      .collect::<Vec<_>>();
-    panels
+      .collect()
   }
 
   fn activate_document_id(&mut self, panel_id: Uuid, cx: &mut Context<Self>) {
@@ -298,8 +297,8 @@ impl Workspace {
   fn active_document_index(&self, cx: &App) -> Option<usize> {
     let active_id = self.active_document_id?;
     // §perf: find the active tab's index by scanning panel ids in tab order (document
-    // panels then flow panels, then stably pinned-first) without materializing labeled
-    // tabs (truncate + format! per tab). Mirrors document_tabs/ordered_document_tabs exactly.
+    // panels, then stably pinned-first) without materializing labeled tabs
+    // (truncate + format! per tab). Mirrors document_tabs/ordered_document_tabs exactly.
     let mut ids: Vec<Uuid> = self
       .document_panels
       .iter()
@@ -385,13 +384,12 @@ impl Workspace {
 
   fn activate_tab_shortcut(&mut self, index: usize, cx: &mut Context<Self>) {
     // §perf: build the set of live panel ids once instead of rebuilding the entire
-    // labeled tab Vec for every pinned id. A tab exists for each document/flow panel,
+    // labeled tab Vec for every pinned id. A tab exists for each document panel,
     // so membership in this set is equivalent to matching some tab.id.
     let live_ids: FxHashSet<Uuid> = self
       .document_panels
       .iter()
       .map(|panel| panel.read(cx).id())
-      .chain(self.flow_panels.iter().map(|panel| panel.read(cx).id()))
       .collect();
     let pinned = self
       .pinned_document_ids
@@ -530,7 +528,7 @@ impl Workspace {
   }
 
   fn document_tabs(&self, cx: &App) -> Vec<DocumentTab> {
-    let mut tabs = self
+    let tabs = self
       .document_panels
       .iter()
       .map(|panel| {

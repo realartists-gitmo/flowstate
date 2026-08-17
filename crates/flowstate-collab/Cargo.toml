@@ -11,6 +11,7 @@ base64 = { workspace = true }
 blake3 = "1.8.5"
 flowstate-document.workspace = true
 flowstate-fidelity.workspace = true
+flowstate-flow.workspace = true
 gpui-flowtext = { workspace = true }
 hotpath.workspace = true
 iroh = { workspace = true }
@@ -33,9 +34,9 @@ uuid = { workspace = true }
 zstd.workspace = true
 
 [features]
-hotpath = ["hotpath/hotpath", "flowstate-document/hotpath", "gpui-flowtext/hotpath"]
-hotpath-cpu = ["hotpath", "hotpath/hotpath-cpu", "flowstate-document/hotpath-cpu", "gpui-flowtext/hotpath-cpu"]
-hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc", "flowstate-document/hotpath-alloc", "gpui-flowtext/hotpath-alloc"]
+hotpath = ["hotpath/hotpath", "flowstate-document/hotpath", "flowstate-flow/hotpath", "gpui-flowtext/hotpath"]
+hotpath-cpu = ["hotpath", "hotpath/hotpath-cpu", "flowstate-document/hotpath-cpu", "flowstate-flow/hotpath-cpu", "gpui-flowtext/hotpath-cpu"]
+hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc", "flowstate-document/hotpath-alloc", "flowstate-flow/hotpath-alloc", "gpui-flowtext/hotpath-alloc"]
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

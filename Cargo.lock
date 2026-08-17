@@ -3163,7 +3163,6 @@ dependencies = [
  "flowstate-document",
  "flowstate-docx",
  "flowstate-fidelity",
- "flowstate-flow",
  "flowstate-tub",
  "futures-util",
  "gpui",
@@ -3201,6 +3200,7 @@ dependencies = [
  "dispatch2",
  "flowstate-document",
  "flowstate-fidelity",
+ "flowstate-flow",
  "futures-util",
  "gpui",
  "gpui-flowtext",
@@ -3313,12 +3313,14 @@ name = "flowstate-flow"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "flowstate-document",
  "hotpath",
- "rustc-hash 2.1.2",
+ "loro",
+ "postcard",
  "serde",
- "serde_json",
  "tracing",
  "uuid",
+ "zstd",
 ]
 
 [[package]]

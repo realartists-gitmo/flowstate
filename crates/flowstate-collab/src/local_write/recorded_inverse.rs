@@ -376,32 +376,40 @@ fn capture_replace_matches(core: &CrdtRuntime, plan: &ResolvedPlan) -> Option<Pe
   if matches.len() < MIN_REPLACE_MATCHES {
     return None;
   }
-  let repl_len = replacement.chars().count();
   let body = body_text(core.doc());
 
   // Post-position q for each original start, via an ascending cumulative shift.
+  // Each match may carry its own effective replacement (R12-B regex capture
+  // expansion), so the shift uses per-match lengths.
   let mut q_by_start: std::collections::HashMap<usize, usize> = std::collections::HashMap::with_capacity(matches.len());
-  let mut ascending: Vec<(usize, usize)> = matches
+  let mut ascending: Vec<(usize, usize, usize)> = matches
     .iter()
-    .map(|(start, end, _)| (start.body_unicode, end.body_unicode - start.body_unicode))
+    .map(|entry| {
+      (
+        entry.start.body_unicode,
+        entry.end.body_unicode - entry.start.body_unicode,
+        entry.replacement(replacement).chars().count(),
+      )
+    })
     .collect();
-  ascending.sort_by_key(|(start, _)| *start);
+  ascending.sort_by_key(|(start, ..)| *start);
   let mut shift: isize = 0;
-  for (start, orig_len) in &ascending {
+  for (start, orig_len, repl_len) in &ascending {
     let q = usize::try_from(*start as isize + shift).ok()?;
     if q_by_start.insert(*start, q).is_some() {
       return None; // duplicate start — should be pruned already; decline.
     }
-    shift += repl_len as isize - *orig_len as isize;
+    shift += *repl_len as isize - *orig_len as isize;
   }
 
   let mut undo_splices = Vec::with_capacity(matches.len());
   let mut redo_finalize = Vec::with_capacity(matches.len());
   let mut undo_ranges = Vec::with_capacity(matches.len());
   let mut redo_ranges = Vec::with_capacity(matches.len());
-  for (start, end, _styles) in matches {
-    let s = start.body_unicode;
-    let orig_len = end.body_unicode - s;
+  for entry in matches {
+    let s = entry.start.body_unicode;
+    let orig_len = entry.end.body_unicode - s;
+    let repl_len = entry.replacement(replacement).chars().count();
     let q = *q_by_start.get(&s)?;
     // Original rich content (text + marks), captured pre-op — the undo insert.
     let orig_delta = body.slice_delta(s, s + orig_len, PosType::Unicode).ok()?;
