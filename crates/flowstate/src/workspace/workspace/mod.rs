@@ -44,16 +44,13 @@ use crate::app_settings::{
 };
 use crate::commands::CommandId;
 use crate::docx_conversion::{convert_docx_to_document, import_docx_to_loro};
-use crate::flow::{FlowEditor, FlowPanel};
 use crate::rich_text_element::{
   ArmedInlineTool, CustomParagraphBorder, DocumentProjection, DocumentTheme, InputParagraph, InputRun, ParagraphStyle, RichTextDocumentElement,
   RichTextEditor, Save, SectionKind, ThemeUnderline, ZoomIn, ZoomOut, document_from_input, document_text_slice, flowstate_document_theme,
   paragraph_byte_range, paragraph_index_for_id,
 };
 use crate::workspace::document_panel::DocumentPanel;
-use crate::workspace::file_management::{
-  UNTITLED_DOCUMENT_NAME, UNTITLED_FLOW_NAME, default_save_directory, new_blank_document, normalize_db8_path, normalize_fl0_path,
-};
+use crate::workspace::file_management::{UNTITLED_DOCUMENT_NAME, default_save_directory, new_blank_document, normalize_db8_path};
 use crate::workspace::file_search_overlay::FileSearchOverlay;
 use crate::workspace::icons::{AppIcon, icon_button};
 use flowstate_tub::{SearchHit, SearchUnitKind, TubFile, TubIndex, TubTreeNode};
@@ -76,10 +73,8 @@ pub struct Workspace {
   /// cached projection whose authority runtime has not yet attached (phase G).
   /// Editing is inert until attach; session-persist + autosave skip them.
   pending_authority_panels: FxHashSet<Uuid>,
-  flow_panels: Vec<Entity<FlowPanel>>,
   active_document_id: Option<Uuid>,
   active_editor: Option<Entity<RichTextEditor>>,
-  active_flow: Option<Entity<FlowEditor>>,
   ribbon_collapsed: bool,
   outline_collapsed: bool,
   toolkit_collapsed: bool,
@@ -120,7 +115,6 @@ pub struct Workspace {
   /// SCHEDULED for. A newer edit overwrites it, so the trailing timer coalesces a
   /// burst into ONE checkpoint instead of a full checkpoint per keystroke.
   autosave_pending_generation: FxHashMap<Uuid, u64>,
-  autosave_flow_in_flight: FxHashSet<Uuid>,
   collaboration_dialog: Option<Entity<crate::collab::share_dialog::CollabShareDialog>>,
   revision_dialog: Option<Entity<crate::workspace::revision_dialog::RevisionDialog>>,
   comment_dialog: Option<Entity<crate::workspace::comment_dialog::CommentDialog>>,

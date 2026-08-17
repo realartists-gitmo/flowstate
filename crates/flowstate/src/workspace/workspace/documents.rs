@@ -471,23 +471,9 @@ impl Workspace {
     self.save_current_outline_state(cx);
     self.active_document_id = Some(panel_id);
     self.active_editor = Some(editor);
-    self.active_flow = None;
     self.restore_outline_state_for_document(panel_id, cx);
     self.outline_cache = None;
     self.refresh_outline_tree(cx);
-    self.persist_temporary_workspace_session(cx);
-    cx.notify();
-  }
-
-  pub fn set_active_flow(&mut self, panel_id: Uuid, editor: Entity<FlowEditor>, cx: &mut Context<Self>) {
-    self.save_current_outline_state(cx);
-    self.active_document_id = Some(panel_id);
-    self.active_editor = None;
-    self.active_flow = Some(editor);
-    self.outline_cache = None;
-    self.outline_viewport_paragraph = None;
-    self.outline_active_paragraph = None;
-    self.outline_scrolled_paragraph = None;
     self.persist_temporary_workspace_session(cx);
     cx.notify();
   }
@@ -520,19 +506,8 @@ impl Workspace {
       let editor = panel.read(cx).editor();
       editor.update(cx, |editor, _| editor.dispose_for_close());
     }
-    if let Some(panel) = self
-      .flow_panels
-      .iter()
-      .find(|panel| panel.read(cx).id() == panel_id)
-    {
-      let editor = panel.read(cx).editor();
-      editor.update(cx, |editor, _| editor.discard_recovery_file());
-    }
     self
       .document_panels
-      .retain(|panel| panel.read(cx).id() != panel_id);
-    self
-      .flow_panels
       .retain(|panel| panel.read(cx).id() != panel_id);
     self.editor_subscriptions.retain(|(id, _)| *id != panel_id);
     self.pinned_document_ids.retain(|id| *id != panel_id);
@@ -545,15 +520,9 @@ impl Workspace {
       if let Some(panel) = self.document_panels.last() {
         self.active_document_id = Some(panel.read(cx).id());
         self.active_editor = Some(panel.read(cx).editor());
-        self.active_flow = None;
-      } else if let Some(panel) = self.flow_panels.last() {
-        self.active_document_id = Some(panel.read(cx).id());
-        self.active_editor = None;
-        self.active_flow = Some(panel.read(cx).editor());
       } else {
         self.active_document_id = None;
         self.active_editor = None;
-        self.active_flow = None;
       }
       self.outline_cache = None;
       self.outline_viewport_paragraph = self
@@ -582,10 +551,6 @@ impl Workspace {
 
   pub fn new_document(&mut self, window: &mut Window, cx: &mut Context<Self>) {
     self.add_document_panel(new_blank_document(), None, window, cx);
-  }
-
-  pub fn new_flow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-    self.add_flow_panel(flowstate_flow::FlowDocument::new(), None, window, cx);
   }
 
   pub fn open_demo_document(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -674,14 +639,6 @@ impl Workspace {
             });
           });
         },
-        Ok(LoadedWorkspaceDocument::Flow { document, path }) => {
-          let _ = window_handle.update(cx, |_, window, cx| {
-            let _ = workspace.update(cx, |workspace, cx| {
-              workspace.record_recent_document(path.clone(), cx);
-              workspace.add_flow_panel(document, Some(path), window, cx);
-            });
-          });
-        },
         Err(error) => {
           let detail = format!("Failed to open {}: {error}", path_for_error.display());
           let _ = window_handle.update(cx, |_, window, cx| {
@@ -721,25 +678,6 @@ impl Workspace {
         collapsed_outline_items,
         outline_scrolled_paragraph,
         viewport_paragraph,
-      });
-    }
-
-    for panel in &self.flow_panels {
-      let panel = panel.read(cx);
-      let Some(path) = panel.editor().read(cx).document_path().cloned() else {
-        continue;
-      };
-      let entry_index = entries.len();
-      panel_id_to_entry_index.insert(panel.id(), entry_index);
-      if Some(panel.id()) == self.active_document_id {
-        active_index = Some(entry_index);
-      }
-      entries.push(TemporaryWorkspaceSessionEntry {
-        kind: TemporaryWorkspaceSessionEntryKind::Flow,
-        path,
-        collapsed_outline_items: Vec::new(),
-        outline_scrolled_paragraph: None,
-        viewport_paragraph: None,
       });
     }
 
@@ -796,14 +734,7 @@ impl Workspace {
       if !entry.path.exists() {
         continue;
       }
-      let loaded = if matches!(entry.kind, TemporaryWorkspaceSessionEntryKind::Flow) && is_flow_path(&entry.path) {
-        Some(LoadedWorkspaceDocument::Flow {
-          document: flowstate_flow::load_flow_document_or_new(&entry.path),
-          path: entry.path,
-        })
-      } else {
-        load_workspace_document(entry.path).ok()
-      };
+      let loaded = load_workspace_document(entry.path).ok();
       let Some(loaded) = loaded else {
         continue;
       };
@@ -830,10 +761,6 @@ impl Workspace {
           });
           viewport_scrolls.push((panel_id, entry.viewport_paragraph));
           panel_id
-        },
-        LoadedWorkspaceDocument::Flow { document, path } => {
-          let panel = self.create_flow_panel(document, Some(path), window, cx);
-          panel.read(cx).id()
         },
       };
       if Some(entry_index) == active_index {
@@ -884,7 +811,7 @@ impl Workspace {
     let paths = self
       .recent_documents
       .iter()
-      .filter(|path| !self.recent_document_previews.contains_key(*path) && !is_flow_path(path))
+      .filter(|path| !self.recent_document_previews.contains_key(*path))
       .cloned()
       .collect::<Vec<_>>();
     if paths.is_empty() {
@@ -942,7 +869,7 @@ impl Workspace {
       files: true,
       directories: false,
       multiple: false,
-      prompt: Some("Open .db8, .docx, .pdf, or .fl0 document".into()),
+      prompt: Some("Open .db8, .docx, or .pdf document".into()),
     });
     let window_handle = window.window_handle();
     cx.spawn(async move |workspace, cx| {
@@ -1009,45 +936,6 @@ impl Workspace {
     }
   }
 
-  fn create_flow_panel(
-    &mut self,
-    document: flowstate_flow::FlowDocument,
-    path: Option<PathBuf>,
-    window: &mut Window,
-    cx: &mut Context<Self>,
-  ) -> Entity<FlowPanel> {
-    let editor = cx.new(|cx| FlowEditor::new_with_path(document, path.clone(), window, cx));
-    let workspace = cx.entity().downgrade();
-    let title = path
-      .as_ref()
-      .and_then(|path| path.file_name())
-      .map(|name| name.to_string_lossy().to_string())
-      .or_else(|| Some(self.next_untitled_flow_title(cx)));
-    let panel = cx.new(|cx| FlowPanel::new_with_title(title, path, editor.clone(), workspace, window, cx));
-    let id = panel.read(cx).id();
-    self.editor_subscriptions.push((
-      id,
-      cx.observe(&editor, move |workspace, editor, cx| {
-        workspace.maybe_autosave_flow(id, editor.clone(), cx);
-      }),
-    ));
-    self.active_document_id = Some(id);
-    self.active_editor = None;
-    self.active_flow = Some(editor);
-    self.flow_panels.push(panel.clone());
-    self.outline_cache = None;
-    self.outline_viewport_paragraph = None;
-    self.outline_active_paragraph = None;
-    self.outline_scrolled_paragraph = None;
-    panel
-  }
-
-  fn add_flow_panel(&mut self, document: flowstate_flow::FlowDocument, path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
-    self.create_flow_panel(document, path, window, cx);
-    self.persist_temporary_workspace_session(cx);
-    cx.notify();
-  }
-
   /// §act-three C (phase V): open a panel painting a cheap cached projection
   /// with NO write authority — a read-only display surface (scroll/select/copy
   /// work; editing is inert). The authority runtime attaches later via
@@ -1093,7 +981,6 @@ impl Workspace {
     self.pending_authority_panels.insert(id);
     self.active_document_id = Some(id);
     self.active_editor = Some(editor);
-    self.active_flow = None;
     self.document_panels.push(panel);
     cx.notify();
     id
@@ -1184,26 +1071,13 @@ impl Workspace {
   }
 
   pub fn close_document_panel(&mut self, panel_id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
-    let document_panel = self
+    let Some(panel_kind) = self
       .document_panels
       .iter()
       .find(|panel| panel.read(cx).id() == panel_id)
-      .cloned();
-    let flow_panel = self
-      .flow_panels
-      .iter()
-      .find(|panel| panel.read(cx).id() == panel_id)
-      .cloned();
-    let Some(panel_kind) = document_panel
       .map(|panel| {
         let editor = panel.read(cx).editor();
         PanelKind::Document { panel, editor }
-      })
-      .or_else(|| {
-        flow_panel.map(|panel| {
-          let editor = panel.read(cx).editor();
-          PanelKind::Flow { panel, editor }
-        })
       })
     else {
       return;
@@ -1348,31 +1222,11 @@ impl Workspace {
       cx.notify();
       return;
     }
-    if let Some(editor) = self.active_flow.clone() {
-      if editor.read(cx).document_path().is_none() {
-        self.prompt_save_active_flow_as(editor, window, cx);
-        return;
-      }
-      let save_task = editor.update(cx, |editor, cx| editor.save(cx));
-      let window_handle = window.window_handle();
-      cx.spawn(async move |_, cx| {
-        if let Err(error) = save_task.await {
-          let detail = error.to_string();
-          let _ = window_handle.update(cx, |_, window, cx| {
-            window.prompt(PromptLevel::Critical, "Save failed", Some(&detail), &[PromptButton::ok("Ok")], cx)
-          });
-        }
-      })
-      .detach();
-      cx.notify();
-    }
   }
 
   pub fn save_active_as(&mut self, window: &mut Window, cx: &mut Context<Self>) {
     if let Some(editor) = self.active_editor.clone() {
       self.prompt_save_active_as(editor, window, cx);
-    } else if let Some(editor) = self.active_flow.clone() {
-      self.prompt_save_active_flow_as(editor, window, cx);
     }
   }
 
@@ -1469,28 +1323,6 @@ impl Workspace {
     .detach();
   }
 
-  fn maybe_autosave_flow(&mut self, panel_id: Uuid, editor: Entity<FlowEditor>, cx: &mut Context<Self>) {
-    if !self.autosave_enabled
-      || self.autosave_flow_in_flight.contains(&panel_id)
-      || editor.read(cx).document_path().is_none()
-      || !editor.read(cx).has_unsaved_changes()
-    {
-      return;
-    }
-
-    self.autosave_flow_in_flight.insert(panel_id);
-    let save_task = editor.update(cx, |editor, cx| editor.save(cx));
-    cx.spawn(async move |workspace, cx| {
-      if let Err(error) = save_task.await {
-        eprintln!("flow autosave failed: {error}");
-      }
-      let _ = workspace.update(cx, |workspace, _| {
-        workspace.autosave_flow_in_flight.remove(&panel_id);
-      });
-    })
-    .detach();
-  }
-
   fn prompt_save_active_as(&mut self, editor: Entity<RichTextEditor>, window: &mut Window, cx: &mut Context<Self>) {
     let Some(panel_id) = self.active_document_id else {
       return;
@@ -1542,53 +1374,6 @@ impl Workspace {
     .detach();
   }
 
-  fn prompt_save_active_flow_as(&mut self, editor: Entity<FlowEditor>, window: &mut Window, cx: &mut Context<Self>) {
-    let Some(panel_id) = self.active_document_id else {
-      return;
-    };
-    let save_path = cx.prompt_for_new_path(&default_save_directory(), Some(UNTITLED_FLOW_NAME));
-    let window_handle = window.window_handle();
-    cx.spawn(async move |workspace, cx| {
-      let path = match save_path.await {
-        Ok(Ok(Some(path))) => normalize_fl0_path(path),
-        Ok(Ok(None)) => return,
-        Ok(Err(error)) => {
-          let detail = error.to_string();
-          let _ = window_handle.update(cx, |_, window, cx| {
-            window.prompt(PromptLevel::Critical, "Save failed", Some(&detail), &[PromptButton::ok("Ok")], cx)
-          });
-          return;
-        },
-        Err(error) => {
-          eprintln!("save dialog was canceled before completion: {error}");
-          return;
-        },
-      };
-
-      match editor.update(cx, |editor, cx| editor.save_as(path.clone(), cx)).await {
-        Ok(()) => {
-          let _ = workspace.update(cx, |workspace, cx| {
-            if let Some(panel) = workspace
-              .flow_panels
-              .iter()
-              .find(|panel| panel.read(cx).id() == panel_id)
-            {
-              panel.update(cx, |panel, cx| panel.set_path(path, cx));
-            }
-            workspace.persist_temporary_workspace_session(cx);
-            cx.notify();
-          });
-        },
-        Err(error) => {
-          let detail = error.to_string();
-          let _ = window_handle.update(cx, |_, window, cx| {
-            window.prompt(PromptLevel::Critical, "Save failed", Some(&detail), &[PromptButton::ok("Ok")], cx)
-          });
-        },
-      }
-    })
-    .detach();
-  }
 }
 
 #[derive(Clone)]
@@ -1596,10 +1381,6 @@ enum PanelKind {
   Document {
     panel: Entity<DocumentPanel>,
     editor: Entity<RichTextEditor>,
-  },
-  Flow {
-    panel: Entity<FlowPanel>,
-    editor: Entity<FlowEditor>,
   },
 }
 
@@ -1614,7 +1395,6 @@ impl PanelKind {
   fn is_dirty(&self, cx: &App) -> bool {
     match self {
       PanelKind::Document { editor, .. } => editor.read(cx).has_unsaved_changes(),
-      PanelKind::Flow { editor, .. } => editor.read(cx).has_unsaved_changes(),
     }
   }
 
@@ -1647,29 +1427,6 @@ impl PanelKind {
             .unwrap_or_else(|error| PanelSaveOutcome::Failed(error.to_string()))
         }
       },
-      PanelKind::Flow { panel, editor } => {
-        let needs_save_as = editor.update(cx, |editor, _| editor.document_path().is_none());
-        if needs_save_as {
-          let path = match prompt_for_panel_save_path(window_handle, cx, UNTITLED_FLOW_NAME).await {
-            Ok(Some(path)) => normalize_fl0_path(path),
-            Ok(None) => return PanelSaveOutcome::Cancelled,
-            Err(error) => return PanelSaveOutcome::Failed(error),
-          };
-          match editor.update(cx, |editor, cx| editor.save_as(path.clone(), cx)).await {
-            Ok(()) => {
-              panel.update(cx, |panel, cx| panel.set_path(path, cx));
-              PanelSaveOutcome::Saved
-            },
-            Err(error) => PanelSaveOutcome::Failed(error.to_string()),
-          }
-        } else {
-          editor
-            .update(cx, |editor, cx| editor.save(cx))
-            .await
-            .map(|_| PanelSaveOutcome::Saved)
-            .unwrap_or_else(|error| PanelSaveOutcome::Failed(error.to_string()))
-        }
-      },
     }
   }
 
@@ -1677,9 +1434,6 @@ impl PanelKind {
     match self {
       PanelKind::Document { editor, .. } => {
         editor.update(cx, |editor, cx| editor.discard_recovery_file(cx));
-      },
-      PanelKind::Flow { editor, .. } => {
-        editor.update(cx, |editor, _| editor.discard_recovery_file());
       },
     }
   }
@@ -1736,20 +1490,10 @@ enum LoadedWorkspaceDocument {
     path: Option<PathBuf>,
     title: Option<String>,
   },
-  Flow {
-    document: flowstate_flow::FlowDocument,
-    path: PathBuf,
-  },
 }
 
 #[hotpath::measure]
 fn load_workspace_document(path: PathBuf) -> Result<LoadedWorkspaceDocument, String> {
-  if is_flow_path(&path) {
-    return Ok(LoadedWorkspaceDocument::Flow {
-      document: flowstate_flow::load_flow_document_or_new(&path),
-      path,
-    });
-  }
   load_document_for_open(&path)
     .map(|loaded| LoadedWorkspaceDocument::Document {
       document: Box::new(loaded.document),
@@ -1791,7 +1535,6 @@ struct TemporaryWorkspaceSessionEntry {
 #[derive(serde::Deserialize, serde::Serialize)]
 enum TemporaryWorkspaceSessionEntryKind {
   Document,
-  Flow,
 }
 
 #[hotpath::measure]
@@ -1890,12 +1633,4 @@ fn recent_document_preview_document(document: &DocumentProjection) -> DocumentPr
   }
 
   document_from_input(document.theme.clone(), paragraphs)
-}
-
-#[hotpath::measure]
-fn is_flow_path(path: &Path) -> bool {
-  path
-    .extension()
-    .and_then(|extension| extension.to_str())
-    .is_some_and(|extension| extension.eq_ignore_ascii_case("fl0"))
 }

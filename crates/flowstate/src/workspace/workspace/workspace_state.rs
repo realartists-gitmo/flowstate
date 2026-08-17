@@ -274,16 +274,6 @@ impl Workspace {
         })
       })
       .collect::<Vec<_>>();
-    panels.extend(self.flow_panels.iter().filter_map(|panel| {
-      let panel_state = panel.read(cx);
-      if !panel_state.is_dirty(cx) {
-        return None;
-      }
-      Some(PanelKind::Flow {
-        panel: panel.clone(),
-        editor: panel_state.editor(),
-      })
-    }));
     panels
   }
 
@@ -297,26 +287,9 @@ impl Workspace {
     if let Some(editor) = editor {
       self.active_document_id = Some(panel_id);
       self.active_editor = Some(editor);
-      self.active_flow = None;
       self.outline_cache = None;
       self.restore_outline_state_for_document(panel_id, cx);
       self.refresh_outline_tree(cx);
-      self.persist_temporary_workspace_session(cx);
-      cx.notify();
-      return;
-    }
-    if let Some(panel) = self
-      .flow_panels
-      .iter()
-      .find(|panel| panel.read(cx).id() == panel_id)
-    {
-      self.active_document_id = Some(panel_id);
-      self.active_editor = None;
-      self.active_flow = Some(panel.read(cx).editor());
-      self.outline_cache = None;
-      self.outline_viewport_paragraph = None;
-      self.outline_active_paragraph = None;
-      self.outline_scrolled_paragraph = None;
       self.persist_temporary_workspace_session(cx);
       cx.notify();
     }
@@ -331,7 +304,6 @@ impl Workspace {
       .document_panels
       .iter()
       .map(|panel| panel.read(cx).id())
-      .chain(self.flow_panels.iter().map(|panel| panel.read(cx).id()))
       .collect();
     ids.sort_by_key(|id| {
       let pin_index = self.pinned_document_ids.iter().position(|pinned| pinned == id);
@@ -578,22 +550,6 @@ impl Workspace {
         }
       })
       .collect::<Vec<_>>();
-    tabs.extend(self.flow_panels.iter().map(|panel| {
-      let panel = panel.read(cx);
-      let title = panel.title_text();
-      let dirty = panel.is_dirty(cx);
-      let title = truncate_tab_title(&title, 32);
-      let label = if dirty { format!("*{title}").into() } else { title.into() };
-      let id = panel.id();
-      DocumentTab {
-        id,
-        label,
-        active: Some(id) == self.active_document_id,
-        pinned: false,
-        pin_index: None,
-        speech: self.speech_document_id == Some(id),
-      }
-    }));
     ordered_document_tabs(tabs, &self.pinned_document_ids)
   }
 
