@@ -144,6 +144,7 @@ pub enum WireBytes<'a> {
   Shared(Arc<[u8]>),
 }
 
+#[cfg(test)]
 impl WireBytes<'_> {
   #[must_use]
   pub fn as_slice(&self) -> &[u8] {
