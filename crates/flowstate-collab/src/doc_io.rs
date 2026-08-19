@@ -431,12 +431,6 @@ fn io_loop(core: &Arc<WriteGate<CrdtRuntime>>, receiver: &Receiver<IoRequest>) {
   // session — part of the receiving peer's 13.1 GB/run import churn.
   let mut unfreed_import_bytes: usize = 0;
   const IMPORT_CACHE_FREE_BYTES: usize = 4 * 1024 * 1024;
-  // §perf-heaven T8.18 (first cold import): warm the retained import calculator's
-  // trackers ONCE when this doc first shows collaboration activity, so the first
-  // remote import reuses the built index rather than paying the cold tracker
-  // build synchronously on the receive path. Gated so a single-user doc never
-  // pays for it.
-  let mut import_calc_warmed = false;
   loop {
     let request = if let Some(request) = deferred.pop() {
       request
@@ -536,23 +530,15 @@ fn io_loop(core: &Arc<WriteGate<CrdtRuntime>>, receiver: &Receiver<IoRequest>) {
         }
       },
       IoRequest::PumpPublish { reply } => {
-        let result = core
-          .lock(GateHolder::ExportUpdates)
-          .map(|mut guard| {
-            // §perf-heaven T8.18: the first publish marks this doc as an ACTIVE
-            // collaboration participant. Warm the retained import calculator now
-            // (off the receive path) so the FIRST remote import reuses the
-            // id_to_cursor index instead of building it cold. Safe: a stale warmed
-            // tracker is rebuilt by `start_tracking`'s validity guard, so warming
-            // can only save work, never change a computed diff.
-            if !import_calc_warmed {
-              guard.doc().inner().warm_import_diff_calculator();
-              import_calc_warmed = true;
-            }
-            guard.take_pending_publish()
-          })
-          .map_err(|poisoned| anyhow::anyhow!(poisoned));
-        send_reply(&reply, result);
+        // Never prebuild Loro's full-history import index here. On a newly
+        // joined history-heavy document that "warmup" can monopolize this
+        // service thread for minutes while holding the write gate, making the
+        // window unable to process editor/layout work. Import builds only the
+        // state it actually needs when remote updates arrive.
+        send_reply(
+          &reply,
+          gate_call(core, GateHolder::ExportUpdates, |runtime| Ok(runtime.take_pending_publish())),
+        );
       },
       IoRequest::ProjectionSnapshot { reply } => send_reply(
         &reply,
