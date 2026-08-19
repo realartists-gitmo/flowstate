@@ -97,6 +97,12 @@ pub struct JoinedDocument {
   pub document: DocumentProjection,
 }
 
+struct JoinedDocumentBuild {
+  document: DocumentProjection,
+  authority: Arc<LocalDocHandle>,
+  io: DocIoHandle,
+}
+
 #[derive(Clone, Debug)]
 pub struct SessionRosterEntry {
   pub name: String,
@@ -385,7 +391,8 @@ impl CollabSession {
       match neighbor_rx.recv().await {
         Ok(JoinNeighborSignal::NeighborUp) => {},
         Ok(JoinNeighborSignal::TimedOut) | Err(_) => {
-          let detail = "Couldn't reach anyone in this session. Make sure the inviter is online and the invite is current, then try again.".to_string();
+          let detail =
+            "Couldn't reach anyone in this session. Make sure the inviter is online and the invite is current, then try again.".to_string();
           let _ = session.update(cx, |session, cx| {
             session.detach(DetachReason::JoinFailed(detail.clone()), cx);
           });
@@ -407,20 +414,22 @@ impl CollabSession {
       let joined = match reply_rx.recv().await {
         Ok(Ok(bytes)) => {
           tracing::info!(session = %session_id, snapshot_bytes = bytes.len(), "collaboration join snapshot pulled");
-          session
-            .update(cx, |session, cx| match session.finish_join_snapshot(&bytes, cx) {
-              Ok(joined) => Ok(joined),
-              Err(error) => {
-                tracing::error!(session = %session.session, error = %format_args!("{error:#}"), "building collaboration document from snapshot failed");
-                let detail = format!("building collaboration document failed: {error:#}");
-                session.detach(DetachReason::JoinFailed(detail), cx);
-                Err(error.context("building collaboration document failed"))
-              },
-            })
-            .unwrap_or_else(|error| {
-              tracing::error!(error = %error, "collaboration join session disappeared while building snapshot");
-              Err(anyhow!("collaboration join session disappeared: {error}"))
-            })
+          match session.update(cx, |session, cx| session.begin_join_snapshot_build(bytes.len(), cx)) {
+            Err(error) => Err(anyhow!("collaboration join session disappeared before building snapshot: {error}")),
+            Ok(Err(error)) => Err(error),
+            Ok(Ok(())) => {
+              let built = cx
+                .background_executor()
+                .spawn(async move { Self::build_join_snapshot(bytes) })
+                .await;
+              session
+                .update(cx, |session, cx| session.finish_join_snapshot(built, cx))
+                .unwrap_or_else(|error| {
+                  tracing::error!(error = %error, "collaboration join session disappeared while installing snapshot");
+                  Err(anyhow!("collaboration join session disappeared: {error}"))
+                })
+            },
+          }
         },
         Ok(Err(error)) => {
           tracing::error!(session = %session_id, error = %format_args!("{error:#}"), "pulling collaboration join snapshot failed");
@@ -713,12 +722,11 @@ impl CollabSession {
     tracing::info!(session = %self.session, peer = %peer, peers_present = self.peers_present(), "local collaboration peer established");
   }
 
-  fn finish_join_snapshot(&mut self, snapshot: &[u8], cx: &mut Context<Self>) -> Result<JoinedDocument> {
-    tracing::info!(session = %self.session, snapshot_bytes = snapshot.len(), "building collaboration document from join snapshot");
+  fn begin_join_snapshot_build(&mut self, snapshot_len: usize, cx: &mut Context<Self>) -> Result<()> {
     if matches!(self.phase, SessionPhase::Detached(_)) {
       bail!("collaboration join is no longer active");
     }
-    let total = snapshot.len() as u64;
+    let total = snapshot_len as u64;
     self.phase = SessionPhase::Joining(JoinStage::FetchingSnapshot {
       got: total,
       total: Some(total),
@@ -726,31 +734,44 @@ impl CollabSession {
     cx.notify();
     self.phase = SessionPhase::Joining(JoinStage::Building);
     cx.notify();
+    Ok(())
+  }
 
+  fn build_join_snapshot(snapshot: Vec<u8>) -> Result<JoinedDocumentBuild> {
     let doc = LoroDoc::new();
     flowstate_document::loro_schema::configure_text_styles(&doc);
     doc
-      .import_with(snapshot, "remote")
+      .import_with(&snapshot, "remote")
       .context("importing collaboration snapshot failed")?;
     let runtime = CrdtRuntime::from_doc(doc, None, None).context("creating joined collaboration CRDT runtime")?;
     let mut document = runtime
       .projection_snapshot()
       .context("projecting joined Loro-native document")?;
-    // Loro-first services (spec §3): wrap the imported core in the write gate.
-    // The session keeps only the transport-side I/O handle; the write
-    // authority is parked for the workspace handoff (join gate: the editor
-    // cannot receive it before this point, i.e. before the initial snapshot
-    // import completed).
     let (authority, gate) = LocalDocHandle::new(runtime, LocalWriteConfig::default());
     let io = DocIoHandle::spawn(gate).context("starting joined collaboration document I/O service")?;
-    // §15/§31: bind this joiner's durable author identity to the joined
-    // document so their revisions record an author and `users_by_id` is
-    // populated. The user-registration op converges to peers via
-    // anti-entropy. Fire-and-forget and non-fatal: a failure must not break
-    // the join. `create_document_panel` receives this document through the
-    // `Attachment` source, which deliberately skips re-binding to avoid a
-    // redundant second call.
-    let identity_io = io.clone();
+    document.theme = load_document_theme();
+    Ok(JoinedDocumentBuild {
+      document,
+      authority: Arc::new(authority),
+      io,
+    })
+  }
+
+  fn finish_join_snapshot(&mut self, built: Result<JoinedDocumentBuild>, cx: &mut Context<Self>) -> Result<JoinedDocument> {
+    if matches!(self.phase, SessionPhase::Detached(_)) {
+      bail!("collaboration join is no longer active");
+    }
+    let built = match built {
+      Ok(built) => built,
+      Err(error) => {
+        tracing::error!(session = %self.session, error = %format_args!("{error:#}"), "building collaboration document from snapshot failed");
+        let detail = format!("building collaboration document failed: {error:#}");
+        self.detach(DetachReason::JoinFailed(detail), cx);
+        return Err(error.context("building collaboration document failed"));
+      },
+    };
+
+    let identity_io = built.io.clone();
     cx.spawn(async move |session, cx| {
       let (user_id, display_name) = cx
         .background_executor()
@@ -769,17 +790,16 @@ impl CollabSession {
       }
     })
     .detach();
-    document.theme = load_document_theme();
     tracing::info!(
       session = %self.session,
-      paragraphs = document.paragraphs.len(),
-      blocks = document.blocks.len(),
-      assets = document.assets.assets.len(),
+      paragraphs = built.document.paragraphs.len(),
+      blocks = built.document.blocks.len(),
+      assets = built.document.assets.assets.len(),
       "built collaboration document from join snapshot",
     );
 
-    self.runtime = Some(io);
-    self.join_authority = Some(Arc::new(authority));
+    self.runtime = Some(built.io);
+    self.join_authority = Some(built.authority);
     fidelity::event(FidelityClass::Frontier, "runtime-vv-reset", || {
       format!("session={} source=join-snapshot prior_bytes={}", self.session, self.runtime_vv.len())
     });
@@ -787,7 +807,7 @@ impl CollabSession {
     Ok(JoinedDocument {
       session: self.session,
       title: format!("{} (shared)", self.title),
-      document,
+      document: built.document,
     })
   }
 
