@@ -9,7 +9,7 @@ workspace = true
 
 [dependencies]
 gpui-flowtext = { workspace = true }
-gpui = { version = "0.2.2", default-features = false }
+gpui.workspace = true
 imagesize = { workspace = true }
 rustc-hash = { workspace = true }
 # §A13.1.2: "rayon" enables update_rayon — multithreaded hashing for the

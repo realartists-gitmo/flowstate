@@ -66,8 +66,8 @@ impl SettingGroup {
     }
 
     /// Return true if any of the setting items in the group match the given query.
-    pub(super) fn is_match(&self, query: &str) -> bool {
-        self.items.iter().any(|item| item.is_match(query))
+    pub(super) fn is_match(&self, query: &str, cx: &App) -> bool {
+        self.items.iter().any(|item| item.is_match(query, cx))
     }
 
     pub(super) fn is_resettable(&self, cx: &App) -> bool {
@@ -82,8 +82,8 @@ impl SettingGroup {
         cx: &mut App,
     ) -> impl IntoElement {
         GroupBox::new()
-            .id(SharedString::from(format!("group-{}", options.group_ix)))
-            .with_variant(options.group_variant)
+            .id(SharedString::from(format!("group-{}", options.group_ix())))
+            .with_variant(options.group_variant())
             .when_some(self.title.clone(), |this, title| {
                 this.title(v_flex().gap_1().child(title).when_some(
                     self.description.clone(),
@@ -98,15 +98,11 @@ impl SettingGroup {
             })
             .gap_4()
             .children(self.items.iter().enumerate().filter_map(|(item_ix, item)| {
-                if item.is_match(&query) {
-                    Some(item.clone().render_item(
-                        &RenderOptions {
-                            item_ix,
-                            ..*options
-                        },
-                        window,
-                        cx,
-                    ))
+                if item.is_match(&query, cx) {
+                    Some(
+                        item.clone()
+                            .render_item(&options.with_item_ix(item_ix), window, cx),
+                    )
                 } else {
                     None
                 }

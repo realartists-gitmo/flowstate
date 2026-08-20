@@ -1,75 +1,50 @@
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::Poll;
-use std::time::Duration;
 
-use gpui::prelude::FluentBuilder;
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, AppContext, Bounds, ClipboardItem, Context, Element, ElementId, Entity,
-    EntityId, FocusHandle, GlobalElementId, InspectorElementId, InteractiveElement, IntoElement,
-    KeyBinding, LayoutId, ListState, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement,
-    Pixels, Point, RenderOnce, SharedString, Size, StyleRefinement, Styled, Timer, Window, div, px,
+    AnyElement, App, Bounds, ClickEvent, Element, ElementId, Entity, GlobalElementId, Hitbox,
+    HitboxBehavior, InspectorElementId, InteractiveElement, IntoElement, LayoutId, MouseButton,
+    ParentElement, Pixels, SharedString, StyleRefinement, Styled, Window, div,
 };
-use smol::stream::StreamExt;
 
-use crate::highlighter::HighlightTheme;
+use crate::StyledExt;
 use crate::scroll::ScrollableElement;
-use crate::text::node::CodeBlock;
-use crate::{ActiveTheme, StyledExt, v_flex};
-use crate::{
-    global_state::GlobalState,
-    input::{self},
-    text::{
-        TextViewStyle,
-        node::{self, NodeContext},
-    },
-};
-
-const CONTEXT: &'static str = "TextView";
-
-pub(crate) fn init(cx: &mut App) {
-    cx.bind_keys(vec![
-        #[cfg(target_os = "macos")]
-        KeyBinding::new("cmd-c", input::Copy, Some(CONTEXT)),
-        #[cfg(not(target_os = "macos"))]
-        KeyBinding::new("ctrl-c", input::Copy, Some(CONTEXT)),
-    ]);
-}
-
-#[derive(IntoElement, Clone)]
-struct TextViewElement {
-    list_state: Option<ListState>,
-    state: Entity<TextViewState>,
-}
-
-impl RenderOnce for TextViewElement {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        self.state.update(cx, |state, cx| {
-            v_flex()
-                .size_full()
-                .map(|this| match &mut state.parsed_result {
-                    Some(Ok(content)) => this.child(content.root_node.render_root(
-                        self.list_state.clone(),
-                        &content.node_cx,
-                        window,
-                        cx,
-                    )),
-                    Some(Err(err)) => this.child(
-                        v_flex()
-                            .gap_1()
-                            .child("Failed to parse content")
-                            .child(err.to_string()),
-                    ),
-                    None => this,
-                })
-        })
-    }
-}
+use crate::text::TextViewFormat;
+use crate::text::markdown_ext::{MarkdownExtensions, MarkdownNode, MarkdownPlugin};
+use crate::text::node::{CodeBlock, TableData};
+use crate::text::state::{SelectionFormat, TextViewState};
+use crate::{global_state::UiGlobalState, text::TextViewStyle};
 
 /// Type for code block actions generator function.
 pub(crate) type CodeBlockActionsFn =
     dyn Fn(&CodeBlock, &mut Window, &mut App) -> AnyElement + Send + Sync;
+
+/// Type for the table actions generator function.
+pub(crate) type TableActionsFn =
+    dyn Fn(&TableData, &mut Window, &mut App) -> AnyElement + Send + Sync;
+
+pub(crate) type LinkClickHandlerFn =
+    dyn Fn(&SharedString, &ClickEvent, &mut Window, &mut App) + Send + Sync;
+
+pub(crate) fn handle_link_click(
+    handler: &Option<Arc<LinkClickHandlerFn>>,
+    url: SharedString,
+    event: ClickEvent,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if let Some(handler) = handler {
+        handler(&url, &event, window, cx);
+    } else if match &event {
+        ClickEvent::Mouse(click) => {
+            matches!(click.up.button, MouseButton::Left | MouseButton::Middle)
+        }
+        ClickEvent::Keyboard(_) => true,
+        ClickEvent::Touch(click) => !click.long_press,
+    } {
+        cx.open_url(&url);
+    }
+}
 
 /// A text view that can render Markdown or HTML.
 ///
@@ -90,284 +65,34 @@ pub(crate) type CodeBlockActionsFn =
 #[derive(Clone)]
 pub struct TextView {
     id: ElementId,
-    init_state: Option<InitState>,
-    raw: SharedString,
-    state: Entity<TextViewState>,
+    format: Option<TextViewFormat>,
+    text: Option<SharedString>,
+    pub(crate) state: Option<Entity<TextViewState>>,
+    text_view_style: TextViewStyle,
     style: StyleRefinement,
     selectable: bool,
+    selection_format: SelectionFormat,
     scrollable: bool,
     code_block_actions: Option<Arc<CodeBlockActionsFn>>,
+    table_actions: Option<Arc<TableActionsFn>>,
+    link_click_handler: Option<Arc<LinkClickHandlerFn>>,
+    markdown_extensions: Arc<MarkdownExtensions>,
 }
 
-#[derive(PartialEq)]
-pub(crate) struct ParsedContent {
-    pub(crate) root_node: node::Node,
-    pub(crate) node_cx: node::NodeContext,
+/// A plugin that can configure a [`TextView`].
+pub trait TextViewPlugin {
+    fn setup(self, text_view: TextView) -> TextView;
 }
 
-/// The type of the text view.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum TextViewType {
-    /// Markdown view
-    Markdown,
-    /// HTML view
-    Html,
-}
-
-enum Update {
-    Text(SharedString),
-    Style(Box<TextViewStyle>),
-}
-
-struct UpdateFuture {
-    type_: TextViewType,
-    highlight_theme: Arc<HighlightTheme>,
-    current_style: TextViewStyle,
-    current_text: SharedString,
-    timer: Timer,
-    rx: Pin<Box<smol::channel::Receiver<Update>>>,
-    tx_result: smol::channel::Sender<Result<ParsedContent, SharedString>>,
-    delay: Duration,
-    code_block_actions: Option<Arc<CodeBlockActionsFn>>,
-}
-
-impl UpdateFuture {
-    #[allow(clippy::too_many_arguments)]
-    fn new(
-        type_: TextViewType,
-        style: TextViewStyle,
-        text: SharedString,
-        highlight_theme: Arc<HighlightTheme>,
-        rx: smol::channel::Receiver<Update>,
-        tx_result: smol::channel::Sender<Result<ParsedContent, SharedString>>,
-        delay: Duration,
-        code_block_actions: Option<Arc<CodeBlockActionsFn>>,
-    ) -> Self {
-        Self {
-            type_,
-            highlight_theme,
-            current_style: style,
-            current_text: text,
-            timer: Timer::never(),
-            rx: Box::pin(rx),
-            tx_result,
-            delay,
-            code_block_actions,
-        }
-    }
-}
-
-impl Future for UpdateFuture {
-    type Output = ();
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
-        loop {
-            match self.rx.poll_next(cx) {
-                Poll::Ready(Some(update)) => {
-                    let changed = match update {
-                        Update::Text(text) if self.current_text != text => {
-                            self.current_text = text;
-                            true
-                        }
-                        Update::Style(style) if self.current_style != *style => {
-                            self.current_style = *style;
-                            true
-                        }
-                        _ => false,
-                    };
-                    if changed {
-                        let delay = self.delay;
-                        self.timer.set_after(delay);
-                    }
-                    continue;
-                }
-                Poll::Ready(None) => return Poll::Ready(()),
-                Poll::Pending => {}
-            }
-
-            match self.timer.poll_next(cx) {
-                Poll::Ready(Some(_)) => {
-                    let res = parse_content(
-                        self.type_,
-                        &self.current_text,
-                        self.current_style.clone(),
-                        &self.highlight_theme,
-                        &self.code_block_actions.clone(),
-                    );
-                    _ = self.tx_result.try_send(res);
-                    continue;
-                }
-                Poll::Ready(None) | Poll::Pending => return Poll::Pending,
-            }
-        }
-    }
-}
-
-#[derive(Clone)]
-enum InitState {
-    Initializing {
-        type_: TextViewType,
-        text: SharedString,
-        style: Box<TextViewStyle>,
-        highlight_theme: Arc<HighlightTheme>,
-    },
-    Initialized {
-        tx: smol::channel::Sender<Update>,
-    },
-}
-
-pub(crate) struct TextViewState {
-    parent_entity: Option<EntityId>,
-    tx: Option<smol::channel::Sender<Update>>,
-    parsed_result: Option<Result<ParsedContent, SharedString>>,
-    focus_handle: Option<FocusHandle>,
-    /// The bounds of the text view
-    bounds: Bounds<Pixels>,
-    /// The local (in TextView) position of the selection.
-    selection_positions: (Option<Point<Pixels>>, Option<Point<Pixels>>),
-    /// Is current in selection.
-    is_selecting: bool,
-    is_selectable: bool,
-    list_state: ListState,
-}
-
-impl TextViewState {
-    fn new(cx: &mut Context<TextViewState>) -> Self {
-        let focus_handle = cx.focus_handle();
-        Self {
-            parent_entity: None,
-            tx: None,
-            parsed_result: None,
-            focus_handle: Some(focus_handle),
-            bounds: Bounds::default(),
-            selection_positions: (None, None),
-            is_selecting: false,
-            is_selectable: false,
-            list_state: ListState::new(0, gpui::ListAlignment::Top, px(1000.)),
-        }
-    }
-}
-
-impl TextViewState {
-    /// Save bounds and unselect if bounds changed.
-    fn update_bounds(&mut self, bounds: Bounds<Pixels>) {
-        if self.bounds.size != bounds.size {
-            self.clear_selection();
-        }
-        self.bounds = bounds;
-    }
-
-    fn clear_selection(&mut self) {
-        self.selection_positions = (None, None);
-        self.is_selecting = false;
-    }
-
-    fn start_selection(&mut self, pos: Point<Pixels>) {
-        let pos = pos - self.bounds.origin;
-        self.selection_positions = (Some(pos), Some(pos));
-        self.is_selecting = true;
-    }
-
-    fn update_selection(&mut self, pos: Point<Pixels>) {
-        let pos = pos - self.bounds.origin;
-        if let (Some(start), Some(_)) = self.selection_positions {
-            self.selection_positions = (Some(start), Some(pos))
-        }
-    }
-
-    fn end_selection(&mut self) {
-        self.is_selecting = false;
-    }
-
-    pub(crate) fn has_selection(&self) -> bool {
-        if let (Some(start), Some(end)) = self.selection_positions {
-            start != end
-        } else {
-            false
-        }
-    }
-
-    pub(crate) fn is_selectable(&self) -> bool {
-        self.is_selectable
-    }
-
-    /// Return the bounds of the selection in window coordinates.
-    pub(crate) fn selection_bounds(&self) -> Bounds<Pixels> {
-        selection_bounds(
-            self.selection_positions.0,
-            self.selection_positions.1,
-            self.bounds,
-        )
-    }
-
-    fn selection_text(&self) -> Option<String> {
-        Some(
-            self.parsed_result
-                .as_ref()?
-                .as_ref()
-                .ok()?
-                .root_node
-                .selected_text(),
-        )
-    }
-}
-
-#[derive(IntoElement, Clone)]
-pub enum Text {
-    String(SharedString),
-    TextView(Box<TextView>),
-}
-
-impl From<SharedString> for Text {
-    fn from(s: SharedString) -> Self {
-        Self::String(s)
-    }
-}
-
-impl From<&str> for Text {
-    fn from(s: &str) -> Self {
-        Self::String(SharedString::from(s.to_string()))
-    }
-}
-
-impl From<String> for Text {
-    fn from(s: String) -> Self {
-        Self::String(s.into())
-    }
-}
-
-impl From<TextView> for Text {
-    fn from(e: TextView) -> Self {
-        Self::TextView(Box::new(e))
-    }
-}
-
-impl Text {
-    /// Set the style for [`TextView`].
-    ///
-    /// Do nothing if this is `String`.
-    pub fn style(self, style: TextViewStyle) -> Self {
-        match self {
-            Self::String(s) => Self::String(s),
-            Self::TextView(e) => Self::TextView(Box::new(e.style(style))),
-        }
-    }
-
-    /// Get the str
-    pub fn as_str(&self) -> &str {
-        match self {
-            Self::String(s) => s.as_str(),
-            Self::TextView(view) => view.raw.as_str(),
-        }
-    }
-}
-
-impl RenderOnce for Text {
-    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
-        match self {
-            Self::String(s) => s.into_any_element(),
-            Self::TextView(e) => e.into_any_element(),
-        }
+impl<P> TextViewPlugin for P
+where
+    P: MarkdownPlugin,
+{
+    fn setup(self, mut text_view: TextView) -> TextView {
+        let extensions = Arc::make_mut(&mut text_view.markdown_extensions);
+        let current = std::mem::take(extensions);
+        *extensions = current.plugin(self);
+        text_view
     }
 }
 
@@ -378,124 +103,81 @@ impl Styled for TextView {
 }
 
 impl TextView {
-    fn create_init_state(
-        type_: TextViewType,
-        text: &SharedString,
-        highlight_theme: &Arc<HighlightTheme>,
-        state: &Entity<TextViewState>,
-        cx: &mut App,
-    ) -> InitState {
-        let state = state.read(cx);
-        if let Some(tx) = &state.tx {
-            InitState::Initialized { tx: tx.clone() }
-        } else {
-            InitState::Initializing {
-                type_,
-                text: text.clone(),
-                style: Default::default(),
-                highlight_theme: highlight_theme.clone(),
-            }
+    /// Create new TextView with managed state.
+    pub fn new(state: &Entity<TextViewState>) -> Self {
+        Self {
+            id: ElementId::Name(state.entity_id().to_string().into()),
+            state: Some(state.clone()),
+            format: None,
+            text: None,
+            text_view_style: TextViewStyle::default(),
+            style: StyleRefinement::default(),
+            selectable: false,
+            selection_format: SelectionFormat::default(),
+            scrollable: false,
+            code_block_actions: None,
+            table_actions: None,
+            link_click_handler: None,
+            markdown_extensions: Arc::default(),
         }
     }
 
     /// Create a new markdown text view.
-    pub fn markdown(
-        id: impl Into<ElementId>,
-        markdown: impl Into<SharedString>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Self {
-        let id: ElementId = id.into();
-        let markdown = markdown.into();
-        let highlight_theme = cx.theme().highlight_theme.clone();
-        let state =
-            window.use_keyed_state(SharedString::from(format!("{}/state", id)), cx, |_, cx| {
-                TextViewState::new(cx)
-            });
-        let init_state = Self::create_init_state(
-            TextViewType::Markdown,
-            &markdown,
-            &highlight_theme,
-            &state,
-            cx,
-        );
-        if let Some(tx) = &state.read(cx).tx {
-            let _ = tx.try_send(Update::Text(markdown.clone()));
-        }
+    pub fn markdown(id: impl Into<ElementId>, markdown: impl Into<SharedString>) -> Self {
         Self {
-            id,
-            init_state: Some(init_state),
-            raw: markdown.clone(),
+            id: id.into(),
+            format: Some(TextViewFormat::Markdown),
+            text: Some(markdown.into()),
+            text_view_style: TextViewStyle::default(),
             style: StyleRefinement::default(),
-            state,
+            state: None,
             selectable: false,
+            selection_format: SelectionFormat::default(),
             scrollable: false,
             code_block_actions: None,
+            table_actions: None,
+            link_click_handler: None,
+            markdown_extensions: Arc::default(),
         }
     }
 
     /// Create a new html text view.
-    pub fn html(
-        id: impl Into<ElementId>,
-        html: impl Into<SharedString>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Self {
-        let id: ElementId = id.into();
-        let html = html.into();
-        let highlight_theme = cx.theme().highlight_theme.clone();
-        let state =
-            window.use_keyed_state(SharedString::from(format!("{}/state", id)), cx, |_, cx| {
-                TextViewState::new(cx)
-            });
-        let init_state =
-            Self::create_init_state(TextViewType::Html, &html, &highlight_theme, &state, cx);
-        if let Some(tx) = &state.read(cx).tx {
-            let _ = tx.try_send(Update::Text(html.clone()));
-        }
+    pub fn html(id: impl Into<ElementId>, html: impl Into<SharedString>) -> Self {
         Self {
-            id,
-            init_state: Some(init_state),
+            id: id.into(),
+            format: Some(TextViewFormat::Html),
+            text: Some(html.into()),
+            text_view_style: TextViewStyle::default(),
             style: StyleRefinement::default(),
-            state,
-            raw: html,
+            state: None,
             selectable: false,
+            selection_format: SelectionFormat::default(),
             scrollable: false,
             code_block_actions: None,
+            table_actions: None,
+            link_click_handler: None,
+            markdown_extensions: Arc::default(),
         }
-    }
-
-    /// Set the source text of the text view.
-    pub fn text(mut self, raw: impl Into<SharedString>) -> Self {
-        let raw: SharedString = raw.into();
-        if let Some(init_state) = &mut self.init_state {
-            match init_state {
-                InitState::Initializing { text, .. } => *text = raw.clone(),
-                InitState::Initialized { tx } => {
-                    let _ = tx.try_send(Update::Text(raw.clone()));
-                }
-            }
-        }
-        self.raw = raw;
-        self
     }
 
     /// Set [`TextViewStyle`].
     pub fn style(mut self, style: TextViewStyle) -> Self {
-        if let Some(init_state) = &mut self.init_state {
-            match init_state {
-                InitState::Initializing { style: s, .. } => **s = style,
-                InitState::Initialized { tx } => {
-                    let _ = tx.try_send(Update::Style(Box::new(style)));
-                }
-            }
-        }
+        self.text_view_style = style;
         self
     }
 
     /// Set the text view to be selectable, default is false.
     pub fn selectable(mut self, selectable: bool) -> Self {
         self.selectable = selectable;
+        self
+    }
+
+    /// Set the [`SelectionFormat`], default is [`SelectionFormat::Plain`].
+    ///
+    /// With [`SelectionFormat::Source`], selecting inside `**bold**` yields
+    /// `**bold**` (the Markdown source) rather than `bold`.
+    pub fn selection_format(mut self, selection_format: SelectionFormat) -> Self {
+        self.selection_format = selection_format;
         self
     }
 
@@ -516,14 +198,6 @@ impl TextView {
         self
     }
 
-    fn on_action_copy(state: &Entity<TextViewState>, cx: &mut App) {
-        let Some(selected_text) = state.read(cx).selection_text() else {
-            return;
-        };
-
-        cx.write_to_clipboard(ClipboardItem::new_string(selected_text.trim().to_string()));
-    }
-
     /// Set custom block actions for code blocks.
     ///
     /// The closure receives the [`CodeBlock`],
@@ -538,6 +212,90 @@ impl TextView {
         }));
         self
     }
+
+    /// Set custom actions to be rendered below each Markdown table.
+    ///
+    /// The closure receives the [`TableData`],
+    /// and returns an element to display.
+    pub fn table_actions<F, E>(mut self, f: F) -> Self
+    where
+        F: Fn(&TableData, &mut Window, &mut App) -> E + Send + Sync + 'static,
+        E: IntoElement,
+    {
+        self.table_actions = Some(Arc::new(move |table, window, cx| {
+            f(table, window, cx).into_any_element()
+        }));
+        self
+    }
+
+    /// Handle pointer events on rendered links.
+    ///
+    /// The handler receives the resolved URL and the original GPUI click event.
+    /// Without a handler, links open through App::open_url.
+    pub fn on_link_click<F>(mut self, handler: F) -> Self
+    where
+        F: Fn(&SharedString, &ClickEvent, &mut Window, &mut App) + Send + Sync + 'static,
+    {
+        self.link_click_handler = Some(Arc::new(handler));
+        self
+    }
+
+    /// Replace the Markdown extension registry.
+    pub fn markdown_extensions(mut self, extensions: MarkdownExtensions) -> Self {
+        self.markdown_extensions = Arc::new(extensions);
+        self
+    }
+
+    /// Enable MDX JSX/expression parsing.
+    ///
+    /// This disables raw HTML parsing because `markdown-rs` gives HTML
+    /// priority over MDX when both are enabled.
+    pub fn markdown_mdx(mut self) -> Self {
+        let extensions = Arc::make_mut(&mut self.markdown_extensions);
+        *extensions = extensions.clone().mdx();
+        self
+    }
+
+    /// Register a custom block-level Markdown parser.
+    ///
+    /// The parser runs during Markdown AST conversion and must be independent
+    /// of [`Window`] / [`App`]. Store any parsed data in [`MarkdownNode`] and
+    /// render it later with [`Self::markdown_block_renderer`].
+    pub fn markdown_block_parser<F>(mut self, parser: F) -> Self
+    where
+        F: for<'a> Fn(
+                &markdown::mdast::Node,
+                &crate::text::MarkdownParseContext<'a>,
+            ) -> Option<MarkdownNode>
+            + Send
+            + Sync
+            + 'static,
+    {
+        Arc::make_mut(&mut self.markdown_extensions).push_block_parser(parser);
+        self
+    }
+
+    /// Register a renderer for a custom block-level Markdown node name.
+    pub fn markdown_block_renderer<F, E>(
+        mut self,
+        name: impl Into<SharedString>,
+        renderer: F,
+    ) -> Self
+    where
+        F: Fn(&MarkdownNode, &mut Window, &mut App) -> E + Send + Sync + 'static,
+        E: IntoElement,
+    {
+        Arc::make_mut(&mut self.markdown_extensions).push_block_renderer(name, renderer);
+        self
+    }
+
+    /// Apply a reusable text view plugin.
+    pub fn plugin<P>(self, plugin: P) -> Self
+    where
+        P: TextViewPlugin,
+    {
+        plugin.setup(self)
+    }
 }
 
 impl IntoElement for TextView {
@@ -548,9 +306,14 @@ impl IntoElement for TextView {
     }
 }
 
+pub struct TextViewLayoutState {
+    state: Entity<TextViewState>,
+    element: AnyElement,
+}
+
 impl Element for TextView {
-    type RequestLayoutState = AnyElement;
-    type PrepaintState = ();
+    type RequestLayoutState = TextViewLayoutState;
+    type PrepaintState = Hitbox;
 
     fn id(&self) -> Option<ElementId> {
         Some(self.id.clone())
@@ -567,343 +330,879 @@ impl Element for TextView {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        if let Some(InitState::Initializing {
-            type_,
-            text,
-            style,
-            highlight_theme,
-        }) = self.init_state.take()
-        {
-            let style = *style;
-            let highlight_theme = highlight_theme.clone();
-            let code_block_actions = self.code_block_actions.clone();
-            let (tx, rx) = smol::channel::unbounded::<Update>();
-            let (tx_result, rx_result) =
-                smol::channel::unbounded::<Result<ParsedContent, SharedString>>();
-            let parsed_result = parse_content(
-                type_,
-                &text,
-                style.clone(),
-                &highlight_theme,
-                &code_block_actions,
-            );
+        let state = if let Some(state) = self.state.clone() {
+            state
+        } else {
+            let default_format = self.format.unwrap_or(TextViewFormat::Markdown);
+            let default_text = self.text.clone().unwrap_or_default();
 
-            self.state.update(cx, {
-                let tx = tx.clone();
-                |state, _| {
-                    state.parsed_result = Some(parsed_result);
-                    state.tx = Some(tx);
-                }
-            });
-
-            cx.spawn({
-                let state = self.state.downgrade();
-                async move |cx| {
-                    while let Ok(parsed_result) = rx_result.recv().await {
-                        if let Some(state) = state.upgrade() {
-                            _ = state.update(cx, |state, cx| {
-                                state.parsed_result = Some(parsed_result);
-                                if let Some(parent_entity) = state.parent_entity {
-                                    let app = &mut **cx;
-                                    app.notify(parent_entity);
-                                }
-                                state.clear_selection();
-                            });
-                        } else {
-                            // state released, stopping processing
-                            break;
-                        }
+            let state = window.use_keyed_state(
+                SharedString::from(format!("{}/state", self.id)),
+                cx,
+                move |_, cx| {
+                    if default_format == TextViewFormat::Markdown {
+                        TextViewState::markdown(default_text.as_str(), cx)
+                    } else {
+                        TextViewState::html(default_text.as_str(), cx)
                     }
-                }
-            })
-            .detach();
+                },
+            );
+            self.state = Some(state.clone());
+            state
+        };
 
-            cx.background_spawn(UpdateFuture::new(
-                type_,
-                style,
-                text,
-                highlight_theme,
-                rx,
-                tx_result,
-                Duration::from_millis(200),
-                code_block_actions,
-            ))
-            .detach();
+        state.update(cx, |state, cx| {
+            state.code_block_actions = self.code_block_actions.clone();
+            state.table_actions = self.table_actions.clone();
+            state.link_click_handler = self.link_click_handler.clone();
+            state.set_markdown_extensions(self.markdown_extensions.clone(), cx);
+            state.selectable = self.selectable;
+            state.selection_format = self.selection_format;
+            state.scrollable = self.scrollable;
+            if state.text_view_style != self.text_view_style {
+                state.selection_revision = state.selection_revision.wrapping_add(1);
+            }
+            state.text_view_style = self.text_view_style.clone();
 
-            self.init_state = Some(InitState::Initialized { tx });
-        }
+            if let Some(text) = self.text.clone() {
+                state.set_text(text.as_str(), cx);
+            }
+        });
 
-        let list_state = &self.state.read(cx).list_state;
-
-        let focus_handle = self
-            .state
-            .read(cx)
-            .focus_handle
-            .as_ref()
-            .expect("focus_handle should init by TextViewState::new");
+        let focus_handle = state.read(cx).focus_handle.clone();
+        let list_state = state.read(cx).list_state.clone();
 
         let mut el = div()
-            .key_context(CONTEXT)
-            .track_focus(focus_handle)
-            .size_full()
+            .key_context("TextView")
+            .track_focus(&focus_handle)
+            .when(self.scrollable, |this| {
+                this.size_full().vertical_scrollbar(&list_state)
+            })
             .relative()
-            .on_action({
-                let state = self.state.clone();
-                move |_: &input::Copy, _, cx| {
-                    Self::on_action_copy(&state, cx);
+            .on_action(move |_: &crate::input::Copy, window, cx| {
+                let text = gpui_base::TextSelection::selected_text(window, cx)
+                    .trim()
+                    .to_string();
+                if text.is_empty() {
+                    cx.propagate();
+                    return;
                 }
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
             })
-            .child(TextViewElement {
-                list_state: if self.scrollable {
-                    Some(list_state.clone())
-                } else {
-                    None
-                },
-                state: self.state.clone(),
-            })
+            .on_action(window.listener_for(&state, TextViewState::on_action_select_all))
+            .child(state.clone())
             .refine_style(&self.style)
-            .vertical_scrollbar(list_state)
             .into_any_element();
         let layout_id = el.request_layout(window, cx);
-        (layout_id, el)
+        (layout_id, TextViewLayoutState { state, element: el })
     }
 
     fn prepaint(
         &mut self,
         _: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
-        _: Bounds<Pixels>,
+        bounds: Bounds<Pixels>,
         request_layout: &mut Self::RequestLayoutState,
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        request_layout.prepaint(window, cx);
+        request_layout.element.prepaint(window, cx);
+        window.insert_hitbox(bounds, HitboxBehavior::Normal)
     }
 
     fn paint(
         &mut self,
         _: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
+        _bounds: Bounds<Pixels>,
         request_layout: &mut Self::RequestLayoutState,
-        _: &mut Self::PrepaintState,
+        hitbox: &mut Self::PrepaintState,
         window: &mut Window,
         cx: &mut App,
     ) {
-        let entity_id = window.current_view();
-        let is_selectable = self.selectable;
+        let state = &request_layout.state;
+        if self.selectable {
+            state.update(cx, |state, _| state.selection_adapter.begin_frame());
+        }
 
-        self.state.update(cx, |state, _| {
-            state.parent_entity = Some(entity_id);
-            state.update_bounds(bounds);
-            state.is_selectable = is_selectable;
-        });
-
-        GlobalState::global_mut(cx)
+        UiGlobalState::global_mut(cx)
             .text_view_state_stack
-            .push(self.state.clone());
-        request_layout.paint(window, cx);
-        GlobalState::global_mut(cx).text_view_state_stack.pop();
+            .push(state.clone());
+        request_layout.element.paint(window, cx);
+        UiGlobalState::global_mut(cx).text_view_state_stack.pop();
 
         if self.selectable {
-            let is_selecting = self.state.read(cx).is_selecting;
-            let has_selection = self.state.read(cx).has_selection();
-
-            window.on_mouse_event({
-                let state = self.state.clone();
-                move |event: &MouseDownEvent, phase, _, cx| {
-                    if !bounds.contains(&event.position) || !phase.bubble() {
-                        return;
-                    }
-
-                    state.update(cx, |state, _| {
-                        state.start_selection(event.position);
-                    });
-                    cx.notify(entity_id);
-                }
-            });
-
-            if is_selecting {
-                // move to update end position.
-                window.on_mouse_event({
-                    let state = self.state.clone();
-                    move |event: &MouseMoveEvent, phase, _, cx| {
-                        if !phase.bubble() {
-                            return;
-                        }
-
-                        state.update(cx, |state, _| {
-                            state.update_selection(event.position);
-                        });
-                        cx.notify(entity_id);
-                    }
-                });
-
-                // up to end selection
-                window.on_mouse_event({
-                    let state = self.state.clone();
-                    move |_: &MouseUpEvent, phase, _, cx| {
-                        if !phase.bubble() {
-                            return;
-                        }
-
-                        state.update(cx, |state, _| {
-                            state.end_selection();
-                        });
-                        cx.notify(entity_id);
-                    }
-                });
-            }
-
-            if has_selection {
-                // down outside to clear selection
-                window.on_mouse_event({
-                    let state = self.state.clone();
-                    move |event: &MouseDownEvent, _, _, cx| {
-                        if bounds.contains(&event.position) {
-                            return;
-                        }
-
-                        state.update(cx, |state, _| {
-                            state.clear_selection();
-                        });
-                        cx.notify(entity_id);
-                    }
-                });
-            }
+            let (adapter, scroll_offset, content_bounds) = {
+                let state = state.read(cx);
+                (
+                    state.selection_adapter.clone(),
+                    state.scroll_offset(),
+                    state.bounds(),
+                )
+            };
+            let document_order = UiGlobalState::global_mut(cx).next_selection_document_order();
+            adapter.register(
+                hitbox.clone(),
+                content_bounds,
+                scroll_offset,
+                document_order,
+                window,
+                cx,
+            );
         }
     }
-}
-
-fn parse_content(
-    type_: TextViewType,
-    text: &str,
-    style: TextViewStyle,
-    highlight_theme: &HighlightTheme,
-    code_block_actions: &Option<Arc<CodeBlockActionsFn>>,
-) -> Result<ParsedContent, SharedString> {
-    let mut node_cx = NodeContext {
-        style: style.clone(),
-        code_block_actions: code_block_actions.clone(),
-        ..NodeContext::default()
-    };
-
-    let res = match type_ {
-        TextViewType::Markdown => {
-            super::format::markdown::parse(text, &style, &mut node_cx, highlight_theme)
-        }
-        TextViewType::Html => super::format::html::parse(text, &mut node_cx),
-    };
-    res.map(move |root_node| ParsedContent { root_node, node_cx })
-}
-
-fn selection_bounds(
-    start: Option<Point<Pixels>>,
-    end: Option<Point<Pixels>>,
-    bounds: Bounds<Pixels>,
-) -> Bounds<Pixels> {
-    if let (Some(start), Some(end)) = (start, end) {
-        let start = start + bounds.origin;
-        let end = end + bounds.origin;
-
-        let origin = Point {
-            x: start.x.min(end.x),
-            y: start.y.min(end.y),
-        };
-        let size = Size {
-            width: (start.x - end.x).abs(),
-            height: (start.y - end.y).abs(),
-        };
-
-        return Bounds { origin, size };
-    }
-
-    Bounds::default()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use gpui::{Bounds, point, px, size};
+    use super::{TextView, TextViewPlugin};
+    use crate::text::{TableData, TextViewState, TextViewStyle};
+    use gpui::{
+        AppContext as _, Bounds, ClickEvent, Context, Entity, InteractiveElement as _, IntoElement,
+        Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, Overflow, ParentElement as _, Pixels,
+        Render, SharedString, StyleRefinement, Styled as _, TestAppContext, VisualTestContext,
+        Window, div, point, px,
+    };
+
+    struct TextViewTestRoot {
+        text_view: Entity<TextViewState>,
+    }
+
+    struct DummyTextViewPlugin;
+
+    impl TextViewPlugin for DummyTextViewPlugin {
+        fn setup(self, mut text_view: TextView) -> TextView {
+            text_view.selectable = true;
+            text_view
+        }
+    }
+
+    impl TextViewTestRoot {
+        fn new(text: &str, cx: &mut Context<Self>) -> Self {
+            let text = text.to_string();
+            let text_view = cx.new(|cx| TextViewState::markdown(&text, cx));
+            Self { text_view }
+        }
+    }
+
+    impl Render for TextViewTestRoot {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .w(px(160.))
+                .child(
+                    div()
+                        .h(px(24.))
+                        .overflow_hidden()
+                        .child(TextView::new(&self.text_view).selectable(true)),
+                )
+                .child(div().h(px(40.)).child("footer"))
+        }
+    }
+
+    struct InlineImageTextViewTestRoot {
+        text_view: Entity<TextViewState>,
+    }
+
+    impl InlineImageTextViewTestRoot {
+        fn new(cx: &mut Context<Self>) -> Self {
+            let text_view = cx.new(|cx| {
+                TextViewState::markdown(
+                    "Build Status ![inline image](https://example.com/image.svg) after",
+                    cx,
+                )
+            });
+            Self { text_view }
+        }
+    }
+
+    impl Render for InlineImageTextViewTestRoot {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .w(px(420.))
+                .child(TextView::new(&self.text_view).selectable(true))
+        }
+    }
+
+    #[gpui::test]
+    fn inline_image_keeps_surrounding_text_on_same_line(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let content = cx.new(|cx| InlineImageTextViewTestRoot::new(cx));
+            crate::Root::new(content, window, cx)
+        });
+        let content = root.read_with(cx, |root, _| {
+            root.view()
+                .clone()
+                .downcast::<InlineImageTextViewTestRoot>()
+                .unwrap()
+        });
+        let cx: &mut VisualTestContext = cx;
+
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let inline_bounds = content.read_with(cx, |content, cx| {
+            content.text_view.read(cx).selection_adapter.text_bounds()
+        });
+
+        assert_eq!(inline_bounds.len(), 2);
+        assert_eq!(
+            inline_bounds[0].top(),
+            inline_bounds[1].top(),
+            "text before and after an inline image should share a rendered line"
+        );
+        assert!(
+            inline_bounds[1].left() - inline_bounds[0].right() > px(8.),
+            "inline image should reserve horizontal space in the text layout"
+        );
+        assert!(
+            inline_bounds[1].left() - inline_bounds[0].right() < px(40.),
+            "unloaded inline image fallback should stay generic and compact"
+        );
+    }
+
+    #[gpui::test]
+    fn inline_html_image_after_newline_does_not_panic(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let (_, cx) = cx.add_window_view(|_, cx| {
+            TextViewTestRoot::new(
+                "Hi\n[<img src=\"https://example.com/image.svg\">](https://google.com/)",
+                cx,
+            )
+        });
+        let cx: &mut VisualTestContext = cx;
+
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+    }
+
+    #[gpui::test]
+    fn list_item_renders_fenced_code_block_at_document_width(cx: &mut TestAppContext) {
+        struct ListItemBlockRoot;
+
+        impl Render for ListItemBlockRoot {
+            fn render(
+                &mut self,
+                _window: &mut Window,
+                _cx: &mut Context<Self>,
+            ) -> impl IntoElement {
+                div().w(px(840.)).h(px(400.)).child(
+                    crate::h_resizable("markdown-width-test")
+                        .child(crate::resizable_panel().child(div()))
+                        .child(crate::resizable_panel().child(
+                            TextView::markdown(
+                                "list-with-code",
+                                "1. List item\n   ```rust\n   nested code\n   ```\n\n```rust\ntop-level code\n```",
+                            )
+                            .code_block_actions(|code_block, _, _| {
+                                let selector = if code_block.code().contains("nested") {
+                                    "nested-code-action"
+                                } else {
+                                    "top-level-code-action"
+                                };
+                                div()
+                                    .debug_selector(move || selector.into())
+                                    .child("Copy")
+                            })
+                            .scrollable(true)
+                            .p_5()
+                            .flex_none(),
+                        )),
+                )
+            }
+        }
+
+        cx.update(crate::init);
+        let (_, cx) = cx.add_window_view(|_, _| ListItemBlockRoot);
+        let cx: &mut VisualTestContext = cx;
+
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let nested_action = cx.debug_bounds("nested-code-action").unwrap();
+        let top_level_action = cx.debug_bounds("top-level-code-action").unwrap();
+        assert!(
+            top_level_action.right() - nested_action.right() < px(32.),
+            "nested code block should fill the list item's available width"
+        );
+    }
+
+    /// Draw a Markdown table with a `table_actions` hook installed, and return
+    /// the painted bounds of the actions element plus the data it received.
+    /// `scroll` opts into the horizontally scrollable table layout.
+    fn draw_table_with_actions(
+        cx: &mut TestAppContext,
+        scroll: bool,
+    ) -> (Bounds<Pixels>, TableData) {
+        use std::sync::{Arc, Mutex};
+
+        struct TableRoot {
+            scroll: bool,
+            captured: Arc<Mutex<Vec<TableData>>>,
+        }
+
+        impl Render for TableRoot {
+            fn render(
+                &mut self,
+                _window: &mut Window,
+                _cx: &mut Context<Self>,
+            ) -> impl IntoElement {
+                let captured = self.captured.clone();
+                let mut table_style = StyleRefinement::default();
+                if self.scroll {
+                    table_style.overflow.x = Some(Overflow::Scroll);
+                }
+
+                div().w(px(320.)).child(
+                    TextView::markdown(
+                        "table-actions",
+                        "| Name | Age |\n|:--|--:|\n| Alice | 30 |\n| Bob | 41 |",
+                    )
+                    .style(TextViewStyle::default().table(table_style))
+                    .table_actions(move |table, _, _| {
+                        if let Ok(mut captured) = captured.lock() {
+                            captured.push(table.clone());
+                        }
+                        div().debug_selector(|| "table-action".into()).child("Copy")
+                    }),
+                )
+            }
+        }
+
+        cx.update(crate::init);
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let (_, cx) = cx.add_window_view({
+            let captured = captured.clone();
+            move |_, _| TableRoot { scroll, captured }
+        });
+        let cx: &mut VisualTestContext = cx;
+
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let bounds = cx
+            .debug_bounds("table-action")
+            .expect("table actions should be painted");
+        let data = captured
+            .lock()
+            .expect("captured table data")
+            .last()
+            .cloned()
+            .expect("table actions hook should receive the table");
+
+        (bounds, data)
+    }
+
+    #[gpui::test]
+    fn table_actions_render_below_the_table(cx: &mut TestAppContext) {
+        for scroll in [false, true] {
+            let (bounds, data) = draw_table_with_actions(cx, scroll);
+
+            // Header plus two data rows are painted above the actions row.
+            assert!(
+                bounds.top() > px(40.),
+                "actions should sit below the table (scroll: {scroll}), got {:?}",
+                bounds.top()
+            );
+            assert_eq!(data.headers, vec!["Name", "Age"]);
+            assert_eq!(data.rows, vec![vec!["Alice", "30"], vec!["Bob", "41"]]);
+            assert_eq!(
+                data.markdown,
+                "| Name | Age |\n| :-- | --: |\n| Alice | 30 |\n| Bob | 41 |"
+            );
+            assert_eq!(data.span, Some(0..52));
+        }
+    }
 
     #[test]
-    fn test_text_view_state_selection_bounds() {
-        assert_eq!(
-            selection_bounds(None, None, Default::default()),
-            Bounds::default()
+    fn plugin_accepts_text_view_plugins_beyond_markdown() {
+        let view = TextView::markdown("plugin-test", "").plugin(DummyTextViewPlugin);
+
+        assert!(view.selectable);
+    }
+
+    #[gpui::test]
+    fn clipped_markdown_link_does_not_open(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let (_, cx) = cx.add_window_view(|_, cx| {
+            TextViewTestRoot::new("visible\n\n[hidden](https://example.com)", cx)
+        });
+        let cx: &mut VisualTestContext = cx;
+
+        cx.simulate_click(point(px(10.), px(34.)), Modifiers::default());
+
+        assert_eq!(cx.opened_url(), None);
+    }
+
+    #[gpui::test]
+    fn markdown_link_opens_url_without_handler(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let (_, cx) =
+            cx.add_window_view(|_, cx| TextViewTestRoot::new("[example](https://example.com)", cx));
+        let cx: &mut VisualTestContext = cx;
+
+        cx.simulate_click(point(px(10.), px(10.)), Modifiers::default());
+
+        assert_eq!(cx.opened_url(), Some("https://example.com".to_string()));
+    }
+
+    #[gpui::test]
+    fn right_click_does_not_open_url_without_handler(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let (_, cx) =
+            cx.add_window_view(|_, cx| TextViewTestRoot::new("[example](https://example.com)", cx));
+        let cx: &mut VisualTestContext = cx;
+
+        cx.simulate_mouse_down(
+            point(px(10.), px(10.)),
+            MouseButton::Right,
+            Modifiers::default(),
         );
-        assert_eq!(
-            selection_bounds(None, Some(point(px(10.), px(20.))), Default::default()),
-            Bounds::default()
-        );
-        assert_eq!(
-            selection_bounds(Some(point(px(10.), px(20.))), None, Default::default()),
-            Bounds::default()
+        cx.simulate_mouse_up(
+            point(px(10.), px(10.)),
+            MouseButton::Right,
+            Modifiers::default(),
         );
 
-        // 10,10 start
-        //   |------|
-        //   |      |
-        //   |------|
-        //         50,50
-        assert_eq!(
-            selection_bounds(
-                Some(point(px(10.), px(10.))),
-                Some(point(px(50.), px(50.))),
-                Default::default()
-            ),
-            Bounds {
-                origin: point(px(10.), px(10.)),
-                size: size(px(40.), px(40.))
+        assert_eq!(cx.opened_url(), None);
+    }
+
+    #[gpui::test]
+    fn link_handler_receives_button_and_modifiers(cx: &mut TestAppContext) {
+        use std::sync::{Arc, Mutex};
+
+        struct LinkRoot {
+            text_view: Entity<TextViewState>,
+            clicks: Arc<Mutex<Vec<(SharedString, ClickEvent)>>>,
+        }
+
+        impl Render for LinkRoot {
+            fn render(
+                &mut self,
+                _window: &mut Window,
+                _cx: &mut Context<Self>,
+            ) -> impl IntoElement {
+                let clicks = self.clicks.clone();
+                div()
+                    .w(px(240.))
+                    .child(
+                        TextView::new(&self.text_view).on_link_click(move |url, event, _, _| {
+                            clicks.lock().unwrap().push((url.clone(), event.clone()));
+                        }),
+                    )
             }
+        }
+
+        cx.update(crate::init);
+        let clicks = Arc::new(Mutex::new(Vec::new()));
+        let captured = clicks.clone();
+        let (_, cx) = cx.add_window_view(move |_, cx| LinkRoot {
+            text_view: cx.new(|cx| TextViewState::markdown("[example](https://example.com)", cx)),
+            clicks,
+        });
+        let cx: &mut VisualTestContext = cx;
+
+        let mut modifiers = Modifiers::default();
+        modifiers.control = true;
+        cx.simulate_click(point(px(10.), px(10.)), modifiers);
+        cx.simulate_mouse_down(
+            point(px(10.), px(10.)),
+            MouseButton::Middle,
+            Modifiers::default(),
         );
-        // 10,10
-        //   |------|
-        //   |      |
-        //   |------|
-        //         50,50 start
-        assert_eq!(
-            selection_bounds(
-                Some(point(px(50.), px(50.))),
-                Some(point(px(10.), px(10.))),
-                Default::default()
-            ),
-            Bounds {
-                origin: point(px(10.), px(10.)),
-                size: size(px(40.), px(40.))
-            }
+        cx.simulate_mouse_up(
+            point(px(10.), px(10.)),
+            MouseButton::Middle,
+            Modifiers::default(),
         );
-        //        50,10 start
-        //   |------|
-        //   |      |
-        //   |------|
-        // 10,50
-        assert_eq!(
-            selection_bounds(
-                Some(point(px(50.), px(10.))),
-                Some(point(px(10.), px(50.))),
-                Default::default()
-            ),
-            Bounds {
-                origin: point(px(10.), px(10.)),
-                size: size(px(40.), px(40.))
-            }
+        cx.simulate_mouse_down(
+            point(px(10.), px(10.)),
+            MouseButton::Right,
+            Modifiers::default(),
         );
-        //        50,10
-        //   |------|
-        //   |      |
-        //   |------|
-        // 10,50 start
-        assert_eq!(
-            selection_bounds(
-                Some(point(px(10.), px(50.))),
-                Some(point(px(50.), px(10.))),
-                Default::default()
-            ),
-            Bounds {
-                origin: point(px(10.), px(10.)),
-                size: size(px(40.), px(40.))
+        cx.simulate_mouse_up(
+            point(px(10.), px(10.)),
+            MouseButton::Right,
+            Modifiers::default(),
+        );
+
+        let clicks = captured.lock().unwrap();
+        assert_eq!(clicks.len(), 3);
+        assert_eq!(clicks[0].0, "https://example.com");
+        assert!(!clicks[0].1.is_right_click() && !clicks[0].1.is_middle_click());
+        assert!(clicks[0].1.modifiers().control);
+        assert!(clicks[1].1.is_middle_click());
+        assert!(clicks[2].1.is_right_click());
+        assert_eq!(cx.opened_url(), None);
+    }
+
+    #[gpui::test]
+    fn linked_image_handler_receives_left_middle_and_right_clicks(cx: &mut TestAppContext) {
+        use std::sync::{Arc, Mutex};
+
+        struct LinkedImageRoot {
+            text_view: Entity<TextViewState>,
+            clicks: Arc<Mutex<Vec<(SharedString, ClickEvent)>>>,
+        }
+
+        impl Render for LinkedImageRoot {
+            fn render(
+                &mut self,
+                _window: &mut Window,
+                _cx: &mut Context<Self>,
+            ) -> impl IntoElement {
+                let clicks = self.clicks.clone();
+                div().w(px(160.)).child(
+                    TextView::new(&self.text_view)
+                        .selectable(true)
+                        .on_link_click(move |url, event, _, _| {
+                            clicks.lock().unwrap().push((url.clone(), event.clone()));
+                        }),
+                )
             }
+        }
+
+        cx.update(crate::init);
+        let clicks = Arc::new(Mutex::new(Vec::new()));
+        let captured = clicks.clone();
+        let (root, cx) = cx.add_window_view(move |window, cx| {
+            let content = cx.new(|cx| LinkedImageRoot {
+                text_view: cx.new(|cx| {
+                    TextViewState::markdown(
+                        r#"Before [<img src="https://example.com/image.svg" width="32" height="32">](https://example.com/image-link) after."#,
+                        cx,
+                    )
+                }),
+                clicks,
+            });
+            crate::Root::new(content, window, cx)
+        });
+        let content = root.read_with(cx, |root, _| {
+            root.view().clone().downcast::<LinkedImageRoot>().unwrap()
+        });
+        let cx: &mut VisualTestContext = cx;
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let inline_bounds = content.read_with(cx, |content, cx| {
+            content.text_view.read(cx).selection_adapter.text_bounds()
+        });
+        assert!(
+            inline_bounds.len() >= 2,
+            "linked image needs text bounds on both sides: {inline_bounds:?}"
+        );
+        assert!(
+            inline_bounds[1].left() - inline_bounds[0].right() >= px(24.),
+            "linked image did not reserve the expected click target: {inline_bounds:?}"
+        );
+        let position = point(
+            inline_bounds[0].right() + (inline_bounds[1].left() - inline_bounds[0].right()) * 0.5,
+            inline_bounds[0].top() + px(8.),
+        );
+        for button in [MouseButton::Left, MouseButton::Middle, MouseButton::Right] {
+            cx.simulate_mouse_down(position, button, Modifiers::default());
+            cx.simulate_mouse_up(position, button, Modifiers::default());
+        }
+
+        let clicks = captured.lock().unwrap();
+        assert_eq!(clicks.len(), 3);
+        assert!(
+            clicks
+                .iter()
+                .all(|(url, _)| url == "https://example.com/image-link")
+        );
+        assert!(!clicks[0].1.is_right_click() && !clicks[0].1.is_middle_click());
+        assert!(clicks[1].1.is_middle_click());
+        assert!(clicks[2].1.is_right_click());
+        assert_eq!(cx.opened_url(), None);
+    }
+
+    #[gpui::test]
+    fn clipped_markdown_cannot_start_selection(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let (view, cx) = cx
+            .add_window_view(|_, cx| TextViewTestRoot::new("visible\n\nhidden selection text", cx));
+        let cx: &mut VisualTestContext = cx;
+
+        cx.simulate_mouse_down(
+            point(px(10.), px(34.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_move(
+            point(px(90.), px(34.)),
+            Some(MouseButton::Left),
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_up(
+            point(px(90.), px(34.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+
+        let selected_text = view.read_with(cx, |root, cx| root.text_view.read(cx).selected_text());
+        assert!(
+            selected_text.is_empty(),
+            "unexpected selection: {selected_text:?}"
+        );
+    }
+
+    /// A tall selectable TextView clipped by a short `overflow_hidden` viewport,
+    /// with a large blank footer below so a drag can extend the selection band
+    /// past the bottom of the clip while still proxy-anchoring to the view.
+    struct ClippedTallTextViewTestRoot {
+        text_view: Entity<TextViewState>,
+    }
+
+    impl ClippedTallTextViewTestRoot {
+        fn new(cx: &mut Context<Self>) -> Self {
+            // Four separate blocks; only the first (and maybe part of the
+            // second) fit inside the 40px clip. "charlie"/"delta" render well
+            // below it.
+            let text_view =
+                cx.new(|cx| TextViewState::markdown("alpha\n\nbravo\n\ncharlie\n\ndelta", cx));
+            Self { text_view }
+        }
+    }
+
+    impl Render for ClippedTallTextViewTestRoot {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .w(px(200.))
+                .child(
+                    div()
+                        .h(px(40.))
+                        .overflow_hidden()
+                        .child(TextView::new(&self.text_view).selectable(true)),
+                )
+                // A tall blank footer so a drag can reach a y below the clipped
+                // text; a press there proxy-anchors to the TextView above.
+                .child(div().h(px(160.)))
+        }
+    }
+
+    /// Regression for copying a selection taller than the visible viewport.
+    ///
+    /// The selection band runs from visible text at the top down to a point
+    /// far below the clip. Every glyph of the painted TextView is laid out even
+    /// though the lower ones are clipped away, so the copied text must include
+    /// the clipped-out "charlie"/"delta" — not just what is on screen. This
+    /// guards against re-adding a `content_mask` gate in
+    /// `Inline::layout_selections`.
+    #[gpui::test]
+    fn selection_band_beyond_clip_copies_offscreen_text(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let content = cx.new(ClippedTallTextViewTestRoot::new);
+            crate::Root::new(content, window, cx)
+        });
+        let content = view.read_with(cx, |root, _| {
+            root.view()
+                .clone()
+                .downcast::<ClippedTallTextViewTestRoot>()
+                .unwrap()
+        });
+        let cx: &mut VisualTestContext = cx;
+
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        // Anchor on visible text near the top, then drag to a point well below
+        // the 40px clip (into the blank footer) and to the far right so the
+        // last line is fully covered.
+        cx.simulate_mouse_down(
+            point(px(2.), px(8.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.simulate_mouse_move(
+            point(px(180.), px(150.)),
+            Some(MouseButton::Left),
+            Modifiers::default(),
+        );
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.simulate_mouse_up(
+            point(px(180.), px(150.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let selected_text =
+            content.read_with(cx, |root, cx| root.text_view.read(cx).selected_text());
+        assert!(
+            selected_text.contains("delta"),
+            "clipped-out text was not copied: {selected_text:?}"
+        );
+        assert!(
+            selected_text.contains("charlie"),
+            "clipped-out text was not copied: {selected_text:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn double_click_selects_word(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let (view, cx) =
+            cx.add_window_view(|_, cx| TextViewTestRoot::new("quick select value", cx));
+
+        let cx: &mut VisualTestContext = cx;
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let position = point(px(10.), px(16.));
+        cx.simulate_event(MouseDownEvent {
+            position,
+            modifiers: Modifiers::default(),
+            button: MouseButton::Left,
+            click_count: 2,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseUpEvent {
+            position,
+            modifiers: Modifiers::default(),
+            button: MouseButton::Left,
+            click_count: 2,
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let selected_text = view.read_with(cx, |root, cx| root.text_view.read(cx).selected_text());
+        assert_eq!(selected_text.trim(), "quick");
+    }
+
+    #[gpui::test]
+    fn triple_click_selects_paragraph(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let (view, cx) =
+            cx.add_window_view(|_, cx| TextViewTestRoot::new("quick select value", cx));
+
+        let cx: &mut VisualTestContext = cx;
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let position = point(px(10.), px(10.));
+        cx.simulate_event(MouseDownEvent {
+            position,
+            modifiers: Modifiers::default(),
+            button: MouseButton::Left,
+            click_count: 3,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseUpEvent {
+            position,
+            modifiers: Modifiers::default(),
+            button: MouseButton::Left,
+            click_count: 3,
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let selected_text = view.read_with(cx, |root, cx| root.text_view.read(cx).selected_text());
+        assert_eq!(selected_text.trim(), "quick select value");
+    }
+
+    // Regression: markdown `TextView` items inside an outer `gpui::list` with
+    // `measure_all` must keep a stable total content height while scrolling.
+    // Before synchronous full-replace parsing, off-screen markdown views were
+    // first measured with empty content and the scrollbar thumb jittered as the
+    // total height grew during scrolling.
+    #[gpui::test]
+    fn outer_list_content_total_stable_while_scrolling(cx: &mut TestAppContext) {
+        use gpui::{ListAlignment, ListState, list};
+
+        const ITEMS: &[&str] = &[
+            "# Heading\n\nA paragraph long enough to wrap across several lines and produce a non-trivial height.",
+            "Short.",
+            "Paragraph A\n\nParagraph B\n\nParagraph C with more words to increase the height.",
+            "## Subheading\n\n- One\n- Two\n- Three\n\nClosing paragraph.",
+            "Only one line.",
+            "**Bold**: medium length text with `code` mixed with regular words.",
+            "1. First\n2. Second\n3. Third\n\nA short closing paragraph.",
+            "A long message with enough words to wrap across multiple lines, create a taller item, and verify that off-screen measurement matches visible measurement.",
+        ];
+        let n = 40usize;
+
+        struct ListRoot {
+            state: ListState,
+        }
+        impl Render for ListRoot {
+            fn render(&mut self, _w: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+                div().w(px(360.)).h(px(500.)).child(
+                    list(self.state.clone(), |ix, _w, _cx| {
+                        div()
+                            .w_full()
+                            .child(TextView::markdown(
+                                ("md", ix as u64),
+                                ITEMS[ix % ITEMS.len()],
+                            ))
+                            .into_any_element()
+                    })
+                    .size_full(),
+                )
+            }
+        }
+
+        cx.update(crate::init);
+        let state = ListState::new(n, ListAlignment::Top, px(2048.)).measure_all();
+        let probe = state.clone();
+        let (_view, cx) = cx.add_window_view(|_w, _cx| ListRoot { state });
+        let cx: &mut VisualTestContext = cx;
+
+        cx.run_until_parked();
+        cx.update(|w, cx| {
+            let _ = w.draw(cx);
+        });
+        cx.run_until_parked();
+        cx.update(|w, cx| {
+            let _ = w.draw(cx);
+        });
+
+        let total = |p: &ListState| {
+            f32::from(p.max_offset_for_scrollbar().y + p.viewport_bounds().size.height)
+        };
+        let mut totals = vec![total(&probe)];
+        for _ in 0..20 {
+            probe.scroll_by(px(150.));
+            cx.update(|w, cx| {
+                let _ = w.draw(cx);
+            });
+            cx.run_until_parked();
+            totals.push(total(&probe));
+        }
+        let min = totals.iter().cloned().fold(f32::INFINITY, f32::min);
+        let max = totals.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        println!(
+            "OUTER_LIST_PROBE min={min:.1} max={max:.1} delta={:.1}",
+            max - min
+        );
+        assert!(
+            (max - min) < 2.0,
+            "list content total jittered while scrolling: min={min} max={max} totals={totals:?}"
         );
     }
 }

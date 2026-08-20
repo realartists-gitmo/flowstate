@@ -1,29 +1,42 @@
 use std::{cell::RefCell, rc::Rc};
 
 use gpui::{
-    AnyElement, App, Context, Corner, DismissEvent, Element, ElementId, Entity, Focusable,
-    GlobalElementId, InspectorElementId, InteractiveElement, IntoElement, MouseButton,
-    MouseDownEvent, ParentElement, Pixels, Point, StyleRefinement, Styled, Subscription, Window,
-    anchored, deferred, div, prelude::FluentBuilder, px,
+    Anchor, AnyElement, App, Context, DismissEvent, Element, ElementId, Entity, Focusable,
+    GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, InteractiveElement, IntoElement,
+    MouseButton, MouseDownEvent, ParentElement, Pixels, Point, StyleRefinement, Styled,
+    Subscription, Window, anchored, deferred, div, prelude::FluentBuilder, px,
 };
 
 use crate::menu::PopupMenu;
 
 /// A extension trait for adding a context menu to an element.
-pub trait ContextMenuExt: ParentElement + Styled {
+pub trait ContextMenuExt: InteractiveElement + ParentElement + Styled {
     /// Add a context menu to the element.
     ///
     /// This will changed the element to be `relative` positioned, and add a child `ContextMenu` element.
     /// Because the `ContextMenu` element is positioned `absolute`, it will not affect the layout of the parent element.
+    #[track_caller]
     fn context_menu(
-        self,
+        mut self,
         f: impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static,
-    ) -> ContextMenu<Self> {
-        ContextMenu::new("context-menu", self).menu(f)
+    ) -> ContextMenu<Self>
+    where
+        Self: Sized,
+    {
+        // The ID must be stable across renders, otherwise the element state
+        // (open menu) is lost on every re-render.
+        let caller = std::panic::Location::caller();
+        let id = self
+            .interactivity()
+            .element_id
+            .clone()
+            .map(|id| ElementId::Name(format!("context-menu-{:?}", id).into()))
+            .unwrap_or_else(|| ElementId::CodeLocation(*caller));
+        ContextMenu::new(id, self).menu(f)
     }
 }
 
-impl<E: ParentElement + Styled> ContextMenuExt for E {}
+impl<E: InteractiveElement + ParentElement + Styled> ContextMenuExt for E {}
 
 /// A context menu that can be shown on right-click.
 pub struct ContextMenu<E: ParentElement + Styled + Sized> {
@@ -32,7 +45,7 @@ pub struct ContextMenu<E: ParentElement + Styled + Sized> {
     menu: Option<Rc<dyn Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu>>,
     // This is not in use, just for style refinement forwarding.
     _ignore_style: StyleRefinement,
-    anchor: Corner,
+    anchor: Anchor,
 }
 
 impl<E: ParentElement + Styled> ContextMenu<E> {
@@ -42,7 +55,7 @@ impl<E: ParentElement + Styled> ContextMenu<E> {
             id: id.into(),
             element: Some(element),
             menu: None,
-            anchor: Corner::TopLeft,
+            anchor: Anchor::TopLeft,
             _ignore_style: StyleRefinement::default(),
         }
     }
@@ -129,7 +142,7 @@ impl Default for ContextMenuState {
 
 impl<E: ParentElement + Styled + IntoElement + 'static> Element for ContextMenu<E> {
     type RequestLayoutState = ContextMenuState;
-    type PrepaintState = ();
+    type PrepaintState = Hitbox;
 
     fn id(&self) -> Option<ElementId> {
         Some(self.id.clone())
@@ -172,7 +185,9 @@ impl<E: ParentElement + Styled + IntoElement + 'static> Element for ContextMenu<
                                     div()
                                         .w(window.bounds().size.width)
                                         .h(window.bounds().size.height)
-                                        .occlude()
+                                        .on_scroll_wheel(|_, _, cx| {
+                                            cx.stop_propagation();
+                                        })
                                         .child(
                                             anchored()
                                                 .position(position)
@@ -184,7 +199,7 @@ impl<E: ParentElement + Styled + IntoElement + 'static> Element for ContextMenu<
                                                         .focus_handle(cx)
                                                         .contains_focused(window, cx)
                                                     {
-                                                        menu.focus_handle(cx).focus(window);
+                                                        menu.focus_handle(cx).focus(window, cx);
                                                     }
 
                                                     this.child(menu.clone())
@@ -192,7 +207,7 @@ impl<E: ParentElement + Styled + IntoElement + 'static> Element for ContextMenu<
                                         ),
                                 ),
                             )
-                            .with_priority(1)
+                            .with_priority(gpui_base::POPUP_PRIORITY)
                             .into_any(),
                         );
                     }
@@ -222,7 +237,7 @@ impl<E: ParentElement + Styled + IntoElement + 'static> Element for ContextMenu<
         &mut self,
         _: Option<&gpui::GlobalElementId>,
         _: Option<&InspectorElementId>,
-        _: gpui::Bounds<gpui::Pixels>,
+        bounds: gpui::Bounds<gpui::Pixels>,
         request_layout: &mut Self::RequestLayoutState,
         window: &mut Window,
         cx: &mut App,
@@ -230,15 +245,16 @@ impl<E: ParentElement + Styled + IntoElement + 'static> Element for ContextMenu<
         if let Some(element) = &mut request_layout.element {
             element.prepaint(window, cx);
         }
+        window.insert_hitbox(bounds, HitboxBehavior::Normal)
     }
 
     fn paint(
         &mut self,
         id: Option<&gpui::GlobalElementId>,
         _: Option<&InspectorElementId>,
-        bounds: gpui::Bounds<gpui::Pixels>,
+        _: gpui::Bounds<gpui::Pixels>,
         request_layout: &mut Self::RequestLayoutState,
-        _: &mut Self::PrepaintState,
+        hitbox: &mut Self::PrepaintState,
         window: &mut Window,
         cx: &mut App,
     ) {
@@ -256,12 +272,25 @@ impl<E: ParentElement + Styled + IntoElement + 'static> Element for ContextMenu<
             |_view, state: &mut ContextMenuState, window, _| {
                 let shared_state = state.shared_state.clone();
 
+                let hitbox = hitbox.clone();
                 // When right mouse click, to build content menu, and show it at the mouse position.
                 window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
                     if phase.bubble()
                         && event.button == MouseButton::Right
-                        && bounds.contains(&event.position)
+                        && hitbox.is_hovered(window)
                     {
+                        // Capture the focused element to restore focus to on dismiss.
+                        // If focus is still on the previous menu, keep its captured focus.
+                        let previous_focus_handle = window.focused(cx).and_then(|focused| {
+                            let shared_state = shared_state.borrow();
+                            match shared_state.menu_view.as_ref() {
+                                Some(menu) if menu.read(cx).focus_handle == focused => {
+                                    menu.read(cx).previous_focus_handle.clone()
+                                }
+                                _ => Some(focused),
+                            }
+                        });
+
                         {
                             let mut shared_state = shared_state.borrow_mut();
                             // Clear any existing menu view to allow immediate replacement
@@ -282,6 +311,9 @@ impl<E: ParentElement + Styled + IntoElement + 'static> Element for ContextMenu<
                                         return menu;
                                     };
                                     build(menu, window, cx)
+                                });
+                                menu.update(cx, |menu, cx| {
+                                    menu.set_previous_focus(previous_focus_handle, cx);
                                 });
 
                                 // Set up the subscription for dismiss handling
@@ -306,5 +338,108 @@ impl<E: ParentElement + Styled + IntoElement + 'static> Element for ContextMenu<
                 });
             },
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::theme::Theme;
+    use gpui::{
+        Context, FocusHandle, IntoElement, Render, TestAppContext, VisualTestContext, actions,
+        point, px,
+    };
+    use std::cell::Cell;
+
+    actions!(context_menu_test, [RemoveTab]);
+
+    /// The regression shape: the action handler lives on the trigger's
+    /// ancestor (like an action bar), which is NOT on the focus path while
+    /// focus is in the content area.
+    struct TestRoot {
+        content_focus: FocusHandle,
+        received: Rc<Cell<bool>>,
+    }
+
+    impl Render for TestRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let received = self.received.clone();
+            div()
+                .size_full()
+                .child(
+                    div()
+                        .id("content")
+                        .h(px(40.))
+                        .track_focus(&self.content_focus),
+                )
+                .child(
+                    div()
+                        .id("action-bar")
+                        .h(px(60.))
+                        .on_action(move |_: &RemoveTab, _, _| received.set(true))
+                        .child(
+                            div()
+                                .id("tab")
+                                .size_full()
+                                .context_menu(|menu, _, _| menu.menu("Close", Box::new(RemoveTab))),
+                        ),
+                )
+        }
+    }
+
+    #[gpui::test]
+    fn action_bubbles_from_trigger_and_focus_restores_on_dismiss(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Theme::default());
+            super::super::popup_menu::init(cx);
+        });
+
+        let received = Rc::new(Cell::new(false));
+        let (root, cx) = cx.add_window_view({
+            let received = received.clone();
+            move |window, cx| {
+                let content_focus = cx.focus_handle();
+                content_focus.focus(window, cx);
+                TestRoot {
+                    content_focus,
+                    received,
+                }
+            }
+        });
+        let content_focus = root.read_with(cx, |root, _| root.content_focus.clone());
+        let cx: &mut VisualTestContext = cx;
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+
+        // Right-click inside the tab to open the context menu.
+        cx.simulate_event(MouseDownEvent {
+            button: MouseButton::Right,
+            position: point(px(50.), px(70.)),
+            modifiers: Default::default(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        // The menu entity is built in a deferred callback, then rendered
+        // (which also focuses it) on the next draw.
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+
+        // Select "Close" and confirm. Keyboard confirm and mouse click share
+        // the same `confirm` path in `PopupMenu`.
+        cx.simulate_keystrokes("down enter");
+        cx.run_until_parked();
+
+        // The action must reach the handler on the trigger's ancestor chain,
+        // even though the action bar was never on the focus path.
+        assert!(received.get());
+        // And dismiss must restore focus to where it was before the menu
+        // opened, keeping the dangling-focus fix (#2614).
+        cx.update(|window, cx| {
+            assert_eq!(window.focused(cx).as_ref(), Some(&content_focus));
+        });
     }
 }

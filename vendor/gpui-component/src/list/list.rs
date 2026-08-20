@@ -1,5 +1,5 @@
+use instant::Duration;
 use std::ops::Range;
-use std::time::Duration;
 
 use crate::actions::{Cancel, Confirm, SelectDown, SelectUp};
 use crate::input::InputState;
@@ -14,7 +14,7 @@ use crate::{Icon, IndexPath, Selectable, Sizable, StyledExt};
 use crate::{VirtualListScrollHandle, list::ListDelegate, v_virtual_list};
 use gpui::{
     App, AvailableSpace, ClickEvent, Context, DefiniteLength, EdgesRefinement, EventEmitter,
-    ListSizingBehavior, RenderOnce, ScrollStrategy, SharedString, StatefulInteractiveElement,
+    ListSizingBehavior, RenderOnce, Role, ScrollStrategy, SharedString, StatefulInteractiveElement,
     StyleRefinement, Subscription, px, size,
 };
 use gpui::{
@@ -22,7 +22,6 @@ use gpui::{
     Length, MouseButton, ParentElement, Render, Styled, Task, Window, div, prelude::FluentBuilder,
 };
 use rust_i18n::t;
-use smol::Timer;
 
 pub(crate) fn init(cx: &mut App) {
     let context: Option<&str> = Some("List");
@@ -155,7 +154,7 @@ where
 
     /// Focus the list, if the list is searchable, focus the search input.
     pub fn focus(&mut self, window: &mut Window, cx: &mut App) {
-        self.focus_handle(cx).focus(window);
+        self.focus_handle(cx).focus(window, cx);
     }
 
     /// Return true if either the list or the search input is focused.
@@ -194,6 +193,33 @@ where
 
     pub fn selected_index(&self) -> Option<IndexPath> {
         self.selected_index
+    }
+
+    /// Set the index of the item that has been right clicked.
+    pub fn set_right_clicked_index(
+        &mut self,
+        ix: Option<IndexPath>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.mouse_right_clicked_index = ix;
+        self.delegate.set_right_clicked_index(ix, window, cx);
+    }
+
+    /// Returns the index of the item that has been right clicked.
+    pub fn right_clicked_index(&self) -> Option<IndexPath> {
+        self.mouse_right_clicked_index
+    }
+
+    /// Set the query text of the search input, this will trigger a search.
+    pub fn set_query(&mut self, query: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let query = query.to_string();
+        self.query_input.update(cx, |input, cx| {
+            input.set_value(query.clone(), window, cx);
+        });
+
+        // `set_value` does not emit `InputEvent::Change`, so start the search here.
+        self.start_search(query.trim().to_string(), window, cx);
     }
 
     /// Set a specific list item for measurement.
@@ -254,39 +280,39 @@ where
                     return;
                 }
 
-                self.set_searching(true, window, cx);
-                let search = self.delegate.perform_search(&text, window, cx);
-
-                if self.rows_cache.len() > 0 {
-                    self._set_selected_index(Some(IndexPath::default()), window, cx);
-                } else {
-                    self._set_selected_index(None, window, cx);
-                }
-
-                self._search_task = cx.spawn_in(window, async move |this, window| {
-                    search.await;
-
-                    _ = this.update_in(window, |this, _, _| {
-                        this.scroll_handle.scroll_to_item(0, ScrollStrategy::Top);
-                        this.last_query = Some(text);
-                    });
-
-                    // Always wait 100ms to avoid flicker
-                    Timer::after(Duration::from_millis(100)).await;
-                    _ = this.update_in(window, |this, window, cx| {
-                        this.set_searching(false, window, cx);
-                    });
-                });
+                self.start_search(text, window, cx);
             }
-            InputEvent::PressEnter { secondary } => self.on_action_confirm(
-                &Confirm {
-                    secondary: *secondary,
-                },
-                window,
-                cx,
-            ),
             _ => {}
         }
+    }
+
+    fn start_search(&mut self, query: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_searching(true, window, cx);
+        let search = self.delegate.perform_search(&query, window, cx);
+
+        if self.rows_cache.len() > 0 {
+            self._set_selected_index(Some(IndexPath::default()), window, cx);
+        } else {
+            self._set_selected_index(None, window, cx);
+        }
+
+        self._search_task = cx.spawn_in(window, async move |this, window| {
+            search.await;
+
+            _ = this.update_in(window, |this, _, _| {
+                this.scroll_handle.scroll_to_item(0, ScrollStrategy::Top);
+                this.last_query = Some(query);
+            });
+
+            // Always wait 100ms to avoid flicker
+            window
+                .background_executor()
+                .timer(Duration::from_millis(100))
+                .await;
+            _ = this.update_in(window, |this, window, cx| {
+                this.set_searching(false, window, cx);
+            });
+        });
     }
 
     fn set_searching(&mut self, searching: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -309,7 +335,7 @@ where
         // Securely handle subtract logic to prevent attempt
         // to subtract with overflow
         if visible_end >= entities_count.saturating_sub(threshold) {
-            if !self.delegate.is_eof(cx) {
+            if !self.delegate.has_more(cx) {
                 return;
             }
 
@@ -399,8 +425,7 @@ where
     }
 
     fn prepare_items_if_needed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let sections_count = self.delegate.sections_count(cx);
-
+        let sections_count = self.delegate.sections_count(cx).max(1);
         let mut measured_size = MeasuredEntrySize::default();
 
         // Measure the item_height and section header/footer height.
@@ -445,8 +470,14 @@ where
             .unwrap_or(false);
         let id = SharedString::from(format!("list-item-{}", ix));
 
+        let total_items = self.rows_cache.items_count();
+
         div()
             .id(id)
+            .role(Role::ListItem)
+            .aria_position_in_set(ix.row + 1)
+            .aria_size_of_set(total_items)
+            .aria_selected(selected)
             .w_full()
             .relative()
             .overflow_hidden()
@@ -456,7 +487,7 @@ where
             }))
             .when(selectable, |this| {
                 this.on_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
-                    this.mouse_right_clicked_index = None;
+                    this.set_right_clicked_index(None, window, cx);
                     this.selected_index = Some(ix);
                     this.on_action_confirm(
                         &Confirm {
@@ -468,8 +499,8 @@ where
                 }))
                 .on_mouse_down(
                     MouseButton::Right,
-                    cx.listener(move |this, _, _, cx| {
-                        this.mouse_right_clicked_index = Some(ix);
+                    cx.listener(move |this, _, window, cx| {
+                        this.set_right_clicked_index(Some(ix), window, cx);
                         cx.notify();
                     }),
                 )
@@ -486,9 +517,13 @@ where
         let rows_cache = self.rows_cache.clone();
         let scrollbar_visible = self.options.scrollbar_visible;
         let scroll_handle = self.scroll_handle.clone();
+        let item_to_measure_index = rows_cache
+            .position_of(&self.item_to_measure_index)
+            .or_else(|| rows_cache.first_entry_position())
+            .unwrap_or(0);
 
         v_flex()
-            .flex_grow()
+            .flex_grow_1()
             .relative()
             .size_full()
             .when_some(self.options.max_height, |this, h| this.max_h(h))
@@ -539,6 +574,7 @@ where
                                     .collect::<Vec<_>>()
                             },
                         )
+                        .with_item_to_measure_index(item_to_measure_index)
                         .paddings(self.options.paddings.clone())
                         .when(self.options.max_height.is_some(), |this| {
                             this.with_sizing_behavior(ListSizingBehavior::Infer)
@@ -655,8 +691,8 @@ where
                     })
                     // Click out to cancel right clicked row
                     .when(mouse_right_clicked_index.is_some(), |this| {
-                        this.on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                            this.mouse_right_clicked_index = None;
+                        this.on_mouse_down_out(cx.listener(|this, _, window, cx| {
+                            this.set_right_clicked_index(None, window, cx);
                             cx.notify();
                         }))
                     })
@@ -736,6 +772,7 @@ where
 
         div()
             .id("list")
+            .role(Role::List)
             .size_full()
             .refine_style(&self.style)
             .child(self.state.clone())

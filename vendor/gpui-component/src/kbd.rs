@@ -1,6 +1,6 @@
 use gpui::{
-    div, relative, Action, AsKeystroke, FocusHandle, IntoElement, KeyContext, Keystroke,
-    ParentElement as _, RenderOnce, StyleRefinement, Styled, Window,
+    Action, AsKeystroke, FocusHandle, Half, IntoElement, KeyContext, Keystroke, ParentElement as _,
+    RenderOnce, StyleRefinement, Styled, Window, div, prelude::FluentBuilder as _, relative,
 };
 
 use crate::{ActiveTheme, StyledExt};
@@ -11,6 +11,7 @@ pub struct Kbd {
     style: StyleRefinement,
     stroke: Keystroke,
     appearance: bool,
+    outline: bool,
 }
 
 impl From<Keystroke> for Kbd {
@@ -19,6 +20,7 @@ impl From<Keystroke> for Kbd {
             style: StyleRefinement::default(),
             stroke,
             appearance: true,
+            outline: false,
         }
     }
 }
@@ -30,12 +32,19 @@ impl Kbd {
             style: StyleRefinement::default(),
             stroke,
             appearance: true,
+            outline: false,
         }
     }
 
     /// Set the appearance of the keybinding, default is `true`.
     pub fn appearance(mut self, appearance: bool) -> Self {
         self.appearance = appearance;
+        self
+    }
+
+    /// Use outline style for the keybinding, default is `false`.
+    pub fn outline(mut self) -> Self {
+        self.outline = true;
         self
     }
 
@@ -80,9 +89,9 @@ impl Kbd {
     /// Windows: https://support.microsoft.com/en-us/windows/keyboard-shortcuts-in-windows-dcc61a57-8ff0-cffe-9796-cb9706c75eec
     pub fn format(key: &Keystroke) -> String {
         #[cfg(target_os = "macos")]
-        const DIVIDER: &str = "";
+        const SEPARATOR: &str = "";
         #[cfg(not(target_os = "macos"))]
-        const DIVIDER: &str = "+";
+        const SEPARATOR: &str = "+";
 
         let mut parts = vec![];
 
@@ -195,7 +204,7 @@ impl Kbd {
         }
 
         parts.push(&keys);
-        parts.join(DIVIDER)
+        parts.join(SEPARATOR)
     }
 }
 
@@ -212,15 +221,18 @@ impl RenderOnce for Kbd {
         }
 
         div()
-            .border_1()
-            .border_color(cx.theme().border)
             .text_color(cx.theme().muted_foreground)
-            .bg(cx.theme().background)
+            .bg(cx.theme().tokens.muted)
+            .when(self.outline, |this| {
+                this.border_1()
+                    .border_color(cx.theme().border)
+                    .bg(cx.theme().tokens.background)
+            })
             .py_0p5()
             .px_1()
             .min_w_5()
             .text_center()
-            .rounded_sm()
+            .rounded(cx.theme().radius.half())
             .line_height(relative(1.))
             .text_xs()
             .whitespace_normal()

@@ -20,7 +20,8 @@ flowstate-collab = { workspace = true }
 flowstate-flow = { workspace = true }
 flowstate-tub = { workspace = true }
 futures-util = "0.3"
-gpui = { workspace = true }
+gpui = { workspace = true, features = ["wayland", "x11"] }
+gpui_platform = { workspace = true, features = ["wayland", "x11"] }
 gpui-component = { workspace = true }
 gpui-component-assets = { workspace = true }
 hotpath = { workspace = true }
@@ -75,6 +76,7 @@ gpui-symbols = { workspace = true }
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 cosmic-text = { workspace = true }
+zed-font-kit.workspace = true
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
