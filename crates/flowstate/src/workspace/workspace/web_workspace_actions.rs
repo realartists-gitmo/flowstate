@@ -28,7 +28,8 @@ impl Workspace {
   }
 
   pub fn new_document(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-    let editor = cx.new(|cx| RichTextEditor::new_with_path(gpui_flowtext::demo_document(), None, cx));
+    let document = document_from_input(flowstate_document_theme(), Vec::new());
+    let editor = cx.new(|cx| RichTextEditor::new_with_path(document, None, cx));
     let workspace = cx.entity().downgrade();
     let panel = cx.new(|cx| {
       DocumentPanel::new_with_title(

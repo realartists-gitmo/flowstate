@@ -20,12 +20,13 @@ impl Workspace {
     let toolkit_subscription = cx.subscribe(&toolkit_search_input, |_, _, _: &InputEvent, _| {});
     let keybinding_interceptor = cx.intercept_keystrokes(|_, _, _| {});
 
-    let document = gpui_flowtext::demo_document();
+    let mut document = gpui_flowtext::demo_document();
+    document.theme = flowstate_document_theme();
     let editor = cx.new(|cx| RichTextEditor::new_with_path(document, None, cx));
     let workspace = cx.entity().downgrade();
     let panel = cx.new(|cx| {
       DocumentPanel::new_with_title(
-        Some("Flowstate Web Document".to_string()),
+        Some("Untitled.db8".to_string()),
         None,
         editor.clone(),
         workspace,
