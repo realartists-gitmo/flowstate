@@ -4,17 +4,33 @@
 //! calls into this library. The future full editor can depend on this crate,
 //! create a `RichTextEditor`, and render it through `RichTextEditorView`.
 
+#[cfg(not(target_family = "wasm"))]
 pub mod app;
+#[cfg(not(target_family = "wasm"))]
 pub mod app_settings;
+#[cfg(not(target_family = "wasm"))]
 pub mod collab;
+#[cfg(not(target_family = "wasm"))]
 pub mod commands;
+#[cfg(not(target_family = "wasm"))]
 pub mod docx_conversion;
+#[cfg(not(target_family = "wasm"))]
 pub mod file_search;
+#[cfg(not(target_family = "wasm"))]
 pub mod flow;
+#[cfg(not(target_family = "wasm"))]
 pub mod logging;
+#[cfg(not(target_family = "wasm"))]
 pub mod ribbon;
+#[cfg(not(target_family = "wasm"))]
 pub mod rich_text_element;
+#[cfg(not(target_family = "wasm"))]
 pub mod workspace;
 
+#[cfg(target_family = "wasm")]
+mod web;
+
+#[cfg(not(target_family = "wasm"))]
 pub use app::{RichTextEditorView, register_rich_text_editor_keybindings, run_standalone, write_demo_document};
+#[cfg(not(target_family = "wasm"))]
 pub use rich_text_element::*;

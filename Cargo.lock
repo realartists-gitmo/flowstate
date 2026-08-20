@@ -3173,6 +3173,7 @@ dependencies = [
  "gpui",
  "gpui-component",
  "gpui-component-assets",
+ "gpui-flowtext",
  "gpui-symbols",
  "gpui_platform",
  "hotpath",
@@ -3191,6 +3192,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "wasm-bindgen",
  "zed-font-kit",
 ]
 
