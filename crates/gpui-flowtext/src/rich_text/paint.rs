@@ -568,8 +568,8 @@ pub(super) fn scroll_by(scroll_handle: &ScrollHandle, delta_y: Pixels) -> bool {
 #[hotpath::measure]
 pub(super) fn clamp_scroll_offset(scroll_handle: &ScrollHandle, mut offset: Point<Pixels>) -> Point<Pixels> {
   let max = scroll_handle.max_offset();
-  offset.x = offset.x.min(px(0.0)).max(-max.width);
-  offset.y = offset.y.min(px(0.0)).max(-max.height);
+  offset.x = offset.x.min(px(0.0)).max(-max.x);
+  offset.y = offset.y.min(px(0.0)).max(-max.y);
   offset
 }
 

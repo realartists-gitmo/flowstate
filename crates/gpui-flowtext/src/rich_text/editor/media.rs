@@ -86,7 +86,7 @@ impl RichTextEditor {
     let Some(Block::Image(image)) = self.document.blocks.get(block_ix).cloned() else {
       return;
     };
-    window.focus(&self.focus_handle);
+    window.focus(&self.focus_handle, cx);
     self.selected_block = Some(BlockSelection::Image(block_ix));
     self.table_cell_block_ix = 0;
     self.table_cell_caret = 0;
