@@ -3169,6 +3169,7 @@ dependencies = [
  "flowstate-fidelity",
  "flowstate-flow",
  "flowstate-tub",
+ "futures-channel",
  "futures-util",
  "gpui",
  "gpui-component",
@@ -3178,6 +3179,7 @@ dependencies = [
  "gpui_platform",
  "hotpath",
  "iroh",
+ "js-sys",
  "loro",
  "memchr",
  "mimalloc",
@@ -3193,6 +3195,8 @@ dependencies = [
  "url",
  "uuid",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
  "zed-font-kit",
 ]
 

@@ -20,20 +20,10 @@ impl Workspace {
     let toolkit_subscription = cx.subscribe(&toolkit_search_input, |_, _, _: &InputEvent, _| {});
     let keybinding_interceptor = cx.intercept_keystrokes(|_, _, _| {});
 
-    let mut document = gpui_flowtext::demo_document();
-    document.theme = flowstate_document_theme();
+    let document = document_from_input(flowstate_document_theme(), Vec::new());
     let editor = cx.new(|cx| RichTextEditor::new_with_path(document, None, cx));
     let workspace = cx.entity().downgrade();
-    let panel = cx.new(|cx| {
-      DocumentPanel::new_with_title(
-        Some("Untitled.db8".to_string()),
-        None,
-        editor.clone(),
-        workspace,
-        window,
-        cx,
-      )
-    });
+    let panel = cx.new(|cx| DocumentPanel::new_with_title(Some("Untitled.db8".to_string()), None, editor.clone(), workspace, window, cx));
     let id = panel.read(cx).id();
 
     Self {

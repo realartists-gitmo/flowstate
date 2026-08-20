@@ -320,6 +320,8 @@ impl DocumentStyleSection {
 include!("documents.rs");
 #[cfg(target_family = "wasm")]
 include!("web_documents.rs");
+#[cfg(target_family = "wasm")]
+mod web_file_picker;
 #[cfg(not(target_family = "wasm"))]
 include!("collab_prompts.rs");
 #[cfg(not(target_family = "wasm"))]
