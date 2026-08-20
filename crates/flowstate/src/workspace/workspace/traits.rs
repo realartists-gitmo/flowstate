@@ -28,33 +28,33 @@ impl Render for Workspace {
       },
     );
 
+    let content = v_flex()
+      .on_action(cx.listener(Self::on_zoom_in))
+      .on_action(cx.listener(Self::on_zoom_out))
+      .size_full()
+      .bg(cx.theme().background)
+      .child(self.render_top_bar(window, cx))
+      .child(
+        v_flex()
+          .flex_1()
+          .min_h_0()
+          .overflow_hidden()
+          .child(self.render_resizable_workspace(cx)),
+      )
+      .child(self.render_status_bar(window, cx));
+    #[cfg(not(target_family = "wasm"))]
+    let content = content
+      .on_action(cx.listener(Self::on_save))
+      .on_action(cx.listener(Self::on_find_in_document))
+      .on_action(cx.listener(Self::on_fidelity_mark));
+
     div()
       .size_full()
       .relative()
       .child(zoom_wheel_hook)
-      .child(
-        v_flex()
-          .on_action(cx.listener(Self::on_save))
-          .on_action(cx.listener(Self::on_find_in_document))
-          .on_action(cx.listener(Self::on_fidelity_mark))
-          .on_action(cx.listener(Self::on_zoom_in))
-          .on_action(cx.listener(Self::on_zoom_out))
-          .size_full()
-          .bg(cx.theme().background)
-          .child(self.render_top_bar(window, cx))
-          .child(
-            v_flex()
-              .flex_1()
-              .min_h_0()
-              .overflow_hidden()
-              .child(self.render_resizable_workspace(cx)),
-          )
-          .child(self.render_status_bar(window, cx)),
-      )
-      .when_some(self.settings_overlay, |this, overlay| {
-        this.child(self.render_settings_overlay(overlay, cx))
-      })
-      .when_some(self.file_search_overlay.clone(), |this, overlay| this.child(overlay))
+      .child(content)
+      .when_some(self.settings_overlay_element(cx), |this, overlay| this.child(overlay))
+      .when_some(self.file_search_overlay_element(), |this, overlay| this.child(overlay))
       .when_some(self.outline_context_menu.as_ref(), |this, ctx| {
         let workspace = cx.entity().downgrade();
         let menu = ctx.menu_view.clone();
@@ -86,5 +86,29 @@ impl Render for Workspace {
       })
       .when_some(Root::render_dialog_layer(window, cx), |this, layer| this.child(layer))
       .when_some(Root::render_notification_layer(window, cx), |this, layer| this.child(layer))
+  }
+}
+
+impl Workspace {
+  #[cfg(not(target_family = "wasm"))]
+  fn settings_overlay_element(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    self
+      .settings_overlay
+      .map(|overlay| self.render_settings_overlay(overlay, cx).into_any_element())
+  }
+
+  #[cfg(target_family = "wasm")]
+  fn settings_overlay_element(&mut self, _cx: &mut Context<Self>) -> Option<AnyElement> {
+    None
+  }
+
+  #[cfg(not(target_family = "wasm"))]
+  fn file_search_overlay_element(&self) -> Option<Entity<FileSearchOverlay>> {
+    self.file_search_overlay.clone()
+  }
+
+  #[cfg(target_family = "wasm")]
+  fn file_search_overlay_element(&self) -> Option<AnyElement> {
+    None
   }
 }
