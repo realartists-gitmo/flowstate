@@ -1,9 +1,6 @@
-use std::{
-  borrow::Cow,
-  io,
-  path::{Path, PathBuf},
-  sync::Arc,
-};
+use std::{borrow::Cow, path::PathBuf};
+#[cfg(not(target_family = "wasm"))]
+use std::{io, path::Path, sync::Arc};
 
 use gpui::{
   App, AssetSource, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyBinding, ParentElement,
@@ -16,9 +13,10 @@ use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt a
 
 use crate::app_settings::{load_app_settings, load_keymap};
 use crate::commands::register_keymap;
-use crate::rich_text_element::{
-  DocumentExportAdapter, DocumentExportFormat, DocumentProjection, RichTextEditor, demo_document, set_document_export_adapter,
-};
+use crate::rich_text_element::{DocumentProjection, RichTextEditor};
+#[cfg(not(target_family = "wasm"))]
+use crate::rich_text_element::{DocumentExportAdapter, DocumentExportFormat, demo_document, set_document_export_adapter};
+#[cfg(not(target_family = "wasm"))]
 use crate::workspace::open_workspace_window;
 
 const PROMPT_CONTEXT: &str = "FlowPrompt";
@@ -78,7 +76,7 @@ pub fn register_rich_text_editor_keybindings(cx: &mut App) {
 }
 
 #[hotpath::measure]
-fn install_prompt_renderer(cx: &mut App) {
+pub(crate) fn install_prompt_renderer(cx: &mut App) {
   cx.bind_keys([
     KeyBinding::new("enter", FlowPromptAccept, Some(PROMPT_CONTEXT)),
     KeyBinding::new("escape", FlowPromptCancel, Some(PROMPT_CONTEXT)),
@@ -288,6 +286,7 @@ impl Focusable for FlowPromptRenderer {
 /// Regenerate the bundled demo document. Kept in the library so other tooling
 /// can call the same maintenance path as the standalone binary.
 #[hotpath::measure]
+#[cfg(not(target_family = "wasm"))]
 pub fn write_demo_document() -> anyhow::Result<()> {
   let document = demo_document();
   let mut runtime = flowstate_collab::crdt_runtime::CrdtRuntime::from_document_projection(&document, "Flowstate Demo")?;
@@ -295,8 +294,10 @@ pub fn write_demo_document() -> anyhow::Result<()> {
   Ok(())
 }
 
+#[cfg(not(target_family = "wasm"))]
 struct FlowstateFlowtextAdapter;
 
+#[cfg(not(target_family = "wasm"))]
 impl DocumentExportAdapter for FlowstateFlowtextAdapter {
   fn send_output_directory(&self, source_path: Option<&Path>, recovery_path: Option<&Path>) -> Option<PathBuf> {
     if crate::app_settings::load_send_to_document_directory() {
@@ -321,6 +322,7 @@ impl DocumentExportAdapter for FlowstateFlowtextAdapter {
 }
 
 #[hotpath::measure]
+#[cfg(not(target_family = "wasm"))]
 fn install_flowtext_adapters() {
   let adapter = Arc::new(FlowstateFlowtextAdapter);
   let _ = set_document_export_adapter(adapter);
@@ -328,6 +330,7 @@ fn install_flowtext_adapters() {
 
 /// Run the rich text processor by itself for focused component development.
 #[hotpath::measure]
+#[cfg(not(target_family = "wasm"))]
 pub fn run_standalone(mut document_path: Option<PathBuf>) {
   let initial_invite = document_path
     .as_ref()
@@ -342,7 +345,7 @@ pub fn run_standalone(mut document_path: Option<PathBuf>) {
   }
   let (open_url_tx, open_url_rx) = async_channel::unbounded();
   let initial_url_tx = open_url_tx.clone();
-  let application = gpui_platform::application().with_assets(AppAssets);
+  let application = gpui_platform::application().with_assets(AppAssets::default());
   application.on_open_urls(move |urls| {
     for url in urls {
       let _ = open_url_tx.try_send(url);
@@ -395,7 +398,11 @@ pub fn run_standalone(mut document_path: Option<PathBuf>) {
   });
 }
 
-struct AppAssets;
+#[derive(Default)]
+pub(crate) struct AppAssets {
+  #[cfg(target_family = "wasm")]
+  component: gpui_component_assets::Assets,
+}
 
 #[hotpath::measure_all]
 impl AssetSource for AppAssets {
@@ -434,13 +441,19 @@ impl AssetSource for AppAssets {
       "logo/flowstate-mark.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/logo/flowstate-mark.svg")))),
       "logo/flowstate-mark-white.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/logo/flowstate-mark-white.svg")))),
       "logo/flowstate-mark-black.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/logo/flowstate-mark-black.svg")))),
+      #[cfg(not(target_family = "wasm"))]
       _ => gpui_component_assets::Assets.load(path),
+      #[cfg(target_family = "wasm")]
+      _ => self.component.load(path),
     }
   }
 
   #[hotpath::measure]
   fn list(&self, path: &str) -> Result<Vec<SharedString>> {
+    #[cfg(not(target_family = "wasm"))]
     let mut assets = gpui_component_assets::Assets.list(path)?;
+    #[cfg(target_family = "wasm")]
+    let mut assets = self.component.list(path)?;
     if "icons/save.svg".starts_with(path) {
       assets.push("icons/save.svg".into());
     }
@@ -545,6 +558,7 @@ impl AssetSource for AppAssets {
 }
 
 #[hotpath::measure]
+#[cfg(not(target_family = "wasm"))]
 fn init_theme_registry(cx: &mut App) {
   let themes_dir = vendored_themes_dir();
   if let Err(error) = ThemeRegistry::watch_dir(themes_dir, cx, apply_saved_theme) {
@@ -553,6 +567,7 @@ fn init_theme_registry(cx: &mut App) {
 }
 
 #[hotpath::measure]
+#[cfg(not(target_family = "wasm"))]
 fn vendored_themes_dir() -> PathBuf {
   let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
   let workspace_dir = manifest_dir
