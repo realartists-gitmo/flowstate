@@ -7,10 +7,10 @@
 //! handle; collaboration only adds the I/O service draining the publish queue
 //! on the other side of the same gate.
 
+use instant::Instant;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
 
 use flowstate_document::DocumentProjection;
 

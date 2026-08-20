@@ -11,6 +11,7 @@ workspace = true
 gpui-flowtext = { workspace = true }
 gpui.workspace = true
 imagesize = { workspace = true }
+instant = { workspace = true }
 rustc-hash = { workspace = true }
 blake3 = "1.8.5"
 loro.workspace = true

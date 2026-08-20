@@ -22,7 +22,7 @@ pub(crate) fn search_units_from_input_blocks(
   document_id: u128,
   frontier: &[u8],
 ) -> io::Result<Vec<SearchUnitChunk>> {
-  let probe0 = std::time::Instant::now();
+  let probe0 = instant::Instant::now();
   let body = crate::loro_schema::body_text(doc);
   let body_paragraph_ranges = body_paragraph_cursor_ranges(&body);
   let probe_ranges = probe0.elapsed();
@@ -34,7 +34,7 @@ pub(crate) fn search_units_from_input_blocks(
     .flat_map(|range| [(range.start, loro::cursor::Side::Left), (range.end, loro::cursor::Side::Right)])
     .collect();
   let probe = std::env::var_os("FLOWSTATE_OPEN_PROBE").is_some();
-  let probe_t = std::time::Instant::now();
+  let probe_t = instant::Instant::now();
   let resolved = {
     use loro::ContainerTrait as _;
     body.to_handler().get_cursors_batch(&cursor_queries)
@@ -65,12 +65,12 @@ pub(crate) fn search_units_from_input_blocks(
     body_paragraph_ix: 0,
     theme: flowstate_document_theme(),
   };
-  let probe_t = std::time::Instant::now();
+  let probe_t = instant::Instant::now();
   for block in input_blocks {
     builder.push_block(block, &body);
   }
   let probe_blocks = probe_t.elapsed();
-  let probe_t = std::time::Instant::now();
+  let probe_t = instant::Instant::now();
   builder.push_loro_object_units(doc)?;
   if probe {
     eprintln!(

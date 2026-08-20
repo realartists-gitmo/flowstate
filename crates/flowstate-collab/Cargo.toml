@@ -11,6 +11,7 @@ flowstate-document.workspace = true
 flowstate-fidelity.workspace = true
 gpui-flowtext = { workspace = true }
 hotpath.workspace = true
+instant = { workspace = true }
 loro = { workspace = true }
 postcard = { workspace = true }
 rustc-hash = { workspace = true }

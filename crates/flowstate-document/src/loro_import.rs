@@ -602,7 +602,7 @@ impl FlowTextImportPlan {
     });
     static POP_PROBE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let pop_probe = *POP_PROBE.get_or_init(|| std::env::var_os("FLOWSTATE_POPULATE_PROBE").is_some());
-    let probe_t = std::time::Instant::now();
+    let probe_t = instant::Instant::now();
     hotpath::measure_block!("import_body_single_insert", text.insert(0, &full_text)?);
     if pop_probe {
       eprintln!(
@@ -612,7 +612,7 @@ impl FlowTextImportPlan {
         self.delta.len()
       );
     }
-    let probe_t = std::time::Instant::now();
+    let probe_t = instant::Instant::now();
 
     // Per-key run merging: adjacent spans that share one (key, value) pair
     // become a single mark op even when their full attribute maps differ.
