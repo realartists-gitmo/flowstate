@@ -1514,33 +1514,31 @@ impl Workspace {
         },
       };
 
-      match editor.update(cx, |editor, cx| editor.save_as(path.clone(), cx)) {
-        Ok(task) => match task.await {
-          Ok(()) => {
-            let _ = workspace.update(cx, |workspace, cx| {
-              if let Some(panel) = workspace
-                .document_panels
-                .iter()
-                .find(|panel| panel.read(cx).id() == panel_id)
-              {
-                panel.update(cx, |panel, cx| panel.set_path(path, cx));
-              }
-              workspace.persist_temporary_workspace_session(cx);
-              // Advertise the save checkpoint to collaborators (no-op when the
-              // panel has no active collaboration session).
-              crate::collab::refresh_after_external_checkpoint(panel_id, cx);
-              cx.notify();
-            });
-          },
-          Err(error) => {
-            let detail = error.to_string();
-            let _ = window_handle.update(cx, |_, window, cx| {
-              window.prompt(PromptLevel::Critical, "Save failed", Some(&detail), &[PromptButton::ok("Ok")], cx)
-            });
-          },
+      match editor
+        .update(cx, |editor, cx| editor.save_as(path.clone(), cx))
+        .await
+      {
+        Ok(()) => {
+          let _ = workspace.update(cx, |workspace, cx| {
+            if let Some(panel) = workspace
+              .document_panels
+              .iter()
+              .find(|panel| panel.read(cx).id() == panel_id)
+            {
+              panel.update(cx, |panel, cx| panel.set_path(path, cx));
+            }
+            workspace.persist_temporary_workspace_session(cx);
+            // Advertise the save checkpoint to collaborators (no-op when the
+            // panel has no active collaboration session).
+            crate::collab::refresh_after_external_checkpoint(panel_id, cx);
+            cx.notify();
+          });
         },
         Err(error) => {
-          eprintln!("failed to access editor before save: {error}");
+          let detail = error.to_string();
+          let _ = window_handle.update(cx, |_, window, cx| {
+            window.prompt(PromptLevel::Critical, "Save failed", Some(&detail), &[PromptButton::ok("Ok")], cx)
+          });
         },
       }
     })
