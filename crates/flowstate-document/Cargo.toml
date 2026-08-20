@@ -12,9 +12,7 @@ gpui-flowtext = { workspace = true }
 gpui.workspace = true
 imagesize = { workspace = true }
 rustc-hash = { workspace = true }
-# §A13.1.2: "rayon" enables update_rayon — multithreaded hashing for the
-# multi-MB chunk payloads still verified on the open path.
-blake3 = { version = "1.8.5", features = ["rayon"] }
+blake3 = "1.8.5"
 loro.workspace = true
 postcard.workspace = true
 serde.workspace = true
@@ -23,11 +21,18 @@ serde.workspace = true
 # for a memcpy-scale one. Old packages decode unchanged.
 serde_bytes = "0.11"
 uuid.workspace = true
-tempfile.workspace = true
-atomicwrites = "0.4.4"
 flowstate-fidelity.workspace = true
 hotpath.workspace = true
 loro-internal = "1.13.1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# §A13.1.2: native builds use Rayon for multi-MB chunk hashing. Browser
+# builds stay single-threaded unless the host opts into a threaded WASM setup.
+blake3 = { version = "1.8.5", features = ["rayon"] }
+atomicwrites = "0.4.4"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+tempfile.workspace = true
 
 [package.metadata.cargo-machete]
 # serde_bytes is used via `#[serde(with = "serde_bytes")]` attributes in

@@ -2813,11 +2813,14 @@ fn validate_version_vector(bytes: &[u8], label: &'static str) -> io::Result<()> 
 fn blake3_hash(bytes: &[u8]) -> [u8; 32] {
   // §A13.1.2: multithread the hash for multi-MB payloads (3-6GB/s vs ~1);
   // below the threshold the rayon fan-out costs more than it saves.
-  const RAYON_HASH_MIN_BYTES: usize = 1024 * 1024;
-  if bytes.len() >= RAYON_HASH_MIN_BYTES {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update_rayon(bytes);
-    return *hasher.finalize().as_bytes();
+  #[cfg(not(target_arch = "wasm32"))]
+  {
+    const RAYON_HASH_MIN_BYTES: usize = 1024 * 1024;
+    if bytes.len() >= RAYON_HASH_MIN_BYTES {
+      let mut hasher = blake3::Hasher::new();
+      hasher.update_rayon(bytes);
+      return *hasher.finalize().as_bytes();
+    }
   }
   *blake3::hash(bytes).as_bytes()
 }
@@ -3091,6 +3094,7 @@ fn package_map_i64(map: &loro::LoroMap, key: &str) -> Option<i64> {
   }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
   let parent = path
     .parent()
@@ -3100,6 +3104,14 @@ fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
   atomicwrites::AtomicFile::new(path, atomicwrites::AllowOverwrite)
     .write(|file| file.write_all(bytes))
     .map_err(Into::into)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn write_bytes_atomic(_: &Path, _: &[u8]) -> io::Result<()> {
+  Err(io::Error::new(
+    io::ErrorKind::Unsupported,
+    "filesystem persistence requires a native host adapter",
+  ))
 }
 
 #[cfg(test)]

@@ -22,7 +22,6 @@ resvg = { workspace = true }
 rustc-hash = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-tempfile = { workspace = true }
 tracing.workspace = true
 typst = { workspace = true }
 typst-assets = { workspace = true, features = ["fonts"] }
@@ -39,6 +38,9 @@ flowstate-collab = { path = "../flowstate-collab" }
 flowstate-document.workspace = true
 gpui = { workspace = true, features = ["test-support"] }
 loro = "1.13"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+tempfile = { workspace = true }
 
 [features]
 hotpath = ["hotpath/hotpath"]
