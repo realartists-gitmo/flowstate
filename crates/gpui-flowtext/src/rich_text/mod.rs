@@ -27,7 +27,7 @@ use paint::*;
 use selection::*;
 use word_boundary::*;
 
-use std::time::Instant;
+use instant::Instant;
 
 // Shared timing utility. Setting `DEBATEPROCESSOR_TIMING=1` in the environment
 // turns on per-operation `[timing] ...` lines on stderr; useful for spotting

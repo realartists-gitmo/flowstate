@@ -4170,6 +4170,7 @@ dependencies = [
  "hotpath",
  "im",
  "imagesize 0.13.0",
+ "instant",
  "loro",
  "mitex",
  "resvg 0.45.1",

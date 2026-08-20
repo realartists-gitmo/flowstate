@@ -17,6 +17,7 @@ gpui-component = { workspace = true }
 hotpath = { workspace = true }
 im = "15.1.0"
 imagesize = { workspace = true }
+instant = { workspace = true }
 mitex = { workspace = true }
 resvg = { workspace = true }
 rustc-hash = { workspace = true }

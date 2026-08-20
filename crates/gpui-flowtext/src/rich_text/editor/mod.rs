@@ -9,10 +9,11 @@ use std::{
   pin::Pin,
   rc::Rc,
   sync::{Arc, Mutex, OnceLock},
-  time::{Duration, Instant},
+  time::Duration,
 };
 
 use crop::Rope;
+use instant::Instant;
 use gpui::{
   App, Bounds, ClipboardEntry, ClipboardItem, Context, CursorStyle, DragMoveEvent, Entity, EntityInputHandler, ExternalPaths, FocusHandle,
   Focusable, Image, ImageFormat, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,

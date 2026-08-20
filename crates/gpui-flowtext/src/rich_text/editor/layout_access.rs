@@ -393,7 +393,7 @@ impl RichTextEditor {
     // projection apply — then this stays quiet and the collab path is the cause).
     // Logged always (not gated on `enabled()`), at WARN, so it survives even with
     // fidelity tracing off and can't be lost to a dropped-under-load JSONL buffer.
-    let render_started = std::time::Instant::now();
+    let render_started = Instant::now();
     // §hang-probe: one line per render-layout pass capturing the virtualization
     // state that drives the scroll-materialization loop. In a freeze this fires
     // continuously; diffing consecutive lines shows WHICH field changes each
