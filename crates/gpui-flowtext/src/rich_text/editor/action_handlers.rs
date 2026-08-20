@@ -53,9 +53,11 @@ impl RichTextEditor {
   }
   fn on_delete_word_backward(&mut self, _: &DeleteWordBackward, _: &mut Window, cx: &mut Context<Self>) {
     self.delete_word_backward_command(cx);
+    cx.stop_propagation();
   }
   fn on_delete_word_forward(&mut self, _: &DeleteWordForward, _: &mut Window, cx: &mut Context<Self>) {
     self.delete_word_forward_command(cx);
+    cx.stop_propagation();
   }
   fn on_page_up(&mut self, _: &PageUp, _: &mut Window, cx: &mut Context<Self>) {
     self.page_up(cx);
@@ -173,9 +175,11 @@ impl RichTextEditor {
   }
   fn on_backspace(&mut self, _: &Backspace, _: &mut Window, cx: &mut Context<Self>) {
     self.backspace_command(cx);
+    cx.stop_propagation();
   }
   fn on_delete(&mut self, _: &Delete, _: &mut Window, cx: &mut Context<Self>) {
     self.delete_forward_command(cx);
+    cx.stop_propagation();
   }
   fn on_insert_newline(&mut self, _: &InsertNewline, _: &mut Window, cx: &mut Context<Self>) {
     if self.split_selected_table_cell_paragraph(cx) {
@@ -203,25 +207,6 @@ impl RichTextEditor {
     let m = &event.keystroke.modifiers;
     if m.control || m.platform {
       return;
-    }
-    // GPUI Web currently lets non-text deletion keys reach its hidden DOM
-    // input when no platform action consumes the key. Route them through the
-    // editor here as a browser fallback and stop the DOM default; otherwise a
-    // Backspace mutates the 1px input instead of this document and subsequent
-    // character input can remain detached from the editor.
-    #[cfg(target_family = "wasm")]
-    match event.keystroke.key.as_str() {
-      "backspace" => {
-        self.backspace_command(cx);
-        cx.stop_propagation();
-        return;
-      },
-      "delete" => {
-        self.delete_forward_command(cx);
-        cx.stop_propagation();
-        return;
-      },
-      _ => {},
     }
     if event.keystroke.key == "tab" && self.move_selected_table_cell(!m.shift, cx) {
       return;
