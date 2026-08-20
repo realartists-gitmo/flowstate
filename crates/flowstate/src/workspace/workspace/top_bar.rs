@@ -111,6 +111,7 @@ fn document_top_bar_button(cx: &mut Context<Workspace>) -> impl IntoElement {
     )
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn collaboration_top_bar_button(cx: &mut Context<Workspace>, has_document: bool, active_collaborating: bool) -> impl IntoElement {
   let workspace = cx.entity().downgrade();
   div()
@@ -172,6 +173,23 @@ fn collaboration_top_bar_button(cx: &mut Context<Workspace>, has_document: bool,
               },
             ))
         }),
+    )
+}
+
+#[cfg(target_family = "wasm")]
+fn collaboration_top_bar_button(_cx: &mut Context<Workspace>, _has_document: bool, _active_collaborating: bool) -> impl IntoElement {
+  div()
+    .h_full()
+    .flex_none()
+    .flex()
+    .items_center()
+    .justify_center()
+    .child(
+      Button::new("top-collaborate")
+        .label("Collaborate")
+        .xsmall()
+        .ghost()
+        .disabled(true),
     )
 }
 
@@ -295,6 +313,7 @@ fn insert_top_bar_button(cx: &mut Context<Workspace>, has_document: bool) -> imp
 }
 
 #[hotpath::measure]
+#[cfg(not(target_family = "wasm"))]
 fn share_top_bar_button(cx: &mut Context<Workspace>, has_document: bool, collaborating: bool) -> impl IntoElement {
   let workspace = cx.entity().downgrade();
   let button = Button::new("top-share-document")
@@ -324,6 +343,23 @@ fn share_top_bar_button(cx: &mut Context<Workspace>, has_document: bool, collabo
     } else {
       button
     })
+}
+
+#[cfg(target_family = "wasm")]
+fn share_top_bar_button(_cx: &mut Context<Workspace>, _has_document: bool, _collaborating: bool) -> impl IntoElement {
+  div()
+    .h_full()
+    .flex_none()
+    .flex()
+    .items_center()
+    .justify_center()
+    .child(
+      Button::new("top-share-document")
+        .label("Share")
+        .xsmall()
+        .ghost()
+        .disabled(true),
+    )
 }
 
 #[hotpath::measure]
