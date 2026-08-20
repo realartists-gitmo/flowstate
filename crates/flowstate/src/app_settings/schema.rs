@@ -1,4 +1,7 @@
-use std::{fs, io, path::PathBuf};
+use std::{io, path::PathBuf};
+
+#[cfg(not(target_family = "wasm"))]
+use std::fs;
 
 use gpui::{Hsla, px};
 use serde::{Deserialize, Serialize};
@@ -7,6 +10,7 @@ use crate::ribbon::RibbonMode;
 use crate::rich_text_element::{
   CustomParagraphBorder, CustomParagraphStyle, CustomSemanticStyle, DocumentTheme, ThemeUnderline, flowstate_document_theme,
 };
+#[cfg(not(target_family = "wasm"))]
 use dirs::{config_dir, data_dir};
 
 #[derive(Clone, Default, Deserialize, Serialize)]
