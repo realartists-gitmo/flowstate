@@ -31,12 +31,19 @@ impl Workspace {
 
   pub fn new_document(&mut self, window: &mut Window, cx: &mut Context<Self>) {
     let document = document_from_input(flowstate_document_theme(), Vec::new());
-    self.add_web_document(document, "Untitled.db8".to_string(), window, cx);
+    let runtime = flowstate_collab::crdt_runtime::CrdtRuntime::from_document_projection(&document, "Untitled.db8")
+      .expect("blank browser document must create a write runtime");
+    self.add_web_document(runtime, "Untitled.db8".to_string(), window, cx);
   }
 
-  fn add_web_document(&mut self, mut document: DocumentProjection, title: String, window: &mut Window, cx: &mut Context<Self>) {
-    document.theme = flowstate_document_theme();
-    let editor = cx.new(|cx| RichTextEditor::new_with_path(document, None, cx));
+  fn add_web_document(
+    &mut self,
+    runtime: flowstate_collab::crdt_runtime::CrdtRuntime,
+    title: String,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) {
+    let editor = create_web_editor(runtime, flowstate_document_theme(), cx).expect("browser document must attach its write authority");
     let workspace = cx.entity().downgrade();
     let panel = cx.new(|cx| DocumentPanel::new_with_title(Some(title), None, editor.clone(), workspace, window, cx));
     let id = panel.read(cx).id();
@@ -62,10 +69,12 @@ impl Workspace {
     cx.spawn(async move |workspace, cx| {
       let picked = web_file_picker::pick_db8_file().await;
       let Some((title, bytes)) = picked.ok().flatten() else { return };
-      let parsed = flowstate_document::read_db8_bytes(&bytes);
+      let parsed = flowstate_document::DocumentPackage::from_bytes(&bytes)
+        .map_err(|error| error.to_string())
+        .and_then(|package| flowstate_collab::crdt_runtime::CrdtRuntime::from_package(package, None).map_err(|error| error.to_string()));
       let _ = window_handle.update(cx, |_, window, cx| {
         let _ = workspace.update(cx, |workspace, cx| match parsed {
-          Ok(document) => workspace.add_web_document(document, title, window, cx),
+          Ok(runtime) => workspace.add_web_document(runtime, title, window, cx),
           Err(error) => {
             let detail = format!("Flowstate couldn't read this DB8 document: {error}");
             std::mem::drop(window.prompt(

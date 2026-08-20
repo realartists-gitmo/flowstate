@@ -23,6 +23,7 @@ gpui-component = { workspace = true }
 gpui-component-assets = { workspace = true }
 gpui-flowtext = { workspace = true }
 flowstate-document = { workspace = true }
+flowstate-collab = { workspace = true }
 hotpath = { workspace = true }
 memchr = "2.8.1"
 rustc-hash = { workspace = true }
@@ -39,7 +40,6 @@ clap = { workspace = true }
 dirs = { workspace = true }
 fff-search = { workspace = true }
 flowstate-docx = { workspace = true }
-flowstate-collab = { workspace = true }
 flowstate-flow = { workspace = true }
 flowstate-tub = { workspace = true }
 futures-util = "0.3"

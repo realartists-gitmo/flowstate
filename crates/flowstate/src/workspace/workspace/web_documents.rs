@@ -21,7 +21,9 @@ impl Workspace {
     let keybinding_interceptor = cx.intercept_keystrokes(|_, _, _| {});
 
     let document = document_from_input(flowstate_document_theme(), Vec::new());
-    let editor = cx.new(|cx| RichTextEditor::new_with_path(document, None, cx));
+    let runtime = flowstate_collab::crdt_runtime::CrdtRuntime::from_document_projection(&document, "Untitled.db8")
+      .expect("blank browser document must create a write runtime");
+    let editor = create_web_editor(runtime, flowstate_document_theme(), cx).expect("blank browser document must attach its write authority");
     let workspace = cx.entity().downgrade();
     let panel = cx.new(|cx| DocumentPanel::new_with_title(Some("Untitled.db8".to_string()), None, editor.clone(), workspace, window, cx));
     let id = panel.read(cx).id();
@@ -85,6 +87,20 @@ impl Workspace {
       _keybinding_interceptor: keybinding_interceptor,
     }
   }
+}
+
+fn create_web_editor(
+  runtime: flowstate_collab::crdt_runtime::CrdtRuntime,
+  theme: DocumentTheme,
+  cx: &mut Context<Workspace>,
+) -> Result<Entity<RichTextEditor>, String> {
+  let (authority, _) = flowstate_collab::local_write::LocalDocHandle::new(runtime, flowstate_collab::local_write::LocalWriteConfig::default());
+  let authority = Arc::new(authority);
+  let mut document = authority.projection().map_err(|error| error.to_string())?;
+  document.theme = theme;
+  let editor = cx.new(|cx| RichTextEditor::new_with_path(document.clone(), None, cx));
+  editor.update(cx, |editor, cx| editor.set_write_authority(authority, document, cx));
+  Ok(editor)
 }
 
 pub fn open_workspace_window(document_path: Option<PathBuf>, cx: &mut App) -> WeakEntity<Workspace> {
