@@ -330,7 +330,6 @@ include!("workspace_state.rs");
 #[cfg(not(target_family = "wasm"))]
 include!("load.rs");
 include!("traits.rs");
-#[cfg(not(target_family = "wasm"))]
 include!("render_settings.rs");
 include!("render_top_bar.rs");
 include!("render_body.rs");

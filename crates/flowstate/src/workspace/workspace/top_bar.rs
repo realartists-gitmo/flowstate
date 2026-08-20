@@ -74,6 +74,7 @@ fn flowstate_top_bar_button(cx: &mut Context<Workspace>) -> impl IntoElement {
     )
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn document_top_bar_button(cx: &mut Context<Workspace>) -> impl IntoElement {
   let workspace = cx.entity().downgrade();
   div()
@@ -108,6 +109,26 @@ fn document_top_bar_button(cx: &mut Context<Workspace>) -> impl IntoElement {
             }))
           })
         }),
+    )
+}
+
+#[cfg(target_family = "wasm")]
+fn document_top_bar_button(cx: &mut Context<Workspace>) -> impl IntoElement {
+  div()
+    .h_full()
+    .flex_none()
+    .flex()
+    .items_center()
+    .justify_center()
+    .child(
+      Button::new("top-document")
+        .label("Document")
+        .xsmall()
+        .ghost()
+        .on_click(cx.listener(|workspace, _, _, cx| {
+          workspace.settings_overlay = Some(WorkspaceSettingsOverlay::Styles);
+          cx.notify();
+        })),
     )
 }
 
@@ -390,6 +411,7 @@ fn insert_default_equation_from_top_bar(workspace: &WeakEntity<Workspace>, cx: &
 }
 
 #[hotpath::measure]
+#[cfg(not(target_family = "wasm"))]
 fn settings_top_bar_button(cx: &mut Context<Workspace>) -> impl IntoElement {
   let workspace = cx.entity().downgrade();
   div()
@@ -422,6 +444,28 @@ fn settings_top_bar_button(cx: &mut Context<Workspace>) -> impl IntoElement {
             }))
           })
         }),
+    )
+}
+
+#[hotpath::measure]
+#[cfg(target_family = "wasm")]
+fn settings_top_bar_button(cx: &mut Context<Workspace>) -> impl IntoElement {
+  div()
+    .h_full()
+    .flex_none()
+    .flex()
+    .items_center()
+    .justify_center()
+    .child(
+      Button::new("top-settings")
+        .label("Settings")
+        .xsmall()
+        .ghost()
+        .on_click(cx.listener(|workspace, _, _, cx| {
+          workspace.settings_section = WorkspaceSettingsSection::General;
+          workspace.settings_overlay = Some(WorkspaceSettingsOverlay::Settings);
+          cx.notify();
+        })),
     )
 }
 

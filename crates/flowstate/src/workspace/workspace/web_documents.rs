@@ -20,7 +20,7 @@ impl Workspace {
     let toolkit_subscription = cx.subscribe(&toolkit_search_input, |_, _, _: &InputEvent, _| {});
     let keybinding_interceptor = cx.intercept_keystrokes(|_, _, _| {});
 
-    let document = document_from_input(flowstate_document_theme(), Vec::new());
+    let document = blank_web_document();
     let runtime = flowstate_collab::crdt_runtime::CrdtRuntime::from_document_projection(&document, "Untitled.db8")
       .expect("blank browser document must create a write runtime");
     let editor = create_web_editor(runtime, flowstate_document_theme(), cx).expect("blank browser document must attach its write authority");
@@ -87,6 +87,19 @@ impl Workspace {
       _keybinding_interceptor: keybinding_interceptor,
     }
   }
+}
+
+fn blank_web_document() -> DocumentProjection {
+  document_from_input(
+    flowstate_document_theme(),
+    vec![InputParagraph {
+      style: ParagraphStyle::Normal,
+      runs: vec![InputRun {
+        text: String::new(),
+        styles: crate::rich_text_element::RunStyles::default(),
+      }],
+    }],
+  )
 }
 
 fn create_web_editor(

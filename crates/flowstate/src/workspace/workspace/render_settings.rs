@@ -586,7 +586,7 @@ impl Workspace {
   }
 
   fn workspace_settings_pages(&self, workspace: WeakEntity<Workspace>) -> Vec<SettingPage> {
-    vec![
+    let mut pages = vec![
       SettingPage::new("General")
         .default_open(true)
         .group(reset_workspace_settings_section_group(
@@ -601,6 +601,9 @@ impl Workspace {
             .item(send_to_document_directory_item(workspace.clone()))
             .item(send_custom_directory_item(workspace.clone())),
         ),
+    ];
+    #[cfg(not(target_family = "wasm"))]
+    pages.push(
       SettingPage::new("Collaboration")
         .group(reset_workspace_settings_section_group(
           workspace.clone(),
@@ -621,6 +624,8 @@ impl Workspace {
             .item(dropbox_connection_item(workspace.clone()))
             .item(dropbox_document_binding_item(workspace.clone())),
         ),
+    );
+    pages.push(
       SettingPage::new("Keymap")
         .group(reset_workspace_settings_section_group(
           workspace.clone(),
@@ -631,7 +636,8 @@ impl Workspace {
             .title("Keyboard shortcuts")
             .item(keymap_editor_item(workspace)),
         ),
-    ]
+    );
+    pages
   }
 }
 
@@ -733,6 +739,7 @@ impl Workspace {
       WorkspaceSettingsSection::General => {
         self.autosave_enabled = false;
         self.autosave_document_generations.clear();
+        #[cfg(not(target_family = "wasm"))]
         self.autosave_flow_in_flight.clear();
         for panel in &self.document_panels {
           let editor = panel.read(cx).editor();
@@ -769,6 +776,7 @@ impl Workspace {
           .detach();
         cx.notify();
       },
+      #[cfg(not(target_family = "wasm"))]
       WorkspaceSettingsSection::Collaboration => {
         if let Err(error) = crate::app_settings::save_collaboration_discovery_options(false, false) {
           tracing::warn!(%error, "resetting collaboration discovery settings failed");
@@ -776,6 +784,8 @@ impl Workspace {
         crate::collab::reconfigure_discovery(cx);
         cx.notify();
       },
+      #[cfg(target_family = "wasm")]
+      WorkspaceSettingsSection::Collaboration => {},
     }
   }
 }

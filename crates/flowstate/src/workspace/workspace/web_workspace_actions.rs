@@ -30,7 +30,7 @@ impl Workspace {
   }
 
   pub fn new_document(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-    let document = document_from_input(flowstate_document_theme(), Vec::new());
+    let document = blank_web_document();
     let runtime = flowstate_collab::crdt_runtime::CrdtRuntime::from_document_projection(&document, "Untitled.db8")
       .expect("blank browser document must create a write runtime");
     self.add_web_document(runtime, "Untitled.db8".to_string(), window, cx);

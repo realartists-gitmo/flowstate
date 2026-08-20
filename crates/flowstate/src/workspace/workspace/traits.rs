@@ -90,16 +90,10 @@ impl Render for Workspace {
 }
 
 impl Workspace {
-  #[cfg(not(target_family = "wasm"))]
   fn settings_overlay_element(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
     self
       .settings_overlay
       .map(|overlay| self.render_settings_overlay(overlay, cx).into_any_element())
-  }
-
-  #[cfg(target_family = "wasm")]
-  fn settings_overlay_element(&mut self, _cx: &mut Context<Self>) -> Option<AnyElement> {
-    None
   }
 
   #[cfg(not(target_family = "wasm"))]
