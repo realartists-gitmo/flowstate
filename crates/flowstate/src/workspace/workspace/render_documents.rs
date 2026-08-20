@@ -20,7 +20,7 @@ impl Workspace {
       .h_full()
       .overflow_hidden()
       .bg(cx.theme().background)
-      .when(!(self.document_panels.is_empty() && self.flow_panels.is_empty()), |this| {
+      .when(!self.document_panels.is_empty() || self.has_flow_panels(), |this| {
         this.child(self.render_document_tab_bar(active_index, cx))
       })
       .child(
@@ -36,13 +36,33 @@ impl Workspace {
           .when_some(self.active_editor.clone(), |this, editor| {
             this.child(div().flex_1().overflow_hidden().child(editor))
           })
-          .when_some(self.active_flow.clone(), |this, editor| {
+          .when_some(self.active_flow_element(), |this, editor| {
             this.child(div().flex_1().overflow_hidden().child(editor))
           })
-          .when(self.active_editor.is_none() && self.active_flow.is_none(), |this| {
+          .when(self.active_editor.is_none() && self.active_flow_element().is_none(), |this| {
             this.child(self.render_empty_state(cx))
           }),
       )
+  }
+
+  #[cfg(not(target_family = "wasm"))]
+  fn has_flow_panels(&self) -> bool {
+    !self.flow_panels.is_empty()
+  }
+
+  #[cfg(target_family = "wasm")]
+  fn has_flow_panels(&self) -> bool {
+    false
+  }
+
+  #[cfg(not(target_family = "wasm"))]
+  fn active_flow_element(&self) -> Option<Entity<FlowEditor>> {
+    self.active_flow.clone()
+  }
+
+  #[cfg(target_family = "wasm")]
+  fn active_flow_element(&self) -> Option<AnyElement> {
+    None
   }
 
   fn render_document_tab_bar(&self, active_index: usize, cx: &mut Context<Self>) -> impl IntoElement {
@@ -75,7 +95,7 @@ impl Workspace {
       .children(tabs.into_iter().map(|tab| {
         let panel_id = tab.id;
         let workspace = workspace.clone();
-        let collab_phase = crate::collab::phase_for_panel(panel_id, cx);
+        let collab_badge = collaboration_tab_badge(panel_id, cx);
         let tab_prefix = h_flex()
           .ml(px(5.0))
           .mr(px(-3.0))
@@ -106,9 +126,7 @@ impl Workspace {
                 .child(pin_label),
             )
           })
-          .when_some(collab_phase.as_ref().and_then(|phase| crate::collab::status::tab_badge(phase, cx)), |this, badge| {
-            this.child(badge)
-          });
+          .when_some(collab_badge, |this, badge| this.child(badge));
         let close_button = icon_button(("close-tab", panel_id.as_u128() as u64), AppIcon::Close)
           .tooltip("Close document")
           .when(tab.active, |this| {
@@ -140,4 +158,23 @@ impl Workspace {
       }))
       .last_empty_space(div().flex_1().h_full())
   }
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn collaboration_tab_badge(panel_id: Uuid, cx: &mut Context<Workspace>) -> Option<AnyElement> {
+  crate::collab::phase_for_panel(panel_id, cx)
+    .as_ref()
+    .and_then(|phase| crate::collab::status::tab_badge(phase, cx))
+    .map(IntoElement::into_any_element)
+}
+
+#[cfg(target_family = "wasm")]
+fn collaboration_tab_badge(_panel_id: Uuid, _cx: &mut Context<Workspace>) -> Option<AnyElement> {
+  None
+}
+
+#[cfg(target_family = "wasm")]
+fn pin_shortcut_label(pin_index: usize) -> Option<&'static str> {
+  const LABELS: [&str; 10] = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"];
+  LABELS.get(pin_index).copied()
 }
