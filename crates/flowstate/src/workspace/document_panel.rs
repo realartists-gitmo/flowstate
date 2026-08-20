@@ -5,7 +5,7 @@ use gpui::{
   prelude::*,
 };
 use gpui_component::ActiveTheme as _;
-use gpui_component::dock::{Panel, PanelControl, PanelEvent, PanelInfo, PanelState};
+use gpui_component::dock::{BasePanel, Panel, PanelControl, PanelEvent, PanelInfo, PanelState};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -271,32 +271,9 @@ impl Focusable for DocumentPanel {
 }
 
 #[hotpath::measure_all]
-impl Panel for DocumentPanel {
+impl BasePanel for DocumentPanel {
   fn panel_name(&self) -> &'static str {
     "DocumentPanel"
-  }
-
-  #[hotpath::measure]
-  fn tab_name(&self, cx: &App) -> Option<SharedString> {
-    Some(self.display_title(cx))
-  }
-
-  #[hotpath::measure]
-  fn title(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-    self.display_title(cx).clone()
-  }
-
-  #[hotpath::measure]
-  fn title_suffix(&mut self, _: &mut Window, _cx: &mut Context<Self>) -> Option<impl IntoElement> {
-    let workspace = self.workspace.clone();
-    let panel_id = self.id;
-    Some(
-      icon_button(("close-document-panel", panel_id.as_u128() as u64), AppIcon::Close)
-        .tooltip("Close document")
-        .on_click(move |_, window, cx| {
-          let _ = workspace.update(cx, |workspace, cx| workspace.close_document_panel(panel_id, window, cx));
-        }),
-    )
   }
 
   #[hotpath::measure]
@@ -305,8 +282,8 @@ impl Panel for DocumentPanel {
   }
 
   #[hotpath::measure]
-  fn zoomable(&self, _: &App) -> Option<PanelControl> {
-    Some(PanelControl::Both)
+  fn zoomable(&self, _: &App) -> bool {
+    true
   }
 
   #[hotpath::measure]
@@ -350,7 +327,33 @@ impl Panel for DocumentPanel {
     }
   }
 
-  #[hotpath::measure]
+}
+
+impl Panel for DocumentPanel {
+  fn tab_name(&self, cx: &App) -> Option<SharedString> {
+    Some(self.display_title(cx))
+  }
+
+  fn title(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    self.display_title(cx).clone()
+  }
+
+  fn title_suffix(&mut self, _: &mut Window, _cx: &mut Context<Self>) -> Option<impl IntoElement> {
+    let workspace = self.workspace.clone();
+    let panel_id = self.id;
+    Some(
+      icon_button(("close-document-panel", panel_id.as_u128() as u64), AppIcon::Close)
+        .tooltip("Close document")
+        .on_click(move |_, window, cx| {
+          let _ = workspace.update(cx, |workspace, cx| workspace.close_document_panel(panel_id, window, cx));
+        }),
+    )
+  }
+
+  fn zoom_control(&self, _: &App) -> Option<PanelControl> {
+    Some(PanelControl::Both)
+  }
+
   fn inner_padding(&self, _: &App) -> bool {
     false
   }

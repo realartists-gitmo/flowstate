@@ -81,7 +81,7 @@ impl Workspace {
         resizable_panel()
           .size(toolkit_width)
           .size_range(toolkit_width..toolkit_range_end)
-          .grow(false)
+          .flex_none()
           .child(if self.toolkit_collapsed {
             self
               .render_collapsed_side_panel("Show toolkit", IconName::PanelRightOpen, |workspace, cx| workspace.toggle_toolkit(cx), cx)

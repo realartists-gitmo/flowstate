@@ -262,10 +262,13 @@ impl Workspace {
             div().flex_1().overflow_hidden().child(
               Settings::new(settings_id)
                 .sidebar_width(px(176.0))
-                .selected_page(if overlay == WorkspaceSettingsOverlay::Styles {
-                  self.document_style_section.index()
-                } else {
-                  self.settings_section.index()
+                .default_selected_index(gpui_component::setting::SelectIndex {
+                  page_ix: if overlay == WorkspaceSettingsOverlay::Styles {
+                    self.document_style_section.index()
+                  } else {
+                    self.settings_section.index()
+                  },
+                  group_ix: None,
                 })
                 .pages(pages),
             ),

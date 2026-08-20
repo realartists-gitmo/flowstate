@@ -643,9 +643,9 @@ impl Workspace {
     if self.outline_scrolled_paragraph == Some(paragraph_ix) {
       return;
     }
-    let id = outline_item_id(paragraph_ix);
+    let id = outline_item_id(paragraph_ix).into();
     self.outline_tree.update(cx, |tree, _| {
-      if let Some(ix) = tree.item_index_by_id(&id) {
+      if let Some(ix) = tree.index_of(&id) {
         tree.scroll_to_item(ix, gpui::ScrollStrategy::Center);
       }
     });
