@@ -6,7 +6,7 @@ use flowstate_collab::{
   presence::{PresenceState, PresenceStore},
 };
 use flowstate_fidelity::{self as fidelity, FidelityClass};
-use gpui::{Context, Timer};
+use gpui::Context;
 
 use super::{CollabSession, SessionNotice};
 
@@ -122,7 +122,9 @@ impl CollabSession {
     }
     self.presence_refresh_pending = true;
     cx.spawn(async move |session, cx| {
-      Timer::after(PRESENCE_REFRESH_DEBOUNCE).await;
+      cx.background_executor()
+        .timer(PRESENCE_REFRESH_DEBOUNCE)
+        .await;
       let _ = session.update(cx, |session, cx| {
         session.presence_refresh_pending = false;
         session.refresh_own_presence(cx);
@@ -146,7 +148,9 @@ impl CollabSession {
     }
     self.external_caret_refresh_pending = true;
     cx.spawn(async move |session, cx| {
-      Timer::after(EXTERNAL_CARET_REFRESH_DEBOUNCE).await;
+      cx.background_executor()
+        .timer(EXTERNAL_CARET_REFRESH_DEBOUNCE)
+        .await;
       let _ = session.update(cx, |session, cx| {
         session.external_caret_refresh_pending = false;
         session.refresh_external_carets_now(cx);
@@ -166,7 +170,9 @@ impl CollabSession {
     let generation = self.comment_annotation_refresh_generation;
     let session_id = self.session;
     cx.spawn(async move |session, cx| {
-      Timer::after(EXTERNAL_CARET_REFRESH_DEBOUNCE).await;
+      cx.background_executor()
+        .timer(EXTERNAL_CARET_REFRESH_DEBOUNCE)
+        .await;
       let result = runtime.comments().await;
       let _ = session.update(cx, |session, cx| {
         if session.comment_annotation_refresh_generation != generation {

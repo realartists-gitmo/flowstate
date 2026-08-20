@@ -8,7 +8,7 @@ use flowstate_collab::{
   identity::{PortableIdentitySecret, SignedProfile},
 };
 use futures_util::{FutureExt as _, future::Either};
-use gpui::{App, Timer};
+use gpui::{App, BackgroundExecutor};
 use iroh::EndpointAddr;
 
 use crate::app_settings::{load_app_settings, load_dropbox_collaboration};
@@ -61,8 +61,9 @@ impl DiscoveryRuntime {
     let bluetooth_enabled = settings.bluetooth_collaboration_discovery_enabled && !settings.collaboration_discovery_paused;
     let discovery_paused = settings.collaboration_discovery_paused;
     let (commands, receiver) = async_channel::unbounded();
+    let executor = cx.borrow_mut().background_executor().clone();
     cx.borrow_mut()
-      .spawn(async move |_| run_discovery_actor(receiver, dropbox, bluetooth_enabled, discovery_paused))
+      .spawn(async move |_| run_discovery_actor(receiver, dropbox, bluetooth_enabled, discovery_paused, executor))
       .detach();
     Self { commands }
   }
@@ -103,6 +104,7 @@ async fn run_discovery_actor(
   dropbox: Option<(flowstate_collab::dropbox::DropboxCredentials, String)>,
   bluetooth_enabled: bool,
   discovery_paused: bool,
+  executor: BackgroundExecutor,
 ) {
   let mut backends: Vec<Arc<dyn RendezvousBackend>> = Vec::new();
   if !discovery_paused {
@@ -121,7 +123,7 @@ async fn run_discovery_actor(
   let mut bluetooth_cursor = 0_usize;
   loop {
     let command = receiver.recv().boxed();
-    let refresh = Timer::after(DISCOVERY_REFRESH).boxed();
+    let refresh = executor.timer(DISCOVERY_REFRESH).boxed();
     match futures_util::future::select(command, refresh).await {
       Either::Left((Ok(DiscoveryCommand::Upsert(publication)), _)) => {
         let session = publication.session;
