@@ -259,6 +259,7 @@ impl Workspace {
       .collect()
   }
 
+  #[cfg(not(target_family = "wasm"))]
   fn dirty_panels(&self, cx: &App) -> Vec<PanelKind> {
     let mut panels = self
       .document_panels
@@ -297,7 +298,10 @@ impl Workspace {
     if let Some(editor) = editor {
       self.active_document_id = Some(panel_id);
       self.active_editor = Some(editor);
-      self.active_flow = None;
+      #[cfg(not(target_family = "wasm"))]
+      {
+        self.active_flow = None;
+      }
       self.outline_cache = None;
       self.restore_outline_state_for_document(panel_id, cx);
       self.refresh_outline_tree(cx);
@@ -305,6 +309,7 @@ impl Workspace {
       cx.notify();
       return;
     }
+    #[cfg(not(target_family = "wasm"))]
     if let Some(panel) = self
       .flow_panels
       .iter()
@@ -331,10 +336,14 @@ impl Workspace {
       .document_panels
       .iter()
       .map(|panel| panel.read(cx).id())
-      .chain(self.flow_panels.iter().map(|panel| panel.read(cx).id()))
       .collect();
+    #[cfg(not(target_family = "wasm"))]
+    ids.extend(self.flow_panels.iter().map(|panel| panel.read(cx).id()));
     ids.sort_by_key(|id| {
-      let pin_index = self.pinned_document_ids.iter().position(|pinned| pinned == id);
+      let pin_index = self
+        .pinned_document_ids
+        .iter()
+        .position(|pinned| pinned == id);
       (pin_index.is_none(), pin_index.unwrap_or(usize::MAX))
     });
     ids.iter().position(|id| *id == active_id)
@@ -387,6 +396,7 @@ impl Workspace {
     self.persist_temporary_workspace_session(cx);
   }
 
+  #[cfg(not(target_family = "wasm"))]
   pub(crate) fn toggle_speech_document(&mut self, panel_id: Uuid, cx: &mut Context<Self>) {
     self.speech_document_id = if self.speech_document_id == Some(panel_id) {
       None
@@ -415,12 +425,13 @@ impl Workspace {
     // §perf: build the set of live panel ids once instead of rebuilding the entire
     // labeled tab Vec for every pinned id. A tab exists for each document/flow panel,
     // so membership in this set is equivalent to matching some tab.id.
-    let live_ids: FxHashSet<Uuid> = self
+    let mut live_ids: FxHashSet<Uuid> = self
       .document_panels
       .iter()
       .map(|panel| panel.read(cx).id())
-      .chain(self.flow_panels.iter().map(|panel| panel.read(cx).id()))
       .collect();
+    #[cfg(not(target_family = "wasm"))]
+    live_ids.extend(self.flow_panels.iter().map(|panel| panel.read(cx).id()));
     let pinned = self
       .pinned_document_ids
       .iter()
@@ -476,6 +487,7 @@ impl Workspace {
     wrapped
   }
 
+  #[cfg(not(target_family = "wasm"))]
   pub(crate) fn send_selection_to_speech_document(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
     let Some(speech_document_id) = self.speech_document_id else {
       return false;
@@ -511,6 +523,7 @@ impl Workspace {
     true
   }
 
+  #[cfg(not(target_family = "wasm"))]
   pub(crate) fn send_selection_to_speech_document_end(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
     let Some(speech_document_id) = self.speech_document_id else {
       return false;
@@ -578,6 +591,7 @@ impl Workspace {
         }
       })
       .collect::<Vec<_>>();
+    #[cfg(not(target_family = "wasm"))]
     tabs.extend(self.flow_panels.iter().map(|panel| {
       let panel = panel.read(cx);
       let title = panel.title_text();
