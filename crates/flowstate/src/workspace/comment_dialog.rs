@@ -179,7 +179,7 @@ impl CommentDialog {
       .edit_input
       .update(cx, |input, cx| input.set_value(body, window, cx));
     self.editing_message = Some((comment_id, message_id));
-    self.edit_input.focus_handle(cx).focus(window);
+    self.edit_input.focus_handle(cx).focus(window, cx);
     cx.notify();
   }
 

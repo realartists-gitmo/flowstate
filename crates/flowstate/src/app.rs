@@ -6,9 +6,9 @@ use std::{
 };
 
 use gpui::{
-  App, Application, AssetSource, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyBinding,
-  ParentElement, PromptButton, PromptHandle, PromptLevel, PromptResponse, Render, RenderablePromptHandle, Result, SharedString, Styled, Window,
-  actions, div, prelude::*, px, relative, rgb,
+  App, AssetSource, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyBinding, ParentElement,
+  PromptButton, PromptHandle, PromptLevel, PromptResponse, Render, RenderablePromptHandle, Result, SharedString, Styled, Window, actions, div,
+  prelude::*, px, relative, rgb,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::scroll::ScrollableElement;
@@ -342,7 +342,7 @@ pub fn run_standalone(mut document_path: Option<PathBuf>) {
   }
   let (open_url_tx, open_url_rx) = async_channel::unbounded();
   let initial_url_tx = open_url_tx.clone();
-  let application = Application::new().with_assets(AppAssets);
+  let application = gpui_platform::application().with_assets(AppAssets);
   application.on_open_urls(move |urls| {
     for url in urls {
       let _ = open_url_tx.try_send(url);
@@ -361,9 +361,7 @@ pub fn run_standalone(mut document_path: Option<PathBuf>) {
     }
     cx.spawn(async move |cx| {
       while let Ok(url) = open_url_rx.recv().await {
-        let handled = cx
-          .update(|cx| crate::collab::dropbox_oauth::route_callback(&url, cx))
-          .unwrap_or(false);
+        let handled = cx.update(|cx| crate::collab::dropbox_oauth::route_callback(&url, cx));
         if handled {
           continue;
         }

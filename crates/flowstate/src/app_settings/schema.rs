@@ -1,7 +1,6 @@
 use std::{fs, io, path::PathBuf};
 
 use gpui::{Hsla, px};
-use gpui_component::PixelsExt;
 use serde::{Deserialize, Serialize};
 
 use crate::ribbon::RibbonMode;

@@ -757,7 +757,7 @@ fn update_send_to_document_directory(cx: &mut App, workspace: &WeakEntity<Worksp
 
 #[hotpath::measure]
 fn pixels_to_pt(value: Pixels) -> f64 {
-  value.as_f64() * 72.0 / 96.0
+  f64::from(value.as_f32()) * 72.0 / 96.0
 }
 
 #[hotpath::measure]
