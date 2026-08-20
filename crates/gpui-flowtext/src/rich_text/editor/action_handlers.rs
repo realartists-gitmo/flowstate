@@ -204,9 +204,26 @@ impl RichTextEditor {
     if m.control || m.platform {
       return;
     }
-    if event.keystroke.key == "tab"
-      && self.move_selected_table_cell(!m.shift, cx)
-    {
+    // GPUI Web currently lets non-text deletion keys reach its hidden DOM
+    // input when no platform action consumes the key. Route them through the
+    // editor here as a browser fallback and stop the DOM default; otherwise a
+    // Backspace mutates the 1px input instead of this document and subsequent
+    // character input can remain detached from the editor.
+    #[cfg(target_family = "wasm")]
+    match event.keystroke.key.as_str() {
+      "backspace" => {
+        self.backspace_command(cx);
+        cx.stop_propagation();
+        return;
+      },
+      "delete" => {
+        self.delete_forward_command(cx);
+        cx.stop_propagation();
+        return;
+      },
+      _ => {},
+    }
+    if event.keystroke.key == "tab" && self.move_selected_table_cell(!m.shift, cx) {
       return;
     }
     #[cfg(target_os = "windows")]
@@ -267,5 +284,4 @@ impl RichTextEditor {
   pub(super) fn apply_document_edit(&mut self, cx: &mut Context<Self>, edit: impl FnOnce(&mut Self, &mut Context<Self>)) {
     edit(self, cx);
   }
-
 }
