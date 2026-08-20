@@ -37,12 +37,16 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use uuid::Uuid;
 
 use crate::app_settings::{
-  load_autosave, load_document_theme, load_local_user_identity, load_recent_documents, load_send_custom_directory,
+  load_autosave, load_document_theme, load_recent_documents, load_send_custom_directory,
   load_send_to_document_directory, load_smart_word_selection, load_tub_root, save_autosave, save_document_theme, save_recent_documents,
   save_send_custom_directory, save_send_to_document_directory, save_smart_word_selection, save_theme_name,
 };
+#[cfg(not(target_family = "wasm"))]
+use crate::app_settings::load_local_user_identity;
 use crate::commands::CommandId;
+#[cfg(not(target_family = "wasm"))]
 use crate::docx_conversion::{convert_docx_to_document, import_docx_to_loro};
+#[cfg(not(target_family = "wasm"))]
 use crate::flow::{FlowEditor, FlowPanel};
 use crate::rich_text_element::{
   ArmedInlineTool, CustomParagraphBorder, DocumentProjection, DocumentTheme, InputParagraph, InputRun, ParagraphStyle, RichTextDocumentElement,
@@ -50,17 +54,21 @@ use crate::rich_text_element::{
   paragraph_byte_range, paragraph_index_for_id,
 };
 use crate::workspace::document_panel::DocumentPanel;
+#[cfg(not(target_family = "wasm"))]
 use crate::workspace::file_management::{
   UNTITLED_DOCUMENT_NAME, UNTITLED_FLOW_NAME, default_save_directory, new_blank_document, normalize_db8_path, normalize_fl0_path,
 };
+#[cfg(not(target_family = "wasm"))]
 use crate::workspace::file_search_overlay::FileSearchOverlay;
 use crate::workspace::icons::{AppIcon, icon_button};
+#[cfg(not(target_family = "wasm"))]
 use flowstate_tub::{SearchHit, SearchUnitKind, TubFile, TubIndex, TubTreeNode};
 
 pub(super) const APP_CHROME_BORDER_WIDTH: Pixels = px(1.0);
 const SIDE_PANEL_COLLAPSED_WIDTH: Pixels = px(30.0);
 
 #[path = "../toolkit_panel.rs"]
+#[cfg(not(target_family = "wasm"))]
 mod toolkit_panel;
 
 #[cfg(test)]
@@ -68,16 +76,21 @@ mod headless_tests;
 
 pub struct Workspace {
   document_panels: Vec<Entity<DocumentPanel>>,
+  #[cfg(not(target_family = "wasm"))]
   // §perf: Uuid keys are locally generated and trusted; use FxHash to avoid SipHash overhead.
   document_runtimes: FxHashMap<Uuid, flowstate_collab::doc_io::DocIoHandle>,
+  #[cfg(not(target_family = "wasm"))]
   document_runtime_flush_pending: FxHashSet<Uuid>,
   /// §act-three C (background open): panels painted read-only from a phase-V
   /// cached projection whose authority runtime has not yet attached (phase G).
   /// Editing is inert until attach; session-persist + autosave skip them.
+  #[cfg(not(target_family = "wasm"))]
   pending_authority_panels: FxHashSet<Uuid>,
+  #[cfg(not(target_family = "wasm"))]
   flow_panels: Vec<Entity<FlowPanel>>,
   active_document_id: Option<Uuid>,
   active_editor: Option<Entity<RichTextEditor>>,
+  #[cfg(not(target_family = "wasm"))]
   active_flow: Option<Entity<FlowEditor>>,
   ribbon_collapsed: bool,
   outline_collapsed: bool,
@@ -86,7 +99,9 @@ pub struct Workspace {
   recent_documents: Vec<PathBuf>,
   recent_document_previews: HashMap<PathBuf, DocumentProjection>,
   recent_document_preview_generation: u64,
+  #[cfg(not(target_family = "wasm"))]
   temporary_workspace_session_pending: Option<TemporaryWorkspaceSession>,
+  #[cfg(not(target_family = "wasm"))]
   temporary_workspace_session_persist_scheduled: bool,
   left_nav_mode: LeftNavMode,
   tab_bar_scroll_handle: ScrollHandle,
@@ -119,24 +134,37 @@ pub struct Workspace {
   /// SCHEDULED for. A newer edit overwrites it, so the trailing timer coalesces a
   /// burst into ONE checkpoint instead of a full checkpoint per keystroke.
   autosave_pending_generation: FxHashMap<Uuid, u64>,
+  #[cfg(not(target_family = "wasm"))]
   autosave_flow_in_flight: FxHashSet<Uuid>,
+  #[cfg(not(target_family = "wasm"))]
   collaboration_dialog: Option<Entity<crate::collab::share_dialog::CollabShareDialog>>,
+  #[cfg(not(target_family = "wasm"))]
   revision_dialog: Option<Entity<crate::workspace::revision_dialog::RevisionDialog>>,
+  #[cfg(not(target_family = "wasm"))]
   comment_dialog: Option<Entity<crate::workspace::comment_dialog::CommentDialog>>,
   // §perf: SessionId keys are locally generated and trusted; use FxHash to avoid SipHash overhead.
+  #[cfg(not(target_family = "wasm"))]
   collab_notice_subscriptions: FxHashMap<flowstate_collab::SessionId, Subscription>,
+  #[cfg(not(target_family = "wasm"))]
   collab_incompatible_version_notices: HashSet<String>,
+  #[cfg(not(target_family = "wasm"))]
   file_search_overlay: Option<Entity<FileSearchOverlay>>,
+  #[cfg(not(target_family = "wasm"))]
   tub_root: Option<PathBuf>,
+  #[cfg(not(target_family = "wasm"))]
   tub_index: Option<Arc<TubIndex>>,
+  #[cfg(not(target_family = "wasm"))]
   tub_files: Vec<TubFile>,
   tub_tree: Entity<TreeState>,
   tub_tree_items: Vec<TreeItem>,
+  #[cfg(not(target_family = "wasm"))]
   tub_tree_entries: Vec<TubTreeNode>,
+  #[cfg(not(target_family = "wasm"))]
   tub_expanded_dirs: HashSet<PathBuf>,
   tub_file_search_input: Entity<InputState>,
   tub_file_search_generation: u64,
   tub_status: SharedString,
+  #[cfg(not(target_family = "wasm"))]
   tub_watcher: Option<flowstate_tub::TubWatcher>,
   tub_watch_polling: bool,
   tub_scan_in_flight: bool,
@@ -144,6 +172,7 @@ pub struct Workspace {
   active_tub_path: Option<PathBuf>,
   toolkit_search_input: Entity<InputState>,
   toolkit_search_filter: ToolkitSearchFilter,
+  #[cfg(not(target_family = "wasm"))]
   toolkit_hits: Vec<SearchHit>,
   expanded_toolkit_hits: HashSet<String>,
   toolkit_results_scroll_handle: VirtualListScrollHandle,
@@ -227,6 +256,7 @@ impl ToolkitSearchFilter {
     }
   }
 
+  #[cfg(not(target_family = "wasm"))]
   fn kinds(self) -> &'static [SearchUnitKind] {
     match self {
       Self::All => &[SearchUnitKind::BlockSection, SearchUnitKind::TagSection, SearchUnitKind::Analytic],
@@ -286,25 +316,38 @@ impl DocumentStyleSection {
   }
 }
 
+#[cfg(not(target_family = "wasm"))]
 include!("documents.rs");
+#[cfg(target_family = "wasm")]
+include!("web_documents.rs");
+#[cfg(not(target_family = "wasm"))]
 include!("collab_prompts.rs");
+#[cfg(not(target_family = "wasm"))]
 include!("collab.rs");
 include!("workspace_state.rs");
+#[cfg(not(target_family = "wasm"))]
 include!("load.rs");
 include!("traits.rs");
+#[cfg(not(target_family = "wasm"))]
 include!("render_settings.rs");
 include!("render_top_bar.rs");
 include!("render_body.rs");
 include!("render_outline.rs");
 include!("render_documents.rs");
+#[cfg(not(target_family = "wasm"))]
 include!("render_status.rs");
 include!("zoom_status.rs");
+#[cfg(not(target_family = "wasm"))]
 include!("keybindings.rs");
+#[cfg(not(target_family = "wasm"))]
 include!("window.rs");
 include!("outline.rs");
 include!("top_bar.rs");
 include!("style_settings.rs");
+#[cfg(not(target_family = "wasm"))]
 include!("collaboration_settings.rs");
 include!("keymap_settings.rs");
 include!("theme.rs");
+#[cfg(target_family = "wasm")]
+include!("web_workspace_actions.rs");
 include!("tests.rs");
