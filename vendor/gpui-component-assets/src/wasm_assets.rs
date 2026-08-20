@@ -24,7 +24,10 @@ impl Assets {
 
 impl Default for Assets {
     fn default() -> Self {
-        Self::new("")
+        let endpoint = web_sys::window()
+            .and_then(|window| window.location().origin().ok())
+            .unwrap_or_default();
+        Self::new(endpoint)
     }
 }
 

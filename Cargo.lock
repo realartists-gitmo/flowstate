@@ -4144,6 +4144,7 @@ dependencies = [
  "rust-embed",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]
