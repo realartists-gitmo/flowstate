@@ -787,6 +787,7 @@ fn modern_speech_send_menu(
         .on_click({
           let workspace = workspace.clone();
           move |_, window, cx| {
+            #[cfg(not(target_family = "wasm"))]
             if let Some(workspace) = workspace.clone()
               && let Err(err) = workspace.update(cx, |workspace, cx| workspace.send_selection_to_speech_document(window, cx))
             {
@@ -827,6 +828,7 @@ fn modern_speech_send_menu(
             }
           })
           .on_click(move |_, window, cx| {
+            #[cfg(not(target_family = "wasm"))]
             if let Some(workspace) = send_workspace.clone()
               && let Err(err) = workspace.update(cx, |workspace, cx| workspace.send_selection_to_speech_document(window, cx))
             {
@@ -858,6 +860,7 @@ fn modern_speech_send_menu(
             }
           })
           .on_click(move |_, window, cx| {
+            #[cfg(not(target_family = "wasm"))]
             if let Some(workspace) = send_end_workspace.clone()
               && let Err(err) = workspace.update(cx, |workspace, cx| workspace.send_selection_to_speech_document_end(window, cx))
             {
