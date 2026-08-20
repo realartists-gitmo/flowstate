@@ -172,9 +172,3 @@ fn collaboration_tab_badge(panel_id: Uuid, cx: &mut Context<Workspace>) -> Optio
 fn collaboration_tab_badge(_panel_id: Uuid, _cx: &mut Context<Workspace>) -> Option<AnyElement> {
   None
 }
-
-#[cfg(target_family = "wasm")]
-fn pin_shortcut_label(pin_index: usize) -> Option<&'static str> {
-  const LABELS: [&str; 10] = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"];
-  LABELS.get(pin_index).copied()
-}
