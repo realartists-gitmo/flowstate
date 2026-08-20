@@ -14,13 +14,16 @@ thread_local! {
 #[wasm_bindgen(start)]
 pub fn start() {
   gpui_platform::web_init();
-  let application = gpui_platform::single_threaded_web().with_assets(AppAssets::default()).run_embedded(|cx: &mut App| {
-    gpui_component::init(cx);
-    Theme::change(ThemeMode::Dark, None, cx);
-    register_rich_text_editor_keybindings(cx);
-    install_prompt_renderer(cx);
-    open_workspace_window(None, cx);
-    cx.activate(true);
-  });
+  let application = gpui_platform::single_threaded_web()
+    .with_assets(AppAssets::default())
+    .run_embedded(|cx: &mut App| {
+      gpui_component::init(cx);
+      crate::web_fonts::register(cx);
+      Theme::change(ThemeMode::Dark, None, cx);
+      register_rich_text_editor_keybindings(cx);
+      install_prompt_renderer(cx);
+      open_workspace_window(None, cx);
+      cx.activate(true);
+    });
   APPLICATION.with(|slot| *slot.borrow_mut() = Some(application));
 }
