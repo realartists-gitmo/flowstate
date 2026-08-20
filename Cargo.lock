@@ -3241,6 +3241,7 @@ dependencies = [
  "twox-hash",
  "url",
  "uuid",
+ "web-time",
  "windows 0.62.2",
  "zstd",
 ]
@@ -3288,6 +3289,7 @@ dependencies = [
  "serde_bytes",
  "tempfile",
  "uuid",
+ "web-time",
 ]
 
 [[package]]

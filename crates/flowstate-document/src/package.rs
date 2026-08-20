@@ -2845,8 +2845,8 @@ fn loro_io_error(error: impl std::error::Error + Send + Sync + 'static) -> io::E
 }
 
 fn unix_time_secs() -> i64 {
-  std::time::SystemTime::now()
-    .duration_since(std::time::UNIX_EPOCH)
+  web_time::SystemTime::now()
+    .duration_since(web_time::UNIX_EPOCH)
     .map_or(0, |duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
 }
 

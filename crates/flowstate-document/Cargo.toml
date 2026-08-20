@@ -22,6 +22,7 @@ serde.workspace = true
 # for a memcpy-scale one. Old packages decode unchanged.
 serde_bytes = "0.11"
 uuid.workspace = true
+web-time.workspace = true
 flowstate-fidelity.workspace = true
 hotpath.workspace = true
 loro-internal = "1.13.1"

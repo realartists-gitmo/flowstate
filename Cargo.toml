@@ -45,6 +45,7 @@ gpui-base = { path = "vendor/gpui-base" }
 gpui-component-macros = { path = "vendor/gpui-component-macros" }
 gpui_macros = { git = "https://github.com/zed-industries/zed.git", rev = "e0931d5a9dbf4f781b336fdf448739e74a2ac0b5" }
 instant = { version = "0.1", features = ["wasm-bindgen"] }
+web-time = "1.1"
 log = "0.4"
 lsp-types = { version = "0.97.0", features = ["proposed"] }
 raw-window-handle = "0.6.2"
