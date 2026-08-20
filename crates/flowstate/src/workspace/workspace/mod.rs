@@ -334,7 +334,6 @@ include!("render_top_bar.rs");
 include!("render_body.rs");
 include!("render_outline.rs");
 include!("render_documents.rs");
-#[cfg(not(target_family = "wasm"))]
 include!("render_status.rs");
 include!("zoom_status.rs");
 #[cfg(not(target_family = "wasm"))]
