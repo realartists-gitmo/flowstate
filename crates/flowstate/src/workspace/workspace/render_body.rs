@@ -1,5 +1,30 @@
 #[hotpath::measure_all]
 impl Workspace {
+  #[cfg(target_family = "wasm")]
+  fn render_content_area(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    h_resizable("workspace-content-resizable")
+      .with_state(&self.content_resizable_state)
+      .child(
+        resizable_panel()
+          .size(px(560.0))
+          .size_range(px(120.0)..Pixels::MAX)
+          .child(
+            div()
+              .size_full()
+              .min_w_0()
+              .overflow_hidden()
+              .child(self.render_document_pane(cx)),
+          ),
+      )
+      .child(
+        resizable_panel()
+          .size(SIDE_PANEL_COLLAPSED_WIDTH)
+          .size_range(SIDE_PANEL_COLLAPSED_WIDTH..SIDE_PANEL_COLLAPSED_WIDTH)
+          .flex_none()
+          .child(self.render_collapsed_side_panel("Toolkit unavailable in browser", IconName::PanelRightOpen, |_, _| {}, cx)),
+      )
+  }
+
   fn render_resizable_workspace(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
     if self.document_panels.is_empty() && !self.has_flow_panels() {
       return div()
