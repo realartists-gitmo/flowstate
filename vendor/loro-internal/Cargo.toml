@@ -200,6 +200,9 @@ version = "0.1.0"
 [dependencies.bytes]
 version = "1"
 
+[dependencies.crc32fast]
+version = "1.5"
+
 [dependencies.either]
 version = "1"
 

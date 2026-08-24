@@ -22,6 +22,8 @@ pub const COMMENTS_BY_ID: &str = "comments_by_id";
 pub const REPLICAS_BY_ID: &str = "replicas_by_id";
 
 pub const FLOW_TEXT_KEY: &str = "text";
+/// Optional child map. Canonical writers leave it absent while all attributes
+/// have their projection defaults; the first non-default attribute creates it.
 pub const FLOW_ATTRS_KEY: &str = "attrs";
 pub const FLOW_KIND_KEY: &str = "kind";
 pub const FLOW_ID_KEY: &str = "id";
@@ -338,7 +340,7 @@ fn init_loro_document_structure(doc: &LoroDoc, title: &str, include_initial_para
   meta.insert("revisions_container_id", revisions.id().to_string())?;
   meta.insert("users_container_id", users.id().to_string())?;
   meta.insert("replicas_container_id", replicas.id().to_string())?;
-  // `ensure_flow` establishes the body flow's text + attrs containers for both
+  // `ensure_flow` establishes the body flow's required text container for both
   // the seeded and the import (`include_initial_paragraph == false`) paths.
   ensure_flow(&flows, ROOT_BODY_FLOW_ID, "body")?;
   if include_initial_paragraph {
@@ -374,7 +376,6 @@ pub fn seed_document_body(doc: &LoroDoc) -> LoroResult<()> {
   let paragraphs = root.ensure_mergeable_map(PARAGRAPHS_BY_ID)?;
   let body_flow = ensure_flow(&flows, ROOT_BODY_FLOW_ID, "body")?;
   let body_text = body_flow.ensure_mergeable_text(FLOW_TEXT_KEY)?;
-  body_flow.ensure_mergeable_map(FLOW_ATTRS_KEY)?;
   ensure_sentinel(&body_text)?;
   ensure_initial_paragraph(&paragraphs, &blocks, &body_text)?;
   // §P2a fidelity: the canonical seed establishes exactly the sentinel +
@@ -705,7 +706,6 @@ fn ensure_flow(flows: &LoroMap, flow_id: &str, kind: &str) -> LoroResult<LoroMap
   flow.insert(FLOW_ID_KEY, flow_id)?;
   flow.insert(FLOW_KIND_KEY, kind)?;
   let text = flow.ensure_mergeable_text(FLOW_TEXT_KEY)?;
-  let _attrs = flow.ensure_mergeable_map(FLOW_ATTRS_KEY)?;
   flow.insert("text_container_id", text.id().to_string())?;
   Ok(flow)
 }
@@ -728,7 +728,6 @@ fn ensure_initial_paragraph(paragraphs: &LoroMap, blocks: &LoroMap, body: &LoroT
   if let Some(cursor) = body.get_cursor(0, Side::Left) {
     paragraph.insert("boundary_cursor", cursor.encode())?;
   }
-  let _paragraph_attrs = paragraph.ensure_mergeable_map("attrs")?;
 
   let block = blocks.ensure_mergeable_map(MAIN_BODY_BLOCK_ID)?;
   block.insert("id", MAIN_BODY_BLOCK_ID)?;
@@ -737,8 +736,6 @@ fn ensure_initial_paragraph(paragraphs: &LoroMap, blocks: &LoroMap, body: &LoroT
   if let Some(cursor) = body.get_cursor(0, Side::Left) {
     block.insert("anchor_cursor", cursor.encode())?;
   }
-  let _block_attrs = block.ensure_mergeable_map("attrs")?;
-  let _nested_refs = block.ensure_mergeable_map("nested_refs")?;
   Ok(())
 }
 

@@ -11,9 +11,9 @@ use rustc_hash::FxHashMap;
 use uuid::Uuid;
 
 use crate::{
-  AssetChunk, BLOCKS_BY_ID, BODY_FLOW_ID, FLOW_ATTRS_KEY, FLOW_ID_KEY, FLOW_KIND_KEY, FLOW_TEXT_KEY, FLOWS_BY_ID, MARK_DIRECT_UNDERLINE,
-  MARK_HIGHLIGHT_STYLE, MARK_PARAGRAPH_STYLE, MARK_RUN_SEMANTIC_STYLE, MARK_STRIKETHROUGH, MARK_VERT_ALIGN, OBJECT_REPLACEMENT,
-  PARAGRAPHS_BY_ID, ROOT, ROOT_BODY_FLOW_ID, SECTIONS_BY_ID,
+  AssetChunk, BLOCKS_BY_ID, BODY_FLOW_ID, FLOW_ID_KEY, FLOW_KIND_KEY, FLOW_TEXT_KEY, FLOWS_BY_ID, MARK_DIRECT_UNDERLINE, MARK_HIGHLIGHT_STYLE,
+  MARK_PARAGRAPH_STYLE, MARK_RUN_SEMANTIC_STYLE, MARK_STRIKETHROUGH, MARK_VERT_ALIGN, OBJECT_REPLACEMENT, PARAGRAPHS_BY_ID, ROOT,
+  ROOT_BODY_FLOW_ID, SECTIONS_BY_ID,
   loro_schema::{
     ASSETS_BY_ID, REVISIONS, SectionPageAttrs, TABLE_CELLS_BY_ID, TABLE_COLUMN_ORDER, TABLE_COLUMNS_BY_ID, TABLE_KEY, TABLE_ROW_ORDER,
     TABLE_ROWS_BY_ID, cell_flow_loro_id, cell_loro_id, column_loro_id, row_loro_id, write_section_page_attrs,
@@ -80,7 +80,11 @@ fn fidelity_report_import(doc: &LoroDoc, document: &DocumentProjection) {
 /// `ensure_mergeable_map`, this never creates the container, so a fidelity
 /// invariant cannot fabricate the very structure it is meant to verify.
 fn read_root_child_map(doc: &LoroDoc, key: &str) -> Option<LoroMap> {
-  match doc.get_map(ROOT).get(key)? {
+  read_child_map(&doc.get_map(ROOT), key)
+}
+
+fn read_child_map(parent: &LoroMap, key: &str) -> Option<LoroMap> {
+  match parent.get(key)? {
     ValueOrContainer::Container(container) => container.into_map().ok(),
     ValueOrContainer::Value(_) => None,
   }
@@ -181,9 +185,7 @@ pub(crate) fn replace_body_from_document(doc: &LoroDoc, document: &DocumentProje
         block.insert("source_flow_id", source_flow_id.as_str())?;
         let source_flow = ensure_flow(&flows, &source_flow_id, "equation_source")?;
         replace_text(&source_flow.ensure_mergeable_text(FLOW_TEXT_KEY)?, equation.source.as_ref())?;
-        let attrs = block.ensure_mergeable_map("attrs")?;
-        attrs.insert("syntax", equation_syntax_name(equation.syntax))?;
-        attrs.insert("display", equation_display_name(equation.display))?;
+        write_equation_attrs(&block, equation.syntax, equation.display)?;
       },
       (Block::Table(table), FlowBlockPosition::Object { anchor_pos }) => {
         let durable_block_id = projection_block_id(document, block_ix, "table");
@@ -435,13 +437,9 @@ fn import_paragraph_record(
       paragraph_map.insert("boundary_cursor", cursor.encode())?;
     }
   });
-  // §perf-heaven T8.2: the `attrs` container is kept (the projection reads it and
-  // the invalidation whitelist expects it), but the `*_container_id` MIRROR
-  // values are dropped. They duplicated `map.id()` — write-only (no reader in the
-  // projection or collab), yet each was a long flattened-cid `String` stored as a
-  // map value AND minted as an op, ×5 per paragraph ×N paragraphs (a large slice
-  // of the 38.7 KB/record). Derivable from the container itself if ever needed.
-  paragraph_map.ensure_mergeable_map("attrs")?;
+  // §perf: optional child maps are materialized only when they contain a value.
+  // Paragraph attributes currently live in text marks, so an eager empty `attrs`
+  // map adds a container/op per paragraph without encoding document semantics.
   ensure_block(blocks, block_id, "paragraph", flow_id, body_text, text_op_base, boundary_pos)?;
   Ok(())
 }
@@ -901,7 +899,6 @@ fn ensure_flow(flows: &LoroMap, flow_id: &str, kind: &str) -> LoroResult<LoroMap
   flow.insert(FLOW_ID_KEY, flow_id)?;
   flow.insert(FLOW_KIND_KEY, kind)?;
   let text = flow.ensure_mergeable_text(FLOW_TEXT_KEY)?;
-  let _attrs = flow.ensure_mergeable_map(FLOW_ATTRS_KEY)?;
   flow.insert("text_container_id", text.id().to_string())?;
   Ok(flow)
 }
@@ -922,10 +919,9 @@ fn ensure_block(
   if let Some(cursor) = body_cursor_at(text, text_op_base, pos, Side::Left) {
     block.insert("anchor_cursor", cursor.encode())?;
   }
-  // §perf-heaven T8.2: keep the `attrs`/`nested_refs` containers (read + whitelisted),
-  // drop the write-only `*_container_id` mirror strings (duplicated `map.id()`).
-  block.ensure_mergeable_map("attrs")?;
-  block.ensure_mergeable_map("nested_refs")?;
+  // Optional child maps are created by the specialized writers that put values
+  // in them. Eager empty `attrs` and `nested_refs` maps otherwise cost two CRDT
+  // containers and two marker ops for every block.
   Ok(block)
 }
 
@@ -991,10 +987,33 @@ fn alignment_name(alignment: BlockAlignment) -> &'static str {
   }
 }
 
-fn equation_syntax_name(syntax: EquationSyntax) -> &'static str {
+fn write_equation_attrs(block: &LoroMap, syntax: EquationSyntax, display: EquationDisplay) -> LoroResult<()> {
+  // Latex + display are the projection's documented defaults. Encoding those
+  // defaults created an otherwise-unneeded map plus two values per equation.
+  // Existing maps are retained (they may contain future/unknown fields), but
+  // legacy default keys are removed when this writer revisits the block.
   match syntax {
-    EquationSyntax::Latex => "latex",
+    EquationSyntax::Latex => {},
   }
+  let attrs = match display {
+    EquationDisplay::Display => read_child_map(block, "attrs"),
+    EquationDisplay::InlineLikeParagraph => Some(block.ensure_mergeable_map("attrs")?),
+  };
+  let Some(attrs) = attrs else {
+    return Ok(());
+  };
+  if attrs.get("syntax").is_some() {
+    attrs.delete("syntax")?;
+  }
+  match display {
+    EquationDisplay::Display => {
+      if attrs.get("display").is_some() {
+        attrs.delete("display")?;
+      }
+    },
+    EquationDisplay::InlineLikeParagraph => attrs.insert("display", equation_display_name(display))?,
+  }
+  Ok(())
 }
 
 fn equation_display_name(display: EquationDisplay) -> &'static str {
@@ -1034,6 +1053,96 @@ mod tests {
     assert_eq!(projected.ids.document_id, source.ids.document_id);
     assert_eq!(projected.ids.paragraph_ids, source.ids.paragraph_ids);
     assert_eq!(projected.ids.block_ids, source.ids.block_ids);
+    Ok(())
+  }
+
+  #[test]
+  fn canonical_import_omits_empty_optional_maps_and_default_equation_attrs() -> io::Result<()> {
+    for (display, expected_display_attr) in [
+      (gpui_flowtext::InputEquationDisplay::Display, None),
+      (gpui_flowtext::InputEquationDisplay::InlineLikeParagraph, Some("inline_like_paragraph")),
+    ] {
+      let source = gpui_flowtext::document_from_input_blocks(
+        crate::flowstate_document_theme(),
+        vec![
+          gpui_flowtext::InputBlock::Paragraph(gpui_flowtext::InputParagraph {
+            style: ParagraphStyle::Normal,
+            runs: vec![gpui_flowtext::InputRun {
+              text: "before".to_string(),
+              styles: RunStyles::default(),
+            }],
+          }),
+          gpui_flowtext::InputBlock::Equation(gpui_flowtext::InputEquationBlock {
+            source: "x^2".to_string(),
+            syntax: gpui_flowtext::InputEquationSyntax::Latex,
+            display,
+          }),
+        ],
+      );
+      let paragraph_key = projection_block_id(&source, 0, "paragraph_block");
+      let equation_key = projection_block_id(&source, 1, "equation");
+      let paragraph_id = projection_paragraph_id(&source, 0);
+      let equation_flow_id = nested_flow_id("equation_source", &equation_key);
+      let doc = document_to_loro(&source, "Sparse defaults")?;
+
+      let blocks = read_root_child_map(&doc, BLOCKS_BY_ID).expect("blocks map");
+      let paragraph_block = read_child_map(&blocks, &paragraph_key).expect("paragraph block");
+      assert!(paragraph_block.get("attrs").is_none());
+      assert!(paragraph_block.get("nested_refs").is_none());
+      let equation_block = read_child_map(&blocks, &equation_key).expect("equation block");
+      assert!(equation_block.get("nested_refs").is_none());
+      let equation_attrs = read_child_map(&equation_block, "attrs");
+      assert_eq!(
+        equation_attrs
+          .as_ref()
+          .and_then(|attrs| attrs.get("display"))
+          .and_then(|value| match value {
+            ValueOrContainer::Value(LoroValue::String(value)) => Some(value.to_string()),
+            _ => None,
+          })
+          .as_deref(),
+        expected_display_attr
+      );
+      assert!(
+        equation_attrs
+          .as_ref()
+          .is_none_or(|attrs| attrs.get("syntax").is_none())
+      );
+
+      let paragraphs = read_root_child_map(&doc, PARAGRAPHS_BY_ID).expect("paragraphs map");
+      assert!(
+        read_child_map(&paragraphs, &paragraph_id)
+          .expect("paragraph record")
+          .get("attrs")
+          .is_none()
+      );
+      let flows = read_root_child_map(&doc, FLOWS_BY_ID).expect("flows map");
+      assert!(
+        read_child_map(&flows, ROOT_BODY_FLOW_ID)
+          .expect("body flow")
+          .get("attrs")
+          .is_none()
+      );
+      assert!(
+        read_child_map(&flows, &equation_flow_id)
+          .expect("equation flow")
+          .get("attrs")
+          .is_none()
+      );
+
+      let projected = crate::document_from_loro(&doc)?;
+      let Block::Equation(equation) = &projected.blocks[1] else {
+        panic!("second block should remain an equation");
+      };
+      assert_eq!(equation.source.as_ref(), "x^2");
+      assert_eq!(
+        equation.display,
+        match display {
+          gpui_flowtext::InputEquationDisplay::Display => EquationDisplay::Display,
+          gpui_flowtext::InputEquationDisplay::InlineLikeParagraph => EquationDisplay::InlineLikeParagraph,
+        }
+      );
+    }
     Ok(())
   }
 

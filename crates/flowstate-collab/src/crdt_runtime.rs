@@ -11,8 +11,8 @@ use std::{
 use anyhow::{Context as _, Result};
 use flowstate_document::{
   AssetId, AssetRecord, BLOCKS_BY_ID, Block, BlockId, CellId, ColumnId, DEFAULT_UPDATE_SEGMENT_COMPACTION_THRESHOLD, DocumentPackage,
-  DocumentProjection, FLOW_ATTRS_KEY, FLOW_ID_KEY, FLOW_KIND_KEY, FLOW_TEXT_KEY, FLOWS_BY_ID, ImportedLoroDocument, InputBlock,
-  InputBlockAlignment, InputEquationDisplay, InputImageSizing, InputParagraph, InputTableBlock, InputTableCell, InputTableCellBlock,
+  DocumentProjection, FLOW_ID_KEY, FLOW_KIND_KEY, FLOW_TEXT_KEY, FLOWS_BY_ID, ImportedLoroDocument, InputBlock, InputBlockAlignment,
+  InputEquationDisplay, InputEquationSyntax, InputImageSizing, InputParagraph, InputTableBlock, InputTableCell, InputTableCellBlock,
   InputTableColumnWidth, MAIN_BODY_BLOCK_ID, MARK_DIRECT_UNDERLINE, MARK_HIGHLIGHT_STYLE, MARK_PARAGRAPH_STYLE, MARK_RUN_SEMANTIC_STYLE,
   MARK_STRIKETHROUGH, OBJECT_REPLACEMENT, PARAGRAPHS_BY_ID, Paragraph, ParagraphId, ParagraphStyle, ProjectionDefect, ProjectionPatch,
   ProjectionStructuralBlock, ROOT, ROOT_BODY_FLOW_ID, ROOT_FIRST_PARAGRAPH_ID, RowId, RunSemanticStyle, RunStyles, SENTINEL_NEWLINE, SectionId,
@@ -5973,9 +5973,34 @@ fn replace_equation_block_from_input(doc: &LoroDoc, block: &LoroMap, equation: &
   block.insert("source_flow_id", source_flow_id.as_str())?;
   let source_flow = ensure_flow(doc, &source_flow_id, "equation_source")?;
   replace_text(&source_flow.ensure_mergeable_text(FLOW_TEXT_KEY)?, &equation.source)?;
-  let attrs = block.ensure_mergeable_map("attrs")?;
-  attrs.insert("syntax", "latex")?;
-  attrs.insert("display", equation_display_name(equation.display))?;
+  write_equation_attrs(block, equation.syntax, equation.display)?;
+  Ok(())
+}
+
+fn write_equation_attrs(block: &LoroMap, syntax: InputEquationSyntax, display: InputEquationDisplay) -> Result<()> {
+  // Match the import writer's sparse canonical form: Latex + display are
+  // projection defaults, so only the non-default inline display needs storage.
+  match syntax {
+    InputEquationSyntax::Latex => {},
+  }
+  let attrs = match display {
+    InputEquationDisplay::Display => child_map(block, "attrs"),
+    InputEquationDisplay::InlineLikeParagraph => Some(block.ensure_mergeable_map("attrs")?),
+  };
+  let Some(attrs) = attrs else {
+    return Ok(());
+  };
+  if attrs.get("syntax").is_some() {
+    attrs.delete("syntax")?;
+  }
+  match display {
+    InputEquationDisplay::Display => {
+      if attrs.get("display").is_some() {
+        attrs.delete("display")?;
+      }
+    },
+    InputEquationDisplay::InlineLikeParagraph => attrs.insert("display", equation_display_name(display))?,
+  }
   Ok(())
 }
 
@@ -6667,7 +6692,6 @@ fn ensure_paragraph_metadata_at_boundary_with_keys(
     paragraph.insert("start_cursor", encoded.clone())?;
     paragraph.insert("boundary_cursor", encoded.clone())?;
   }
-  let _paragraph_attrs = paragraph.ensure_mergeable_map("attrs")?;
 
   let block_id = forced_block_id
     .or_else(|| paragraph_block_key_at_boundary(doc, body, &blocks, boundary))
@@ -6680,8 +6704,6 @@ fn ensure_paragraph_metadata_at_boundary_with_keys(
   if let Some(encoded) = boundary_cursor {
     block.insert("anchor_cursor", encoded)?;
   }
-  let _block_attrs = block.ensure_mergeable_map("attrs")?;
-  let _nested_refs = block.ensure_mergeable_map("nested_refs")?;
   Ok(())
 }
 
@@ -7382,9 +7404,7 @@ fn insert_equation_block(doc: &LoroDoc, unicode_index: usize, source: &str, disp
   block.insert("source_flow_id", source_flow_id.as_str())?;
   let source_flow = ensure_flow(doc, &source_flow_id, "equation_source")?;
   replace_text(&source_flow.ensure_mergeable_text(FLOW_TEXT_KEY)?, source)?;
-  let attrs = block.ensure_mergeable_map("attrs")?;
-  attrs.insert("syntax", "latex")?;
-  attrs.insert("display", equation_display_name(display))?;
+  write_equation_attrs(&block, InputEquationSyntax::Latex, display)?;
   Ok(())
 }
 
@@ -7493,7 +7513,6 @@ fn ensure_flow(doc: &LoroDoc, flow_id: &str, kind: &str) -> loro::LoroResult<Lor
   flow.insert(FLOW_ID_KEY, flow_id)?;
   flow.insert(FLOW_KIND_KEY, kind)?;
   let text = flow.ensure_mergeable_text(FLOW_TEXT_KEY)?;
-  let _attrs = flow.ensure_mergeable_map(FLOW_ATTRS_KEY)?;
   flow.insert("text_container_id", text.id().to_string())?;
   Ok(flow)
 }
@@ -7513,8 +7532,6 @@ fn ensure_block_with_id(doc: &LoroDoc, id: &str, kind: &str, flow_id: &str, text
   if let Some(cursor) = text.get_cursor(pos, Side::Left) {
     block.insert("anchor_cursor", cursor.encode())?;
   }
-  let _attrs = block.ensure_mergeable_map("attrs")?;
-  let _nested_refs = block.ensure_mergeable_map("nested_refs")?;
   Ok(block)
 }
 

@@ -6253,6 +6253,7 @@ dependencies = [
  "append-only-bytes",
  "arref",
  "bytes",
+ "crc32fast",
  "either",
  "ensure-cov",
  "enum-as-inner 0.6.1",

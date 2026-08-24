@@ -1323,7 +1323,11 @@ fn change_to_diff(
                     let parent_id = doc.arena.idx_to_id(container_idx);
                     let value = value.map(|v| match parent_id.as_ref() {
                         Some(pid) => {
-                            loro_common::translate_mergeable_marker_value(pid, key.as_ref(), v)
+                            crate::mergeable_marker::translate_mergeable_marker_value(
+                                pid,
+                                key.as_ref(),
+                                v,
+                            )
                         }
                         None => v,
                     });

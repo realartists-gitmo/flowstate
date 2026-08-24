@@ -762,6 +762,7 @@ dependencies = [
  "arref",
  "bytes",
  "criterion",
+ "crc32fast",
  "ctor",
  "either",
  "ensure-cov",
