@@ -40,8 +40,24 @@ yanked = "warn"
 #        `quick-xml-oxml` rename in flowstate-docx (Reader types must unify)
 #   0.38 citationberg (even 0.7.0 pins ^0.38; via typst-library/hayagriva)
 #   0.39 wayland-scanner (proc-macro, build-time trusted input)
-# Re-check on dependency upgrades and drop these when upstreams move.
-ignore = ["RUSTSEC-2026-0194", "RUSTSEC-2026-0195"]
+# rkyv 0.7 archive-validation advisory. This copy is pinned by mitex 0.2.4 and
+# only reads mitex's generated specification data; rkyv 0.7 has no patched
+# release, while the fix requires mitex to migrate to rkyv >= 0.8.17.
+#
+# im advisories. im has no fixed release (the project is archived), and both
+# Loro 1.13's vendored internals and gpui-flowtext depend on its persistent
+# collections. Replacing the app's direct dependency alone would leave Loro's
+# affected copy in the graph. Migrate both consumers to imbl when compatible.
+#
+# Re-check on dependency upgrades and drop these when upstreams move. Keep the
+# vulnerability entries in sync with .cargo/audit.toml.
+ignore = [
+  "RUSTSEC-2023-0126",
+  "RUSTSEC-2026-0194",
+  "RUSTSEC-2026-0195",
+  "RUSTSEC-2026-0235",
+  "RUSTSEC-2026-0248",
+]
 
 # ---------------------------------------------------------------------------
 # License policy. Unlisted licenses are denied under version 2.
