@@ -66,6 +66,7 @@ pub mod version;
 mod error;
 #[cfg(feature = "test_utils")]
 pub mod fuzz;
+mod mergeable_marker;
 mod parent;
 pub mod pre_commit;
 mod span;

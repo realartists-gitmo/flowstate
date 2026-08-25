@@ -4585,8 +4585,11 @@ impl MapHandler {
                         .get_map_entries(inner.container_idx)
                         .into_iter()
                         .map(|(key, value)| {
-                            let translated =
-                                loro_common::translate_mergeable_marker_value(&inner.id, key.as_ref(), value);
+                            let translated = crate::mergeable_marker::translate_mergeable_marker_value(
+                                &inner.id,
+                                key.as_ref(),
+                                value,
+                            );
                             (key.to_string(), value_to_value_or_handler(inner, translated))
                         })
                         .collect::<Vec<_>>()
@@ -4647,7 +4650,11 @@ impl MapHandler {
             MaybeDetached::Attached(inner) => {
                 let value = inner
                     .with_doc_state(|state| state.get_map_value_by_key(inner.container_idx, key))?;
-                Some(loro_common::translate_mergeable_marker_value(&inner.id, key, value))
+                Some(crate::mergeable_marker::translate_mergeable_marker_value(
+                    &inner.id,
+                    key,
+                    value,
+                ))
             }
         }
     }
@@ -4662,7 +4669,8 @@ impl MapHandler {
             MaybeDetached::Attached(inner) => {
                 let value = inner
                     .with_doc_state(|state| state.get_map_value_by_key(inner.container_idx, key))?;
-                let value = loro_common::translate_mergeable_marker_value(&inner.id, key, value);
+                let value =
+                    crate::mergeable_marker::translate_mergeable_marker_value(&inner.id, key, value);
                 Some(value_to_value_or_handler(inner, value))
             }
         }
@@ -4728,7 +4736,7 @@ impl MapHandler {
         // accepted as an existing mergeable occupant.
         if let Some(existing) = &existing_raw {
             if !matches!(existing, LoroValue::Null)
-                && loro_common::parse_mergeable_marker(&parent.id, key, existing).is_none()
+                && crate::mergeable_marker::parse_mergeable_marker(&parent.id, key, existing).is_none()
             {
                 return Err(LoroError::ArgErr(
                     format!(
@@ -4872,8 +4880,11 @@ impl MapHandler {
                     .get_map_entries(a.container_idx)
                     .into_iter()
                     .map(|(key, value)| {
-                        let translated =
-                            loro_common::translate_mergeable_marker_value(&a.id, key.as_ref(), value);
+                        let translated = crate::mergeable_marker::translate_mergeable_marker_value(
+                            &a.id,
+                            key.as_ref(),
+                            value,
+                        );
                         value_to_value_or_handler(a, translated)
                     })
                     .collect()

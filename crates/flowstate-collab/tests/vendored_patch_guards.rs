@@ -12,6 +12,7 @@
 use anyhow::Result;
 use flowstate_collab::crdt_runtime::CrdtRuntime;
 use flowstate_collab::local_write::{GateHolder, InsertTextIntent, LocalDocHandle, LocalWriteConfig, TextAnchor};
+use loro::ValueOrContainer;
 use std::time::Instant;
 
 /// One peer builds a large single-fragment body; a forked peer splits it with
@@ -176,6 +177,47 @@ fn styled_divergence_cost(edits: usize) -> (std::time::Duration, std::time::Dura
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn mergeable_marker_fast_path_round_trips_all_enabled_container_kinds() -> Result<()> {
+    // Marker creation still uses loro-common; reading after a snapshot import
+    // routes through the vendored allocation-free parser. Non-ASCII and marker
+    // separator/escape characters guard the exact length-prefixed wire encoding.
+    let doc = loro::LoroDoc::new();
+    let root = doc.get_map("marker/root");
+    root.ensure_mergeable_map(r"map/é>\child")?;
+    root.ensure_mergeable_list(r"list/é>\child")?;
+    root.ensure_mergeable_movable_list(r"movable/é>\child")?;
+    root.ensure_mergeable_text(r"text/é>\child")?;
+    root.ensure_mergeable_tree(r"tree/é>\child")?;
+    let nested = root.ensure_mergeable_map(r"nested/é>\parent")?;
+    nested.ensure_mergeable_map(r"child/🤝>\map")?;
+    doc.commit();
+
+    let snapshot = doc.export(loro::ExportMode::Snapshot)?;
+    let reopened = loro::LoroDoc::new();
+    reopened.import(&snapshot)?;
+    let root = reopened.get_map("marker/root");
+    macro_rules! assert_container_kind {
+      ($parent:expr, $key:expr, $conversion:ident) => {
+        let Some(ValueOrContainer::Container(container)) = $parent.get($key) else {
+          panic!("{} marker did not translate into a container", $key);
+        };
+        assert!(container.$conversion().is_ok(), "{} translated to the wrong container kind", $key);
+      };
+    }
+    assert_container_kind!(root, r"map/é>\child", into_map);
+    assert_container_kind!(root, r"list/é>\child", into_list);
+    assert_container_kind!(root, r"movable/é>\child", into_movable_list);
+    assert_container_kind!(root, r"text/é>\child", into_text);
+    assert_container_kind!(root, r"tree/é>\child", into_tree);
+    let Some(ValueOrContainer::Container(nested)) = root.get(r"nested/é>\parent") else {
+      panic!("nested marker did not translate into a container");
+    };
+    let nested = nested.into_map().expect("nested marker kind");
+    assert_container_kind!(nested, r"child/🤝>\map", into_map);
+    Ok(())
+  }
 
   /// §stylemap pass (2026-07-09, follow-on to act-eleven A11.5): pins the
   /// LAYERED `StyleValue` representation in the vendored `style_range_map.rs`

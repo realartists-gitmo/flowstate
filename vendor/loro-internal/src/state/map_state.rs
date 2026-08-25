@@ -30,7 +30,7 @@ fn translate_with_parent(
 ) -> LoroValue {
     match parent_id {
         Some(parent) => {
-            loro_common::translate_mergeable_marker_value(parent, key.as_ref(), value)
+            crate::mergeable_marker::translate_mergeable_marker_value(parent, key.as_ref(), value)
         }
         None => value,
     }

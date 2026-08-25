@@ -62,7 +62,9 @@ impl DocState {
         }
 
         let value = self.store.map_get(parent_idx, key)?;
-        if loro_common::parse_mergeable_marker(&actual_parent_id, key, &value) == Some(kind) {
+        if crate::mergeable_marker::parse_mergeable_marker(&actual_parent_id, key, &value)
+            == Some(kind)
+        {
             Some(Index::Key(key.into()))
         } else {
             None
@@ -82,7 +84,9 @@ impl DocState {
     ) -> Vec<(InternalString, ContainerID)> {
         let mut ans = Vec::new();
         for (key, value) in map_value.iter() {
-            if let Some(kind) = loro_common::parse_mergeable_marker(parent_id, key, value) {
+            if let Some(kind) =
+                crate::mergeable_marker::parse_mergeable_marker(parent_id, key, value)
+            {
                 let key_istr: InternalString = key.as_str().into();
                 let cid = ContainerID::new_mergeable(parent_id, key, kind);
                 ans.push((key_istr, cid));

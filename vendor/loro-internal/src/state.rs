@@ -2119,7 +2119,7 @@ impl DocState {
                                 LoroValue::Container(c) => c.clone(),
                                 value => {
                                     let parent_id = parent_id?;
-                                    let kind = loro_common::parse_mergeable_marker(
+                                    let kind = crate::mergeable_marker::parse_mergeable_marker(
                                         &parent_id, key, value,
                                     )?;
                                     ContainerID::new_mergeable(&parent_id, key, kind)
@@ -2208,8 +2208,11 @@ impl DocState {
                 if let Some(key) = index.as_key() {
                     let value = m.get(key).cloned()?;
                     if let Some(parent_id) = &parent_id {
-                        if let Some(kind) =
-                            loro_common::parse_mergeable_marker(parent_id, key, &value)
+                        if let Some(kind) = crate::mergeable_marker::parse_mergeable_marker(
+                            parent_id,
+                            key,
+                            &value,
+                        )
                         {
                             let cid = ContainerID::new_mergeable(parent_id, key, kind);
                             LoroValue::Container(cid)

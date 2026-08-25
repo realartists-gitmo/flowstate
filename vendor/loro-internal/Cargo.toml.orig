@@ -29,6 +29,7 @@ thiserror = { workspace = true }
 enum-as-inner = { workspace = true }
 serde_json = { workspace = true }
 bytes = { workspace = true }
+crc32fast = "1.5"
 xxhash-rust = { workspace = true }
 serde_columnar = { workspace = true }
 itertools = { workspace = true }
