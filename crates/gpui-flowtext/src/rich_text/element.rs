@@ -284,10 +284,14 @@ impl Element for VirtualParagraphChunkElement {
         .then_some(editor.selection.head),
         editor.caret_paint_width(),
         editor.local_caret_color_rgb(),
-        // The caret's fallback color = the theme's default text color, so it
-        // contrasts with the background (a hardcoded black caret is invisible on a
-        // dark theme).
-        editor.document.theme.default_text_color,
+        // The caret's fallback color = the configured caret color (flow cells
+        // tint the caret to the cell text color) or the theme's default text
+        // color, so it contrasts with the background (a hardcoded black caret
+        // is invisible on a dark theme).
+        editor
+          .config()
+          .caret_color
+          .unwrap_or(editor.document.theme.default_text_color),
         external_carets,
         external_selections,
         annotation_selections,
@@ -302,7 +306,15 @@ impl Element for VirtualParagraphChunkElement {
         let collapse_state = self
           .editor
           .read(cx)
-          .section_collapse_state_at_paragraph(self.paragraph_ix, &[0, 1, 2, 3]);
+          .config()
+          .show_section_collapse_controls
+          .then(|| {
+            self
+              .editor
+              .read(cx)
+              .section_collapse_state_at_paragraph(self.paragraph_ix, &[0, 1, 2, 3])
+          })
+          .flatten();
         if let Some(collapsed) = collapse_state {
           let indicator_width = px(9.0);
           let indicator_height = if collapsed { px(2.0) } else { px(9.0) };

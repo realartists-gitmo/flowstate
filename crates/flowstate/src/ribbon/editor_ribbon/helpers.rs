@@ -27,18 +27,6 @@ fn show_shortcut(options: ModernRibbonOptions) -> bool {
 }
 
 #[hotpath::measure]
-fn command_tooltip(command: &RibbonCommand) -> String {
-  let label = match command.id {
-    RibbonCommandId::SendToSpeechDocument | RibbonCommandId::SendToSpeechDocumentEnd => "Send to speech",
-    _ => command.label,
-  };
-  match &command.shortcut {
-    Some(shortcut) => format!("{label} ({shortcut})"),
-    None => label.to_string(),
-  }
-}
-
-#[hotpath::measure]
 fn keycap(shortcut: String, cx: &mut Context<EditorRibbon>) -> AnyElement {
   div()
     .flex_none()

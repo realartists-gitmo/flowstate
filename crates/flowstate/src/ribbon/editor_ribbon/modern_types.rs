@@ -101,7 +101,7 @@ impl RibbonLabel {
       RibbonCommandId::ToggleSpeechDocument => Some("icons/speech.svg"),
       RibbonCommandId::SendToSpeechDocument | RibbonCommandId::SendToSpeechDocumentEnd => Some("icons/send.svg"),
       RibbonCommandId::MarkCard => Some("icons/mark-card.svg"),
-      RibbonCommandId::ClearFormatting => Some("icons/eraser.svg"),
+      RibbonCommandId::ClearFormatting => Some("icons/remove-formatting.svg"),
       RibbonCommandId::ExportFormat => Some("icons/export.svg"),
       RibbonCommandId::ExportSend => Some("icons/send-horizontal.svg"),
       RibbonCommandId::Revisions => Some("icons/archive.svg"),

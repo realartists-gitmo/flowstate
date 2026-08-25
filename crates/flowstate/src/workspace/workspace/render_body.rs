@@ -1,6 +1,6 @@
 #[hotpath::measure_all]
 impl Workspace {
-  fn render_resizable_workspace(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+  fn render_resizable_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     if self.document_panels.is_empty() && self.flow_panels.is_empty() {
       return div()
         .flex_1()
@@ -14,7 +14,7 @@ impl Workspace {
         .flex_1()
         .overflow_hidden()
         .child(self.render_collapsed_ribbon_bar(cx))
-        .child(self.render_workspace_body(cx))
+        .child(self.render_workspace_body(window, cx))
         .into_any_element();
     }
 
@@ -43,12 +43,12 @@ impl Workspace {
         resizable_panel()
           .size(px(640.0))
           .size_range(px(320.0)..Pixels::MAX)
-          .child(self.render_workspace_body(cx)),
+          .child(self.render_workspace_body(window, cx)),
       )
       .into_any_element()
   }
 
-  fn render_workspace_body(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+  fn render_workspace_body(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     let panel_sizes = self.body_resizable_state.read(cx).sizes().clone();
     let outline_width = if self.outline_collapsed {
       SIDE_PANEL_COLLAPSED_WIDTH
@@ -74,7 +74,7 @@ impl Workspace {
               .render_collapsed_side_panel("Show outline", IconName::PanelLeftOpen, |workspace, cx| workspace.toggle_outline(cx), cx)
               .into_any_element()
           } else {
-            self.render_left_nav(nav_width, cx).into_any_element()
+            self.render_left_nav(nav_width, window, cx).into_any_element()
           }),
       )
       .child(

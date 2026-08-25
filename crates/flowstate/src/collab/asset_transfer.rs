@@ -13,7 +13,7 @@ pub(super) fn schedule_missing_assets(
   preferred_peer: Option<flowstate_collab::ids::PeerId>,
   cx: &mut Context<CollabSession>,
 ) {
-  let Some(editor) = session.editor.clone() else {
+  let Some(editor) = session.rich_text_editor() else {
     tracing::trace!(session = %session.session, preferred_peer = ?preferred_peer, "skipping collaboration asset scan because editor is missing");
     return;
   };
@@ -23,6 +23,9 @@ pub(super) fn schedule_missing_assets(
   };
   let session_id = session.session;
   cx.spawn(async move |session, cx| {
+    let Some(runtime) = runtime.as_rich_text().cloned() else {
+      return;
+    };
     let result = runtime.asset_metadata().await;
     let _ = session.update(cx, |session, cx| match result {
       Ok(assets) => schedule_missing_assets_from_metadata(session, editor, preferred_peer, assets, cx),

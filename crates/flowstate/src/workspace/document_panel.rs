@@ -58,6 +58,7 @@ impl DocumentPanel {
       },
       DocumentSearchBarEvent::PreviousRequested => panel.select_previous_search_match(cx),
       DocumentSearchBarEvent::NextRequested => panel.select_next_search_match(cx),
+      DocumentSearchBarEvent::ApplyReplaceCurrentRequested => panel.apply_replace_current(cx),
       DocumentSearchBarEvent::ApplyReplaceRequested => panel.apply_replace(cx),
       DocumentSearchBarEvent::CloseRequested => panel.close_search_bar(cx),
     });
@@ -164,13 +165,17 @@ impl DocumentPanel {
         .find_text_with_options(&query, case_sensitive, whole_words);
       self.search_matches.retain(|range| {
         let search_bar = self.search_bar.read(cx);
-        self
-          .editor
-          .read(cx)
-          .document()
-          .paragraphs
-          .get(range.start.paragraph)
-          .is_some_and(|paragraph| search_bar.paragraph_style_enabled(paragraph.style))
+        let paragraphs = &self.editor.read(cx).document().paragraphs;
+        let Some(paragraph) = paragraphs.get(range.start.paragraph) else {
+          return false;
+        };
+        if !search_bar.paragraph_style_enabled(paragraph.style) {
+          return false;
+        }
+        if search_bar.has_active_run_filters() {
+          return search_bar.run_style_matches_for_range(paragraph, range);
+        }
+        true
       });
       self.active_search_match = (!self.search_matches.is_empty()).then_some(0);
     }
@@ -179,6 +184,20 @@ impl DocumentPanel {
     });
     self.update_search_bar_count(cx);
     cx.notify();
+  }
+
+  fn apply_replace_current(&mut self, cx: &mut Context<Self>) {
+    self.refresh_search_matches(cx);
+    if self.search_matches.is_empty() || self.active_search_match.is_none() {
+      return;
+    }
+    let replacement = self.search_bar.read(cx).replacement(cx);
+    let replaced = self
+      .editor
+      .update(cx, |editor, cx| editor.replace_active_search_highlight(&replacement, cx));
+    if replaced {
+      self.refresh_search_matches(cx);
+    }
   }
 
   fn apply_replace(&mut self, cx: &mut Context<Self>) {

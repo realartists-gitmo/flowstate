@@ -189,10 +189,10 @@ pub(super) fn build_paragraph_prep_from_parts(
     invisibility_mode,
   };
 
-  if invisibility_mode && matches!(paragraph.style, ParagraphStyle::Normal) {
+  if invisibility_mode && !paragraph_style_is_visible_for_theme(theme, paragraph.style) {
     let Some((text, runs)) = projected_visible_paragraph_text_and_runs_from_text(text, theme, paragraph, paragraph_byte_range.clone()) else {
-      // A Normal paragraph with no visible (cite/spoken/...) runs has nothing to
-      // project, so it is hidden rather than rendered as a blank visible line.
+      // A paragraph whose style is hidden and has no visible runs has nothing
+      // to project, so it is hidden rather than rendered as a blank line.
       return Some(ParagraphPrep {
         key,
         paragraph_id,
@@ -378,7 +378,7 @@ mod prep_tests {
 
   #[test]
   #[hotpath::measure]
-  fn invisibility_prep_projects_visible_runs() {
+  fn invisibility_prep_projects_visible_runs_from_hidden_custom_paragraphs() {
     let cite = RunStyles {
       semantic: RunSemanticStyle::Custom(1),
       ..RunStyles::default()
@@ -393,7 +393,7 @@ mod prep_tests {
     let document = document_from_input(
       theme,
       vec![InputParagraph {
-        style: ParagraphStyle::Normal,
+        style: ParagraphStyle::Custom(9),
         runs: vec![
           input_run("hidden ", RunStyles::default()),
           input_run("cite", cite),

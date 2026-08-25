@@ -458,6 +458,19 @@ impl RichTextEditor {
     let Some(item) = cx.read_from_clipboard() else {
       return;
     };
+    if !self.config.allow_paragraph_breaks {
+      let rich_single_paragraph = item
+        .metadata()
+        .and_then(|metadata| serde_json::from_str::<RichClipboardFragment>(metadata).ok())
+        .filter(|fragment| fragment.blocks.is_empty() && fragment.paragraphs.len() <= 1);
+      if let Some(fragment) = rich_single_paragraph {
+        self.apply_document_edit(cx, |editor, cx| editor.insert_rich_fragment(fragment, cx));
+      } else if let Some(text) = item.text() {
+        let flattened = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        self.insert_text_command(&flattened, cx);
+      }
+      return;
+    }
     if matches!(self.selected_block, Some(BlockSelection::Equation(_))) {
       if let Some(text) = item.text() {
         self.insert_text_into_selected_equation(&text, cx);

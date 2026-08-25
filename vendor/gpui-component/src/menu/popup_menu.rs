@@ -11,6 +11,10 @@ use gpui::{
     WeakEntity, Window, anchored, canvas, div, prelude::FluentBuilder, px, rems,
 };
 use gpui::{ClickEvent, Half, MouseDownEvent, OwnedMenuItem, Subscription};
+
+#[derive(Clone, Copy)]
+pub struct MenuChangedEvent;
+
 use std::rc::Rc;
 
 const CONTEXT: &str = "PopupMenu";
@@ -38,6 +42,8 @@ pub enum PopupMenuItem {
         label: SharedString,
         disabled: bool,
         checked: bool,
+        keep_open: bool,
+        radio: bool,
         is_link: bool,
         action: Option<Box<dyn Action>>,
         // For link item
@@ -49,6 +55,8 @@ pub enum PopupMenuItem {
         icon: Option<Icon>,
         disabled: bool,
         checked: bool,
+        keep_open: bool,
+        radio: bool,
         action: Option<Box<dyn Action>>,
         render: Box<dyn Fn(&mut Window, &mut App) -> AnyElement + 'static>,
         handler: Option<Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>>,
@@ -61,6 +69,7 @@ pub enum PopupMenuItem {
         icon: Option<Icon>,
         label: SharedString,
         disabled: bool,
+        checked: bool,
         menu: Entity<PopupMenu>,
     },
 }
@@ -75,6 +84,8 @@ impl PopupMenuItem {
             label: label.into(),
             disabled: false,
             checked: false,
+            keep_open: false,
+            radio: false,
             action: None,
             is_link: false,
             handler: None,
@@ -93,6 +104,8 @@ impl PopupMenuItem {
             icon: None,
             disabled: false,
             checked: false,
+            keep_open: false,
+            radio: false,
             action: None,
             render: Box::new(move |window, cx| builder(window, cx).into_any_element()),
             handler: None,
@@ -107,6 +120,7 @@ impl PopupMenuItem {
             icon: None,
             label: label.into(),
             disabled: false,
+            checked: false,
             menu,
         }
     }
@@ -188,6 +202,9 @@ impl PopupMenuItem {
             PopupMenuItem::ElementItem { checked: c, .. } => {
                 *c = checked;
             }
+            PopupMenuItem::Submenu { checked: c, .. } => {
+                *c = checked;
+            }
             _ => {}
         }
         self
@@ -207,6 +224,34 @@ impl PopupMenuItem {
             PopupMenuItem::ElementItem { handler: h, .. } => {
                 *h = Some(Rc::new(handler));
             }
+            _ => {}
+        }
+        self
+    }
+
+    /// Keep the menu open after clicking this item.
+    ///
+    /// Useful for checkbox items in filter menus where the user may want
+    /// to toggle multiple options without the menu closing after each one.
+    /// Only works for [`PopupMenuItem::Item`] and [`PopupMenuItem::ElementItem`].
+    pub fn keep_open(mut self, keep: bool) -> Self {
+        match &mut self {
+            PopupMenuItem::Item { keep_open, .. } => *keep_open = keep,
+            PopupMenuItem::ElementItem { keep_open, .. } => *keep_open = keep,
+            _ => {}
+        }
+        self
+    }
+
+    /// Make this item behave as a radio button — when clicked with
+    /// [`keep_open`](Self::keep_open), all other items in the same menu
+    /// are unchecked first.
+    ///
+    /// Only works for [`PopupMenuItem::Item`] and [`PopupMenuItem::ElementItem`].
+    pub fn radio(mut self, is_radio: bool) -> Self {
+        match &mut self {
+            PopupMenuItem::Item { radio, .. } => *radio = is_radio,
+            PopupMenuItem::ElementItem { radio, .. } => *radio = is_radio,
             _ => {}
         }
         self
@@ -244,6 +289,8 @@ impl PopupMenuItem {
             label: label.into(),
             disabled: false,
             checked: false,
+            keep_open: false,
+            radio: false,
             action: None,
             is_link: true,
             handler: Some(Rc::new(move |_, _, cx| cx.open_url(&href))),
@@ -282,7 +329,9 @@ impl PopupMenuItem {
             PopupMenuItem::ElementItem { icon, checked, .. } => {
                 icon.is_some() || (check_side.is_left() && *checked)
             }
-            PopupMenuItem::Submenu { icon, .. } => icon.is_some(),
+            PopupMenuItem::Submenu { icon, checked, .. } => {
+                icon.is_some() || (check_side.is_left() && *checked)
+            }
             _ => false,
         }
     }
@@ -292,6 +341,7 @@ impl PopupMenuItem {
         match self {
             PopupMenuItem::Item { checked, .. } => *checked,
             PopupMenuItem::ElementItem { checked, .. } => *checked,
+            PopupMenuItem::Submenu { checked, .. } => *checked,
             _ => false,
         }
     }
@@ -311,7 +361,7 @@ pub struct PopupMenu {
     check_side: Side,
 
     /// The parent menu of this menu, if this is a submenu
-    parent_menu: Option<WeakEntity<Self>>,
+    pub parent_menu: Option<WeakEntity<Self>>,
     scrollable: bool,
     scrollbar_show: Option<ScrollbarShow>,
     external_link_icon: bool,
@@ -769,7 +819,11 @@ impl PopupMenu {
                 let item = self.menu_items.get(index);
                 match item {
                     Some(PopupMenuItem::Item {
-                        handler, action, ..
+                        handler,
+                        action,
+                        keep_open,
+                        radio,
+                        ..
                     }) => {
                         if let Some(handler) = handler {
                             handler(&ClickEvent::default(), window, cx);
@@ -777,17 +831,63 @@ impl PopupMenu {
                             self.dispatch_confirm_action(action, window, cx);
                         }
 
-                        self.dismiss(&Cancel, window, cx)
+                        if *keep_open {
+                            if *radio {
+                                for item in self.menu_items.iter_mut() {
+                                    if let PopupMenuItem::Item { checked, .. } = item {
+                                        *checked = false;
+                                    }
+                                }
+                                if let Some(item) = self.menu_items.get_mut(index) {
+                                    if let PopupMenuItem::Item { checked, .. } = item {
+                                        *checked = true;
+                                    }
+                                }
+                            } else if let Some(item) = self.menu_items.get_mut(index) {
+                                if let PopupMenuItem::Item { checked, .. } = item {
+                                    *checked = !*checked;
+                                }
+                            }
+                            cx.notify();
+                            self.keep_open_confirmed(window, cx);
+                        } else {
+                            self.dismiss(&Cancel, window, cx)
+                        }
                     }
                     Some(PopupMenuItem::ElementItem {
-                        handler, action, ..
+                        handler,
+                        action,
+                        keep_open,
+                        radio,
+                        ..
                     }) => {
                         if let Some(handler) = handler {
                             handler(&ClickEvent::default(), window, cx);
                         } else if let Some(action) = action.as_ref() {
                             self.dispatch_confirm_action(action, window, cx);
                         }
-                        self.dismiss(&Cancel, window, cx)
+                        if *keep_open {
+                            if *radio {
+                                for item in self.menu_items.iter_mut() {
+                                    if let PopupMenuItem::ElementItem { checked, .. } = item {
+                                        *checked = false;
+                                    }
+                                }
+                                if let Some(item) = self.menu_items.get_mut(index) {
+                                    if let PopupMenuItem::ElementItem { checked, .. } = item {
+                                        *checked = true;
+                                    }
+                                }
+                            } else if let Some(item) = self.menu_items.get_mut(index) {
+                                if let PopupMenuItem::ElementItem { checked, .. } = item {
+                                    *checked = !*checked;
+                                }
+                            }
+                            cx.notify();
+                            self.keep_open_confirmed(window, cx);
+                        } else {
+                            self.dismiss(&Cancel, window, cx)
+                        }
                     }
                     _ => {}
                 }
@@ -975,6 +1075,10 @@ impl PopupMenu {
             view.selected_index = None;
             view.dismiss(&Cancel, window, cx);
         });
+    }
+
+    pub(crate) fn keep_open_confirmed(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        cx.notify();
     }
 
     fn render_key_binding(
@@ -1204,6 +1308,7 @@ impl PopupMenu {
                 label,
                 menu,
                 disabled,
+                ..
             } => this
                 .selected(selected)
                 .disabled(*disabled)
@@ -1216,7 +1321,7 @@ impl PopupMenu {
                         .gap_x_1()
                         .children(Self::render_icon(
                             has_left_icon,
-                            false,
+                            options.check_side.is_left() && item.is_checked(),
                             icon.clone(),
                             window,
                             cx,
@@ -1228,6 +1333,7 @@ impl PopupMenu {
                                 .items_center()
                                 .justify_between()
                                 .child(label.clone())
+                                .children(right_check_icon.map(|icon| icon.ml_3()))
                                 .child(IconName::ChevronRight),
                         ),
                 )
@@ -1256,6 +1362,7 @@ impl PopupMenu {
 
 impl FluentBuilder for PopupMenu {}
 impl EventEmitter<DismissEvent> for PopupMenu {}
+impl EventEmitter<MenuChangedEvent> for PopupMenu {}
 impl Focusable for PopupMenu {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()

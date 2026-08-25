@@ -127,6 +127,8 @@ impl Workspace {
         editor.update(cx, |editor, cx| {
           editor.set_zoom_percent(*percent, cx);
         });
+      } else if let Some(flow) = workspace.active_flow.clone() {
+        flow.update(cx, |flow, cx| flow.set_zoom_percent(*percent, cx));
       }
     });
     let workspace = cx.entity().downgrade();
@@ -161,6 +163,7 @@ impl Workspace {
     let mut this = Self {
       document_panels: Vec::new(),
       document_runtimes: FxHashMap::default(), // §perf: FxHash for trusted Uuid keys
+      flow_document_runtimes: FxHashMap::default(),
       pending_authority_panels: FxHashSet::default(),
       document_runtime_flush_pending: FxHashSet::default(), // §perf: FxHash for trusted Uuid keys
       flow_panels: Vec::new(),
@@ -169,7 +172,6 @@ impl Workspace {
       active_flow: None,
       ribbon_collapsed: false,
       outline_collapsed: false,
-      toolkit_collapsed: false,
       active_toolkit_tool: None,
       recent_documents: load_recent_documents(),
       recent_document_previews: HashMap::new(),
@@ -585,7 +587,10 @@ impl Workspace {
   }
 
   pub fn new_flow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-    self.add_flow_panel(flowstate_flow::FlowDocument::new(), None, window, cx);
+    let Ok((handle, gate)) = flowstate_collab::flow::FlowDocHandle::new_document(&flowstate_flow::FlowFormat::policy_debate()) else {
+      return;
+    };
+    self.add_flow_panel(FlowRuntimeSource { handle, gate }, None, window, cx);
   }
 
   pub fn open_demo_document(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -674,11 +679,11 @@ impl Workspace {
             });
           });
         },
-        Ok(LoadedWorkspaceDocument::Flow { document, path }) => {
+        Ok(LoadedWorkspaceDocument::Flow { source, path }) => {
           let _ = window_handle.update(cx, |_, window, cx| {
             let _ = workspace.update(cx, |workspace, cx| {
               workspace.record_recent_document(path.clone(), cx);
-              workspace.add_flow_panel(document, Some(path), window, cx);
+              workspace.add_flow_panel(source, Some(path), window, cx);
             });
           });
         },
@@ -757,7 +762,6 @@ impl Workspace {
       active_index,
       ribbon_collapsed: self.ribbon_collapsed,
       outline_collapsed: self.outline_collapsed,
-      toolkit_collapsed: self.toolkit_collapsed,
       pinned_entry_indices,
       speech_entry_index,
     });
@@ -797,10 +801,12 @@ impl Workspace {
         continue;
       }
       let loaded = if matches!(entry.kind, TemporaryWorkspaceSessionEntryKind::Flow) && is_flow_path(&entry.path) {
-        Some(LoadedWorkspaceDocument::Flow {
-          document: flowstate_flow::load_flow_document_or_new(&entry.path),
-          path: entry.path,
-        })
+        load_flow_runtime_source(&entry.path)
+          .ok()
+          .map(|source| LoadedWorkspaceDocument::Flow {
+            source,
+            path: entry.path,
+          })
       } else {
         load_workspace_document(entry.path).ok()
       };
@@ -831,8 +837,8 @@ impl Workspace {
           viewport_scrolls.push((panel_id, entry.viewport_paragraph));
           panel_id
         },
-        LoadedWorkspaceDocument::Flow { document, path } => {
-          let panel = self.create_flow_panel(document, Some(path), window, cx);
+        LoadedWorkspaceDocument::Flow { source, path } => {
+          let panel = self.create_flow_panel(source, Some(path), window, cx);
           panel.read(cx).id()
         },
       };
@@ -852,7 +858,6 @@ impl Workspace {
     }
     self.ribbon_collapsed = session.ribbon_collapsed;
     self.outline_collapsed = session.outline_collapsed;
-    self.toolkit_collapsed = session.toolkit_collapsed;
     self.pinned_document_ids = pinned_ids;
     self.speech_document_id = speech_id;
 
@@ -1011,17 +1016,51 @@ impl Workspace {
 
   fn create_flow_panel(
     &mut self,
-    document: flowstate_flow::FlowDocument,
+    source: FlowRuntimeSource,
     path: Option<PathBuf>,
     window: &mut Window,
     cx: &mut Context<Self>,
   ) -> Entity<FlowPanel> {
-    let editor = cx.new(|cx| FlowEditor::new_with_path(document, path.clone(), window, cx));
+    let FlowRuntimeSource { handle, gate } = source;
+    // The flow I/O service shares the editor's gate; collaboration and
+    // off-thread saves route through it (spec Part C).
+    let io = flowstate_collab::flow::FlowIoHandle::spawn(gate).ok();
+    self.create_flow_panel_inner(handle, io, path, None, window, cx)
+  }
+
+  /// Joined-session variant: the session already built the write authority and
+  /// spawned its I/O service from the snapshot, so the panel adopts them
+  /// instead of spawning a duplicate service on the same gate. Pathless —
+  /// autosave skips it and the session's recovery hooks cover crashes.
+  fn create_flow_panel_from_attachment(
+    &mut self,
+    handle: std::sync::Arc<flowstate_collab::flow::FlowDocHandle>,
+    io: flowstate_collab::flow::FlowIoHandle,
+    title: Option<String>,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) -> Entity<FlowPanel> {
+    self.create_flow_panel_inner(handle, Some(io), None, title, window, cx)
+  }
+
+  fn create_flow_panel_inner(
+    &mut self,
+    handle: std::sync::Arc<flowstate_collab::flow::FlowDocHandle>,
+    io: Option<flowstate_collab::flow::FlowIoHandle>,
+    path: Option<PathBuf>,
+    title: Option<String>,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) -> Entity<FlowPanel> {
+    let editor = cx.new(|cx| FlowEditor::new_with_path(handle, path.clone(), window, cx));
     let workspace = cx.entity().downgrade();
-    let title = path
-      .as_ref()
-      .and_then(|path| path.file_name())
-      .map(|name| name.to_string_lossy().to_string())
+    let title = title
+      .or_else(|| {
+        path
+          .as_ref()
+          .and_then(|path| path.file_name())
+          .map(|name| name.to_string_lossy().to_string())
+      })
       .or_else(|| Some(self.next_untitled_flow_title(cx)));
     let panel = cx.new(|cx| FlowPanel::new_with_title(title, path, editor.clone(), workspace, window, cx));
     let id = panel.read(cx).id();
@@ -1031,6 +1070,9 @@ impl Workspace {
         workspace.maybe_autosave_flow(id, editor.clone(), cx);
       }),
     ));
+    if let Some(io) = io {
+      self.flow_document_runtimes.insert(id, io);
+    }
     self.active_document_id = Some(id);
     self.active_editor = None;
     self.active_flow = Some(editor);
@@ -1042,8 +1084,8 @@ impl Workspace {
     panel
   }
 
-  fn add_flow_panel(&mut self, document: flowstate_flow::FlowDocument, path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
-    self.create_flow_panel(document, path, window, cx);
+  fn add_flow_panel(&mut self, source: FlowRuntimeSource, path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+    self.create_flow_panel(source, path, window, cx);
     self.persist_temporary_workspace_session(cx);
     cx.notify();
   }
@@ -1354,9 +1396,16 @@ impl Workspace {
         return;
       }
       let save_task = editor.update(cx, |editor, cx| editor.save(cx));
+      let dropbox = self.flow_dropbox_sync_context(&editor, cx);
       let window_handle = window.window_handle();
       cx.spawn(async move |_, cx| {
-        if let Err(error) = save_task.await {
+        let result = match save_task.await {
+          // The bound-path mirror runs after (and only after) a good local
+          // save, exactly like the .db8 checkpoint hook.
+          Ok(()) => sync_flow_dropbox_binding(dropbox).await,
+          Err(error) => Err(error),
+        };
+        if let Err(error) = result {
           let detail = error.to_string();
           let _ = window_handle.update(cx, |_, window, cx| {
             window.prompt(PromptLevel::Critical, "Save failed", Some(&detail), &[PromptButton::ok("Ok")], cx)
@@ -1366,6 +1415,26 @@ impl Workspace {
       .detach();
       cx.notify();
     }
+  }
+
+  /// Everything the post-save Dropbox mirror needs, captured while the
+  /// workspace lease is held: the flow's bound path, its document id (the
+  /// cross-document clobber gate), and the panel's I/O service.
+  fn flow_dropbox_sync_context(
+    &self,
+    editor: &Entity<FlowEditor>,
+    cx: &App,
+  ) -> Option<(PathBuf, Uuid, flowstate_collab::flow::FlowIoHandle)> {
+    let path = editor.read(cx).document_path()?.clone();
+    crate::app_settings::load_dropbox_document_binding(&path)?;
+    let document_id = editor.read(cx).handle().document_id().ok()?;
+    let panel_id = self
+      .flow_panels
+      .iter()
+      .find(|panel| panel.read(cx).editor() == *editor)
+      .map(|panel| panel.read(cx).id())?;
+    let io = self.flow_document_runtimes.get(&panel_id)?.clone();
+    Some((path, document_id, io))
   }
 
   pub fn save_active_as(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1480,8 +1549,13 @@ impl Workspace {
 
     self.autosave_flow_in_flight.insert(panel_id);
     let save_task = editor.update(cx, |editor, cx| editor.save(cx));
+    let dropbox = self.flow_dropbox_sync_context(&editor, cx);
     cx.spawn(async move |workspace, cx| {
-      if let Err(error) = save_task.await {
+      let result = match save_task.await {
+        Ok(()) => sync_flow_dropbox_binding(dropbox).await,
+        Err(error) => Err(error),
+      };
+      if let Err(error) = result {
         eprintln!("flow autosave failed: {error}");
       }
       let _ = workspace.update(cx, |workspace, _| {
@@ -1749,6 +1823,16 @@ fn write_bytes_to_path(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     .map_err(Into::into)
 }
 
+/// Mirror a just-saved, Dropbox-bound flow to its remote path (spec Part C
+/// lifecycle parity). `None` context (no path / no binding / no I/O service)
+/// is the common case and a silent no-op.
+async fn sync_flow_dropbox_binding(context: Option<(PathBuf, Uuid, flowstate_collab::flow::FlowIoHandle)>) -> std::io::Result<()> {
+  match context {
+    Some((path, document_id, io)) => crate::collab::dropbox_checkpoint::sync_bound_flow_file(&path, document_id, &io).await,
+    None => Ok(()),
+  }
+}
+
 /// Stable short tag for a runtime event variant, used only by fidelity firehose
 /// lines so a document-runtime commit stream reads which transition was applied.
 enum LoadedWorkspaceDocument {
@@ -1759,18 +1843,30 @@ enum LoadedWorkspaceDocument {
     title: Option<String>,
   },
   Flow {
-    document: flowstate_flow::FlowDocument,
+    source: FlowRuntimeSource,
     path: PathBuf,
   },
+}
+
+/// A flow write authority + its gate, ready to become a panel (the flow
+/// mirror of the .db8 runtime attachment).
+struct FlowRuntimeSource {
+  handle: std::sync::Arc<flowstate_collab::flow::FlowDocHandle>,
+  gate: std::sync::Arc<flowstate_collab::local_write::WriteGate<flowstate_collab::flow::FlowRuntime>>,
+}
+
+fn load_flow_runtime_source(path: &std::path::Path) -> Result<FlowRuntimeSource, String> {
+  let snapshot = flowstate_flow::read_fl0(path).map_err(|error| error.to_string())?;
+  let runtime = flowstate_collab::flow::FlowRuntime::from_snapshot(&snapshot).map_err(|error| error.to_string())?;
+  let (handle, gate) = flowstate_collab::flow::FlowDocHandle::new(runtime);
+  Ok(FlowRuntimeSource { handle, gate })
 }
 
 #[hotpath::measure]
 fn load_workspace_document(path: PathBuf) -> Result<LoadedWorkspaceDocument, String> {
   if is_flow_path(&path) {
-    return Ok(LoadedWorkspaceDocument::Flow {
-      document: flowstate_flow::load_flow_document_or_new(&path),
-      path,
-    });
+    let source = load_flow_runtime_source(&path)?;
+    return Ok(LoadedWorkspaceDocument::Flow { source, path });
   }
   load_document_for_open(&path)
     .map(|loaded| LoadedWorkspaceDocument::Document {
@@ -1790,8 +1886,6 @@ struct TemporaryWorkspaceSession {
   ribbon_collapsed: bool,
   #[serde(default)]
   outline_collapsed: bool,
-  #[serde(default)]
-  toolkit_collapsed: bool,
   #[serde(default)]
   pinned_entry_indices: Vec<usize>,
   #[serde(default)]

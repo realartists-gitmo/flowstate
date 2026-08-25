@@ -27,8 +27,8 @@ hotpath = { workspace = true }
 iroh = { workspace = true }
 loro = { workspace = true }
 memchr = "2.8.1"
-mimalloc = { workspace = true }
 notify = { workspace = true }
+palette = "0.7.6"
 rustc-hash = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -49,7 +49,6 @@ hotpath = [
   "hotpath/hotpath",
   "flowstate-document/hotpath",
   "flowstate-docx/hotpath",
-  "flowstate-flow/hotpath",
   "flowstate-collab/hotpath",
 ]
 hotpath-cpu = [
@@ -57,7 +56,6 @@ hotpath-cpu = [
   "hotpath/hotpath-cpu",
   "flowstate-document/hotpath-cpu",
   "flowstate-docx/hotpath-cpu",
-  "flowstate-flow/hotpath-cpu",
   "flowstate-collab/hotpath-cpu",
 ]
 hotpath-alloc = [
@@ -65,7 +63,6 @@ hotpath-alloc = [
   "hotpath/hotpath-alloc",
   "flowstate-document/hotpath-alloc",
   "flowstate-docx/hotpath-alloc",
-  "flowstate-flow/hotpath-alloc",
   "flowstate-collab/hotpath-alloc",
 ]
 profiler = ["hotpath", "hotpath-alloc", "hotpath-cpu"]
@@ -75,6 +72,12 @@ gpui-symbols = { workspace = true }
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 cosmic-text = { workspace = true }
+
+[target.'cfg(not(windows))'.dependencies]
+rimalloc = { git = "https://github.com/moggedhedien/rimalloc.git" }
+
+[target.'cfg(windows)'.dependencies]
+mimalloc = { workspace = true }
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

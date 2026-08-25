@@ -41,7 +41,7 @@ use crate::app_settings::{
   load_send_to_document_directory, load_smart_word_selection, load_tub_root, save_autosave, save_document_theme, save_recent_documents,
   save_send_custom_directory, save_send_to_document_directory, save_smart_word_selection, save_theme_name,
 };
-use crate::commands::CommandId;
+use crate::commands::{CommandId, context_for};
 use crate::docx_conversion::{convert_docx_to_document, import_docx_to_loro};
 use crate::flow::{FlowEditor, FlowPanel};
 use crate::rich_text_element::{
@@ -70,6 +70,7 @@ pub struct Workspace {
   document_panels: Vec<Entity<DocumentPanel>>,
   // §perf: Uuid keys are locally generated and trusted; use FxHash to avoid SipHash overhead.
   document_runtimes: FxHashMap<Uuid, flowstate_collab::doc_io::DocIoHandle>,
+  flow_document_runtimes: FxHashMap<Uuid, flowstate_collab::flow::FlowIoHandle>,
   document_runtime_flush_pending: FxHashSet<Uuid>,
   /// §act-three C (background open): panels painted read-only from a phase-V
   /// cached projection whose authority runtime has not yet attached (phase G).
@@ -81,7 +82,6 @@ pub struct Workspace {
   active_flow: Option<Entity<FlowEditor>>,
   ribbon_collapsed: bool,
   outline_collapsed: bool,
-  toolkit_collapsed: bool,
   active_toolkit_tool: Option<ToolkitTool>,
   recent_documents: Vec<PathBuf>,
   recent_document_previews: HashMap<PathBuf, DocumentProjection>,

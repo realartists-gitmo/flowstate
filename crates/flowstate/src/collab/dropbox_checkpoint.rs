@@ -3,6 +3,7 @@ use std::{io, path::Path};
 use flowstate_collab::{
   doc_io::DocIoHandle,
   dropbox::{DropboxClient, DropboxWriteError},
+  flow::{FlowIoHandle, FlowRuntime},
 };
 use loro::ExportMode;
 
@@ -78,6 +79,75 @@ pub async fn sync_bound_checkpoint(local_path: &Path, title: String, io_handle: 
 
   // Persist a token refreshed during this request. The client never logs or
   // returns the bearer outside this settings update.
+  let refreshed = client.credentials().await;
+  save_dropbox_collaboration(refreshed, root, true)
+}
+
+/// FLOW mirror of [`sync_bound_checkpoint`]: upload the raw `.fl0` container
+/// to the bound Dropbox path (no named revisions — flows have none). On a
+/// remote conflict the two Loro docs merge (CRDT import through the flow I/O
+/// service), the local file is rewritten, and the merged container re-uploads
+/// against the remote rev. The document-id gate prevents cross-document
+/// clobbering, exactly like the .db8 path.
+pub async fn sync_bound_flow_file(local_path: &Path, local_document_id: uuid::Uuid, io_handle: &FlowIoHandle) -> io::Result<()> {
+  let Some(mut binding) = load_dropbox_document_binding(local_path) else {
+    return Ok(());
+  };
+  let Some((credentials, root)) = load_dropbox_collaboration() else {
+    return Err(io::Error::new(
+      io::ErrorKind::NotConnected,
+      "flow is bound to Dropbox, but Dropbox collaboration is disconnected",
+    ));
+  };
+  let client = DropboxClient::new(credentials);
+  let container = io_handle
+    .encode_bytes()
+    .await
+    .map_err(|error| io::Error::other(format!("encoding flow for Dropbox failed: {error:#}")))?;
+  let metadata = match client
+    .put_checkpoint(&binding.remote_path, container, binding.revision.as_deref())
+    .await
+  {
+    Ok(metadata) => metadata,
+    Err(DropboxWriteError::Conflict { .. }) => {
+      let remote = client
+        .download(&binding.remote_path)
+        .await
+        .map_err(|error| io::Error::other(format!("Dropbox conflict download failed: {error:#}")))?;
+      let remote_snapshot = flowstate_flow::decode_fl0_snapshot(&remote.bytes)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, format!("Dropbox path is not a valid .fl0: {error:#}")))?;
+      let remote_runtime = FlowRuntime::from_snapshot(&remote_snapshot)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, format!("Dropbox path is not a valid flow: {error:#}")))?;
+      if remote_runtime.document_id() != local_document_id {
+        return Err(io::Error::new(
+          io::ErrorKind::InvalidData,
+          "Dropbox path contains a different Flowstate flow; it was not overwritten",
+        ));
+      }
+      io_handle
+        .import_remote_update(remote_snapshot)
+        .await
+        .map_err(|error| io::Error::other(format!("merging Dropbox flow changes failed: {error:#}")))?;
+      io_handle
+        .save_to(local_path.to_path_buf())
+        .await
+        .map_err(|error| io::Error::other(format!("saving merged Dropbox flow failed: {error:#}")))?;
+      let merged = io_handle
+        .encode_bytes()
+        .await
+        .map_err(|error| io::Error::other(format!("encoding merged Dropbox flow failed: {error:#}")))?;
+      client
+        .put_checkpoint(&binding.remote_path, merged, Some(&remote.metadata.rev))
+        .await
+        .map_err(|error| io::Error::other(format!("Dropbox changed again during conflict recovery: {:#}", error.into_anyhow())))?
+    },
+    Err(DropboxWriteError::Other(error)) => {
+      return Err(io::Error::other(format!("saved locally, but Dropbox upload failed: {error:#}")));
+    },
+  };
+  binding.revision = Some(metadata.rev);
+  save_dropbox_document_binding(binding)?;
+
   let refreshed = client.credentials().await;
   save_dropbox_collaboration(refreshed, root, true)
 }

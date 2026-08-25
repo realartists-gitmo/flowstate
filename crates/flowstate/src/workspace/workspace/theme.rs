@@ -10,10 +10,6 @@ fn apply_app_theme_config(theme_name: &str, window: Option<&mut Window>, cx: &mu
   true
 }
 
-fn preview_app_theme(theme_name: &str, window: Option<&mut Window>, cx: &mut App) {
-  let _ = apply_app_theme_config(theme_name, window, cx);
-}
-
 fn apply_app_theme(theme_name: &str, window: Option<&mut Window>, cx: &mut App) {
   if !apply_app_theme_config(theme_name, window, cx) {
     return;

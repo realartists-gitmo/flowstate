@@ -2,6 +2,7 @@ mod keymap;
 
 use gpui::actions;
 
+pub(crate) use keymap::action_for_command;
 pub use keymap::{Keymap, KeymapEntry, register_default_keybindings, register_keymap};
 
 actions!(flowstate_workspace, [FindInDocumentAction, FidelityMarkAction]);
@@ -107,6 +108,9 @@ pub enum CommandId {
   SwitchToTab9,
   SwitchToTab10,
   ScrollToParagraph,
+  FlowAddSiblingAbove,
+  FlowDeleteSelected,
+  FlowStrike,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -178,8 +182,8 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
   CommandSpec::new(CommandId::Cut, "Cut", EDITOR, &["cmd-x", "ctrl-x"]),
   CommandSpec::new(CommandId::Paste, "Paste", EDITOR, &["cmd-v", "ctrl-v"]),
   CommandSpec::new(CommandId::Save, "Save", EDITOR, &["cmd-s", "ctrl-s"]),
-  CommandSpec::new(CommandId::Undo, "Undo", EDITOR, &["ctrl-z", "cmd-z"]),
-  CommandSpec::new(CommandId::Redo, "Redo", EDITOR, &["ctrl-y", "cmd-shift-z", "ctrl-shift-z"]),
+  CommandSpec::new(CommandId::Undo, "Undo", EDITOR, &["cmd-z", "ctrl-z"]),
+  CommandSpec::new(CommandId::Redo, "Redo", EDITOR, &["cmd-shift-z", "ctrl-shift-z", "ctrl-y"]),
   CommandSpec::new(CommandId::SetParagraphPocket, "Set Paragraph: Pocket", EDITOR, &["f4"]),
   CommandSpec::new(CommandId::SetParagraphHat, "Set Paragraph: Hat", EDITOR, &["f5"]),
   CommandSpec::new(CommandId::SetParagraphBlock, "Set Paragraph: Block", EDITOR, &["f6"]),
@@ -218,11 +222,11 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
   CommandSpec::new(CommandId::NextTab, "Next Tab", APP, &["ctrl-tab"]),
   CommandSpec::new(CommandId::PreviousTab, "Previous Tab", APP, &["ctrl-shift-tab"]),
   CommandSpec::new(CommandId::TogglePinTab, "Toggle Pin Tab", APP, &["ctrl-shift-p"]),
-  CommandSpec::new(CommandId::SendToSpeechDocument, "Send to Speech Document", APP, &["ctrl-`"]),
-  CommandSpec::new(CommandId::SendToSpeechDocumentEnd, "Send to Speech Document End", APP, &["ctrl-~"]),
+  CommandSpec::new(CommandId::SendToSpeechDocument, "Send to Speech Document", APP, &["`"]),
+  CommandSpec::new(CommandId::SendToSpeechDocumentEnd, "Send to Speech Document End", APP, &["alt-`"]),
   CommandSpec::new(CommandId::CondenseSelection, "Condense Selection", APP, &["f3"]),
   CommandSpec::new(CommandId::MarkCard, "Mark Card", APP, &["ctrl-m"]),
-  CommandSpec::new(CommandId::CondensedSelection, "Shrink", APP, &[]),
+  CommandSpec::new(CommandId::CondensedSelection, "Shrink", APP, &["ctrl-8"]),
   CommandSpec::new(CommandId::ToggleSpeechDocument, "Toggle Speech Document", APP, &[]),
   CommandSpec::new(CommandId::ExportFormat, "Export Format", APP, &[]),
   CommandSpec::new(CommandId::ExportSend, "Export Send", APP, &[]),
@@ -238,6 +242,9 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
   CommandSpec::new(CommandId::SwitchToTab9, "Switch to Tab 9", APP, &["alt-9"]),
   CommandSpec::new(CommandId::SwitchToTab10, "Switch to Tab 10", APP, &["alt-0"]),
   CommandSpec::new(CommandId::ScrollToParagraph, "Scroll to Paragraph", APP, &[]),
+  CommandSpec::new(CommandId::FlowAddSiblingAbove, "Flow: Add Sibling Above", APP, &["alt-enter"]),
+  CommandSpec::new(CommandId::FlowDeleteSelected, "Flow: Delete Selected", APP, &["cmd-delete"]),
+  CommandSpec::new(CommandId::FlowStrike, "Flow: Strike", APP, &["cmd-shift-x", "ctrl-shift-x"]),
 ];
 
 #[hotpath::measure]
@@ -292,4 +299,9 @@ pub fn label_for(id: CommandId) -> &'static str {
   command_spec(id)
     .map(|spec| spec.label)
     .unwrap_or("Unknown Command")
+}
+
+#[hotpath::measure]
+pub fn context_for(id: CommandId) -> Option<&'static str> {
+  command_spec(id).and_then(|spec| spec.context)
 }

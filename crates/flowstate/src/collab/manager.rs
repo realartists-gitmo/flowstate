@@ -45,6 +45,7 @@ pub struct CollabManager {
   discovery_publications: HashMap<SessionId, DiscoveryPublication>,
   discovery_paths: HashMap<SessionId, PathBuf>,
   discovery_titles: HashMap<SessionId, String>,
+  session_kinds: HashMap<SessionId, flowstate_collab::DocumentKind>,
   pub(super) endpoint_online: bool,
   pub(super) event_pump_started: bool,
 }
@@ -85,6 +86,7 @@ impl CollabManager {
     self.discovery_publications.clear();
     self.discovery_paths.clear();
     self.discovery_titles.clear();
+    self.session_kinds.clear();
     self.event_pump_started = false;
     self.endpoint_online = false;
     tracing::debug!("collaboration runtime shutdown state cleared");
@@ -123,8 +125,68 @@ impl CollabManager {
       self.discovery_paths.insert(session, path);
     }
     self.discovery_titles.insert(session, title.clone());
+    self
+      .session_kinds
+      .insert(session, flowstate_collab::DocumentKind::RichText);
     let collab = CollabSession::from_local_runtime(session, panel_id, editor, title, document_io, commands.clone());
     let direct_handler = collab.direct_handler();
+    self.finish_start_session(session, panel_id, collab, direct_handler, commands, cx)
+  }
+
+  /// Start a session on an open FLOW tab (spec Part C): identical wiring, flow
+  /// I/O handle + flow editor arm.
+  pub fn start_flow_session_for_panel<T>(
+    &mut self,
+    panel_id: Uuid,
+    editor: Entity<crate::flow::FlowEditor>,
+    title: String,
+    flow_io: flowstate_collab::flow::FlowIoHandle,
+    cx: &mut Context<T>,
+  ) -> Result<SessionId>
+  where
+    T: 'static,
+  {
+    if let Some(session) = self.session_by_panel.get(&panel_id).copied() {
+      tracing::debug!(%panel_id, %session, "collaboration session already exists for panel");
+      return Ok(session);
+    }
+    let commands = self.ensure_runtime(cx)?;
+    let session = SessionId::new();
+    let canonical_document_id = editor
+      .read(cx)
+      .handle()
+      .document_id()
+      .map(|id| id.as_u128())
+      .unwrap_or_default();
+    let document_path = editor.read(cx).document_path().cloned();
+    self
+      .discovery_documents
+      .insert(session, document_fingerprint(canonical_document_id));
+    tracing::info!(%panel_id, %session, title = %title, "starting local collaboration flow session");
+    if let Some(path) = document_path {
+      self.discovery_paths.insert(session, path);
+    }
+    self.discovery_titles.insert(session, title.clone());
+    self
+      .session_kinds
+      .insert(session, flowstate_collab::DocumentKind::Flow);
+    let collab = CollabSession::from_local_flow_runtime(session, panel_id, editor, title, flow_io, commands.clone());
+    let direct_handler = collab.direct_handler();
+    self.finish_start_session(session, panel_id, collab, direct_handler, commands, cx)
+  }
+
+  fn finish_start_session<T>(
+    &mut self,
+    session: SessionId,
+    panel_id: Uuid,
+    collab: CollabSession,
+    direct_handler: flowstate_collab::net::direct::DirectSessionHandler,
+    commands: flowstate_collab::net::runtime::CommandSender,
+    cx: &mut Context<T>,
+  ) -> Result<SessionId>
+  where
+    T: 'static,
+  {
     let entity = cx.new(|_| collab);
     entity.update(cx, |session, cx| session.attach(cx));
 
@@ -203,7 +265,15 @@ impl CollabManager {
       .first()
       .map(|addr| addr.id)
       .ok_or_else(|| anyhow!("collaboration invite has no reachable participants"))?;
-    let collab = CollabSession::joining(session, ticket.title.clone(), commands.clone(), bootstrap.clone(), admission.clone());
+    self.session_kinds.insert(session, ticket.document);
+    let collab = CollabSession::joining(
+      session,
+      ticket.title.clone(),
+      commands.clone(),
+      bootstrap.clone(),
+      admission.clone(),
+      ticket.document,
+    );
     let entity = cx.new(|_| collab);
     self.register_session(entity.clone(), cx);
     let neighbor_rx = entity.update(cx, |session, cx| session.prepare_join_neighbor_wait(cx));
@@ -232,7 +302,7 @@ impl CollabManager {
     &mut self,
     session_id: SessionId,
     panel_id: Uuid,
-    editor: Entity<RichTextEditor>,
+    editor: super::session::CollabEditor,
     cx: &mut Context<T>,
   ) -> Result<()>
   where
@@ -309,6 +379,7 @@ impl CollabManager {
     let session_id = self.session_by_panel.get(&panel_id).copied()?;
     let session = self.sessions_by_id.get(&session_id)?.clone();
     let title = session.read(cx).title().to_string();
+    let document = session.read(cx).document_kind();
     let commands = self.ensure_runtime(cx).ok()?;
     let (ticket_tx, ticket_rx) = async_channel::bounded(1);
     let (reply_tx, reply_rx) = async_channel::bounded(1);
@@ -327,7 +398,7 @@ impl CollabManager {
           tracing::info!(%session_id, inviter = %minted.inviter.id, "created collaboration share ticket");
           let own_endpoint_id = minted.inviter.id;
           let _ = cx.update_global::<CollabManager, _>(|manager, _| manager.own_endpoint_id = Some(own_endpoint_id));
-          Ok(SessionTicket::new(session_id, vec![minted.inviter], title, minted.admission))
+          Ok(SessionTicket::new(session_id, vec![minted.inviter], title, minted.admission, document))
         },
         Ok(Err(error)) => {
           tracing::error!(%session_id, error = %format_args!("{error:#}"), "minting collaboration invite failed");
@@ -538,9 +609,15 @@ impl CollabManager {
       .cloned()
       .unwrap_or_else(|| "Shared document".into());
     let identities = trusted_identity_keys_for_path(path);
+    let document = self
+      .session_kinds
+      .get(&session)
+      .copied()
+      .unwrap_or(flowstate_collab::ticket::DocumentKind::RichText);
     if let Err(error) = runtime
       .commands
       .try_send(NetCommand::ConfigureStandingAccess {
+        document,
         session,
         document_fingerprint,
         title,

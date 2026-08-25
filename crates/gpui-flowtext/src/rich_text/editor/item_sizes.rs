@@ -18,6 +18,7 @@ impl RichTextEditor {
     let width = self
       .measured_item_width
       .unwrap_or(if has_measured_viewport { viewport_width } else { px(900.0) });
+    self.prepare_pending_zoom_anchor(width, window, cx);
     if has_measured_viewport && self.initial_layout_hidden {
       self.ensure_exact_initial_viewport_chunks(width, window, cx);
     }
@@ -69,6 +70,7 @@ impl RichTextEditor {
     window: &mut Window,
     cx: &mut Context<Self>,
   ) -> Rc<Vec<Size<Pixels>>> {
+    let zoom_anchor = self.active_zoom_anchor();
     let old_cache = self.item_sizes_cache.take();
     let (items, block_item_ranges, block_heights, sizes) = self.virtual_item_sizes(width, old_cache, window, cx);
     let (paragraph_chunk_item_ranges, paragraph_remainder_items) = item_lookup_for_virtual_items(items.as_ref(), self.document.paragraphs.len());
@@ -89,6 +91,7 @@ impl RichTextEditor {
       sizes: sizes.clone(),
     });
     self.restore_scroll_anchor(scroll_anchor);
+    self.restore_preserved_zoom_anchor(zoom_anchor);
     if schedule_prefetch {
       self.schedule_chunk_prefetch(width, window, cx);
     }
@@ -102,6 +105,7 @@ impl RichTextEditor {
     window: &mut Window,
     cx: &mut Context<Self>,
   ) -> Option<Rc<Vec<Size<Pixels>>>> {
+    let zoom_anchor = self.active_zoom_anchor();
     let range = self.pending_item_sizes_patch_range.clone()?;
     let paragraph_count = self.document.paragraphs.len();
     if range.start > range.end || range.end > paragraph_count {
@@ -188,6 +192,7 @@ impl RichTextEditor {
     }
     self.pending_item_sizes_patch_range = None;
     self.restore_scroll_anchor(scroll_anchor);
+    self.restore_preserved_zoom_anchor(zoom_anchor);
     self.schedule_chunk_prefetch(width, window, cx);
     Some(patched_sizes)
   }

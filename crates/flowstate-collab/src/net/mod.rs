@@ -56,6 +56,7 @@ pub enum NetCommand {
     handler: DirectSessionHandler,
   },
   ConfigureStandingAccess {
+    document: crate::ticket::DocumentKind,
     session: SessionId,
     document_fingerprint: [u8; 32],
     title: String,

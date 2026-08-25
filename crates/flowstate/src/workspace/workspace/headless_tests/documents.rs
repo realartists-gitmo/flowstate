@@ -77,7 +77,6 @@ fn temporary_session_file_lands_in_sandbox(cx: &mut TestAppContext) {
     active_index: None,
     ribbon_collapsed: false,
     outline_collapsed: false,
-    toolkit_collapsed: false,
     pinned_entry_indices: vec![],
     speech_entry_index: None,
   });
