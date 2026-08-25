@@ -14,7 +14,7 @@
 //! machine-local golden (fonts and scale are machine state; the golden lives in
 //! `HEAVEN_DIR`, like the hotpath baselines).
 
-use gpui::{App, AppContext as _, Application, Bounds, WindowBounds, WindowOptions, px, size};
+use gpui::{App, AppContext as _, Bounds, WindowBounds, WindowOptions, px, size};
 use gpui_flowtext::{DocumentTheme, InputParagraph, InputRun, ParagraphStyle, RichTextEditor, RunSemanticStyle, RunStyles, document_from_input};
 
 fn run(text: &str, styles: RunStyles) -> InputRun {
@@ -87,7 +87,7 @@ fn main() {
     .ok()
     .and_then(|value| value.parse().ok())
     .unwrap_or(2500);
-  Application::new().run(move |cx: &mut App| {
+  gpui_platform::application().run(move |cx: &mut App| {
     gpui_component::init(cx);
     let bounds = Bounds::centered(None, size(px(1160.0), px(860.0)), cx);
     let window = cx

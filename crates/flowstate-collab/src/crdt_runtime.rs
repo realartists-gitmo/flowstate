@@ -1272,10 +1272,10 @@ impl CrdtRuntime {
     static OPEN_PROBE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let probe = *OPEN_PROBE.get_or_init(|| std::env::var_os("FLOWSTATE_OPEN_PROBE").is_some());
     let path = path.as_ref();
-    let t0 = std::time::Instant::now();
+    let t0 = instant::Instant::now();
     let package = DocumentPackage::read(path).with_context(|| format!("reading Flowstate package {}", path.display()))?;
     let t_read = t0.elapsed();
-    let t1 = std::time::Instant::now();
+    let t1 = instant::Instant::now();
     let projection = package
       .current_projection_document()
       .context("reading frontier-matched package projection cache")?;
@@ -1283,7 +1283,7 @@ impl CrdtRuntime {
     let cache_hit = projection.is_some();
     // `read` just validated the package; the plain `load_loro_doc` would run
     // a SECOND full validate (re-hashing every segment + asset) on every open.
-    let t2 = std::time::Instant::now();
+    let t2 = instant::Instant::now();
     // §act-twelve A12.1.3 (default ON): decode the shallow accelerator chunk
     // instead of the full history when the package carries one. Every
     // anomaly — no chunk, stale chunk, a segment the shallow state cannot
@@ -1309,7 +1309,7 @@ impl CrdtRuntime {
         .context("loading Loro document from package")?,
     };
     let t_doc = t2.elapsed();
-    let t3 = std::time::Instant::now();
+    let t3 = instant::Instant::now();
     let mut runtime = Self::from_doc_with_projection(doc, Some(package), Some(path.to_path_buf()), projection)?;
     runtime.package_journal_prepared = true;
     if probe {
@@ -1371,7 +1371,7 @@ impl CrdtRuntime {
     // call is idempotent, so re-configuring an already-configured doc is a no-op.
     static OPEN_PROBE2: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let open_probe = *OPEN_PROBE2.get_or_init(|| std::env::var_os("FLOWSTATE_OPEN_PROBE").is_some());
-    let probe_t0 = std::time::Instant::now();
+    let probe_t0 = instant::Instant::now();
     flowstate_document::loro_schema::configure_text_styles(&doc);
     let frontier_before_startup_metadata = doc.state_frontiers().encode();
     let projection_content_repaired = if repair_paragraph_style_marks {
@@ -1387,7 +1387,7 @@ impl CrdtRuntime {
     // arms below skip projection, so they contribute none.
     let mut startup_defects: Vec<ProjectionDefect> = Vec::new();
     let probe_t_repair = probe_t0.elapsed();
-    let probe_t1 = std::time::Instant::now();
+    let probe_t1 = instant::Instant::now();
     let mut projection = match projection {
       Some(projection) if projection.frontier == current_frontier => projection,
       Some(mut projection) if !projection_content_repaired && projection.frontier == frontier_before_startup_metadata => {
@@ -3104,7 +3104,7 @@ impl CrdtRuntime {
     // ---- Rematerialize the region under the shared law + splice. -----------
     static DERIVE_DEBUG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let derive_debug = *DERIVE_DEBUG.get_or_init(|| std::env::var_os("FLOWSTATE_DERIVE_DEBUG").is_some());
-    let materialize_start = std::time::Instant::now();
+    let materialize_start = instant::Instant::now();
     let region = flowstate_document::materialize_body_region(&self.doc, region_sentinel, region_end, &paragraph_map, &pblock_map, &object_map)
       .map_err(|_| "region-materialize-failed")?;
     if derive_debug {
@@ -3161,7 +3161,7 @@ impl CrdtRuntime {
     let fidelity_before_vv = fidelity::enabled().then(|| self.doc.state_vv());
     static IMPORT_PROBE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let import_probe = *IMPORT_PROBE.get_or_init(|| std::env::var_os("FLOWSTATE_IMPORT_PROBE").is_some());
-    let probe_t = std::time::Instant::now();
+    let probe_t = instant::Instant::now();
     let mut statuses = Vec::with_capacity(chunks.len());
     let mut below_root_chunks: Vec<&[u8]> = Vec::new();
     for bytes in chunks {
@@ -3202,7 +3202,7 @@ impl CrdtRuntime {
     // through hull-disjoint remote changes and only clears when the import
     // actually threatens the recorded coordinates.
     let probe_loro = probe_t.elapsed();
-    let probe_t = std::time::Instant::now();
+    let probe_t = instant::Instant::now();
     let import_applied_changes = frontier_after != from_frontier.encode();
     // §22: when an import is missing dependencies, surface the pending version
     // range so the UI session can trigger immediate update pull/anti-entropy
@@ -3238,12 +3238,12 @@ impl CrdtRuntime {
       };
       let drained = self.merge_subscription_invalidation(&mut invalidation);
       let probe_drain = probe_t.elapsed();
-      let probe_t2 = std::time::Instant::now();
+      let probe_t2 = instant::Instant::now();
       if import_applied_changes {
         self.reconcile_recorded_inverse_after_remote(&invalidation, &drained);
       }
       let probe_reconcile = probe_t2.elapsed();
-      let probe_t2 = std::time::Instant::now();
+      let probe_t2 = instant::Instant::now();
       self.derive_body_projection_events(invalidation, &drained, "remote_import", last)?;
       if import_probe {
         eprintln!(
@@ -3289,14 +3289,14 @@ impl CrdtRuntime {
       // one-directional-sync failure. Log and keep the merge in memory instead;
       // the segment persistence self-heals (re-snapshots) in `persist_update_segment`.
       // One revision sync + one segment persist covers the WHOLE chunk.
-      let probe_tail = std::time::Instant::now();
+      let probe_tail = instant::Instant::now();
       if let Some(package) = &mut self.package
         && let Err(error) = package.sync_revisions_from_loro(&self.doc)
       {
         tracing::error!(%error, "syncing revisions after remote import failed; kept the merged update in memory");
       }
       let probe_revisions = probe_tail.elapsed();
-      let probe_tail = std::time::Instant::now();
+      let probe_tail = instant::Instant::now();
       if let Err(error) = self.persist_update_from_last_frontier() {
         tracing::error!(%error, "persisting merged remote update failed; kept the merge in memory (durability degraded until the next successful save)");
         fidelity::event(FidelityClass::Persistence, "remote-persist-failed", || format!("{error:#}"));
@@ -3951,7 +3951,7 @@ impl CrdtRuntime {
     let projection_was_current = self.projection.frontier == from_frontier.encode();
     static BEGIN_PROBE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let begin_probe = *BEGIN_PROBE.get_or_init(|| std::env::var_os("FLOWSTATE_CHECKPOINT_PROBE").is_some());
-    let probe_t = std::time::Instant::now();
+    let probe_t = instant::Instant::now();
     flowstate_document::touch_document_metadata(&self.doc).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     flowstate_document::record_revision(&self.doc, revision_id, revision_frontier, title, "Explicit save", self.author_user_id)
       .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
@@ -3961,12 +3961,12 @@ impl CrdtRuntime {
     let mut revision_invalidation = ProjectionInvalidation::default();
     self.merge_subscription_invalidation(&mut revision_invalidation);
     let probe_commits = probe_t.elapsed();
-    let probe_t = std::time::Instant::now();
+    let probe_t = instant::Instant::now();
     let update = self
       .local_update_bytes(&from_vv)
       .map_err(|error| io::Error::other(error.to_string()))?;
     let probe_export = probe_t.elapsed();
-    let probe_t = std::time::Instant::now();
+    let probe_t = instant::Instant::now();
     let mut events = Vec::new();
     if !update.is_empty() {
       let event_update = update.clone();
@@ -7221,8 +7221,8 @@ fn write_comment_message(
 }
 
 fn unix_time_secs() -> i64 {
-  std::time::SystemTime::now()
-    .duration_since(std::time::UNIX_EPOCH)
+  web_time::SystemTime::now()
+    .duration_since(web_time::UNIX_EPOCH)
     .unwrap_or_default()
     .as_secs()
     .try_into()
@@ -7600,7 +7600,7 @@ impl CheckpointJob {
     static CHECKPOINT_PROBE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let probe = *CHECKPOINT_PROBE.get_or_init(|| std::env::var_os("FLOWSTATE_CHECKPOINT_PROBE").is_some());
     let result = (|| -> io::Result<bool> {
-      let probe_t = std::time::Instant::now();
+      let probe_t = instant::Instant::now();
       // §A13.4.4: reconstruct the checkpoint doc from the package when no
       // fork was supplied (shallow chunk fast path, full decode fallback) —
       // and verify it landed on the manifest tip before deriving anything.
@@ -7621,14 +7621,14 @@ impl CheckpointJob {
         },
       };
       let probe_derive = probe_t.elapsed();
-      let probe_t = std::time::Instant::now();
+      let probe_t = instant::Instant::now();
       self
         .package
         .replace_assets_from_document(&self.projection)?;
       let probe_assets = probe_t.elapsed();
       // §act-five P9: ONE materialization feeds both the projection cache and the
       // search units (was two full `document_from_loro` walks per checkpoint).
-      let probe_t = std::time::Instant::now();
+      let probe_t = instant::Instant::now();
       // §A13.4.1: the job carries the runtime's maintained projection —
       // build the cache payload from IT when frontier-current (from-Loro
       // walk only on mismatch).
@@ -7636,7 +7636,7 @@ impl CheckpointJob {
         .package
         .rebuild_caches_from_projection(&fork, &self.projection)?;
       let probe_caches = probe_t.elapsed();
-      let probe_t = std::time::Instant::now();
+      let probe_t = instant::Instant::now();
       // §act-twelve A12.4.1 incremental persistence: routine revision
       // checkpoints (explicit save + debounced autosave) skip the
       // full-history snapshot export while the update-segment chain is
@@ -7656,7 +7656,7 @@ impl CheckpointJob {
         self.package.refresh_shallow_snapshot(&fork);
       }
       let probe_compact = probe_t.elapsed();
-      let probe_t = std::time::Instant::now();
+      let probe_t = instant::Instant::now();
       if self.record_revision {
         self.package.create_named_revision_at_with_id(
           &fork,
@@ -7670,7 +7670,7 @@ impl CheckpointJob {
       }
       let probe_revision = probe_t.elapsed();
       if let Some(path) = &self.write_path {
-        let probe_t = std::time::Instant::now();
+        let probe_t = instant::Instant::now();
         self.package.write(path)?;
         if probe {
           eprintln!(

@@ -26,7 +26,6 @@ fn modern_highlight_menu(
       div().relative().h(chip_height).child(
         DropdownButton::new("modern-ribbon-highlight-dropdown")
           .with_size(Size::Size(chip_height))
-          .compact()
           .outline()
           .button(
             Button::new(("modern-ribbon-highlight-toggle", 0_u64))
@@ -123,7 +122,6 @@ fn modern_condense_menu(
 
   DropdownButton::new("modern-ribbon-condense-dropdown")
     .with_size(Size::Size(chip_height))
-    .compact()
     .outline()
     .button(
       Button::new("modern-ribbon-condense-toggle")
@@ -196,7 +194,6 @@ fn modern_condensed_menu(
 
   DropdownButton::new("modern-ribbon-condensed-dropdown")
     .with_size(Size::Size(chip_height))
-    .compact()
     .outline()
     .button(
       Button::new("modern-ribbon-condensed-toggle")
@@ -588,7 +585,6 @@ fn modern_export_format(
     .format_export_created_since_last_saved_edit();
   DropdownButton::new("modern-ribbon-format-dropdown")
     .with_size(Size::Size(chip_height))
-    .compact()
     .outline()
     .when(format_created, |this| this.dropdown_icon(IconName::Check, Some(cx.theme().success)))
     .button(
@@ -663,7 +659,6 @@ fn modern_export_send(
     .send_document_created_since_last_saved_edit();
   DropdownButton::new("modern-ribbon-send-dropdown")
     .with_size(Size::Size(chip_height))
-    .compact()
     .outline()
     .when(send_created, |this| this.dropdown_icon(IconName::Check, Some(cx.theme().success)))
     .button(
@@ -760,7 +755,6 @@ fn modern_speech_send_menu(
 
   DropdownButton::new("modern-ribbon-speech-send-dropdown")
     .with_size(Size::Size(chip_height))
-    .compact()
     .outline()
     .button(
       Button::new("modern-ribbon-speech-send-toggle")
@@ -793,6 +787,7 @@ fn modern_speech_send_menu(
         .on_click({
           let workspace = workspace.clone();
           move |_, window, cx| {
+            #[cfg(not(target_family = "wasm"))]
             if let Some(workspace) = workspace.clone()
               && let Err(err) = workspace.update(cx, |workspace, cx| workspace.send_selection_to_speech_document(window, cx))
             {
@@ -833,6 +828,7 @@ fn modern_speech_send_menu(
             }
           })
           .on_click(move |_, window, cx| {
+            #[cfg(not(target_family = "wasm"))]
             if let Some(workspace) = send_workspace.clone()
               && let Err(err) = workspace.update(cx, |workspace, cx| workspace.send_selection_to_speech_document(window, cx))
             {
@@ -864,6 +860,7 @@ fn modern_speech_send_menu(
             }
           })
           .on_click(move |_, window, cx| {
+            #[cfg(not(target_family = "wasm"))]
             if let Some(workspace) = send_end_workspace.clone()
               && let Err(err) = workspace.update(cx, |workspace, cx| workspace.send_selection_to_speech_document_end(window, cx))
             {

@@ -22,13 +22,7 @@ impl CollabManager {
     tracing::debug!("starting collaboration network event pump");
     cx.spawn(async move |_, cx| {
       while let Ok(event) = events.recv().await {
-        if cx
-          .update_global::<CollabManager, _>(|manager, cx| manager.handle_net_event(event, cx))
-          .is_err()
-        {
-          tracing::warn!("collaboration network event pump could not update manager; stopping");
-          break;
-        }
+        cx.update_global::<CollabManager, _>(|manager, cx| manager.handle_net_event(event, cx));
       }
       tracing::debug!("collaboration network event pump stopped");
     })

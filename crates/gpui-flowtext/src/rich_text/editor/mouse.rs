@@ -1,7 +1,7 @@
 #[hotpath::measure_all]
 impl RichTextEditor {
   fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-    window.focus(&self.focus_handle);
+    window.focus(&self.focus_handle, cx);
     self.image_resize_drag = None;
     self.table_column_resize_drag = None;
     self.clear_drop_preview();
@@ -123,7 +123,9 @@ impl RichTextEditor {
       return;
     }
     if event.dragging()
-      && let Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix, .. }) = self.selected_block
+      && let Some(BlockSelection::TableCell {
+        block_ix, row_ix, cell_ix, ..
+      }) = self.selected_block
       && let Some((
         BlockSelection::TableCell {
           row_ix: hit_row,
@@ -314,8 +316,19 @@ impl RichTextEditor {
     // anything styled or multi-paragraph moves as a rich fragment intent.
     let plain_text = (drag.fragment.paragraphs.len() == 1)
       .then(|| &drag.fragment.paragraphs[0])
-      .filter(|paragraph| paragraph.runs.iter().all(|run| run.styles == RunStyles::default()))
-      .map(|paragraph| paragraph.runs.iter().map(|run| run.text.as_str()).collect::<String>());
+      .filter(|paragraph| {
+        paragraph
+          .runs
+          .iter()
+          .all(|run| run.styles == RunStyles::default())
+      })
+      .map(|paragraph| {
+        paragraph
+          .runs
+          .iter()
+          .map(|run| run.text.as_str())
+          .collect::<String>()
+      });
     match plain_text {
       Some(text) => {
         self.write_insert_text_at_caret(&text, cx);
@@ -355,7 +368,9 @@ impl RichTextEditor {
     self.caret_blink_active = true;
     cx.spawn(async move |editor, cx| {
       loop {
-        Timer::after(Duration::from_millis(530)).await;
+        cx.background_executor()
+          .timer(Duration::from_millis(530))
+          .await;
         let keep_running = editor
           .update(cx, |editor, cx| {
             if editor.disposed || !editor.caret_blink_active {
@@ -438,7 +453,9 @@ impl RichTextEditor {
     self.autoscroll_active = true;
     cx.spawn(async move |editor, cx| {
       loop {
-        Timer::after(Duration::from_millis(16)).await;
+        cx.background_executor()
+          .timer(Duration::from_millis(16))
+          .await;
         let keep_running = editor
           .update(cx, |editor, cx| {
             if editor.disposed {

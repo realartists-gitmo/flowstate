@@ -466,7 +466,7 @@ impl RichTextEditor {
     }
     if let Some(image) = item.entries().iter().find_map(|entry| match entry {
       ClipboardEntry::Image(image) => Some(image.clone()),
-      ClipboardEntry::String(_) => None,
+      ClipboardEntry::String(_) | ClipboardEntry::ExternalPaths(_) => None,
     }) {
       self.insert_clipboard_image(image, cx);
       return;

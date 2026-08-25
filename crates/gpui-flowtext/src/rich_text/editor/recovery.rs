@@ -44,28 +44,12 @@ impl RichTextEditor {
     // into one range can pin nearly the whole cache while scrolling far from
     // the active paragraph.
     let layout_keep_ranges = ParagraphCacheRetainRanges {
-      visible: expand_paragraph_range(
-        visible.clone(),
-        paragraph_count,
-        OFFSCREEN_LAYOUT_CACHE_OVERSCAN_PARAGRAPHS,
-      ),
-      active: expand_paragraph_range(
-        active.clone(),
-        paragraph_count,
-        OFFSCREEN_LAYOUT_CACHE_OVERSCAN_PARAGRAPHS,
-      ),
+      visible: expand_paragraph_range(visible.clone(), paragraph_count, OFFSCREEN_LAYOUT_CACHE_OVERSCAN_PARAGRAPHS),
+      active: expand_paragraph_range(active.clone(), paragraph_count, OFFSCREEN_LAYOUT_CACHE_OVERSCAN_PARAGRAPHS),
     };
     let prep_keep_ranges = ParagraphCacheRetainRanges {
-      visible: expand_paragraph_range(
-        visible,
-        paragraph_count,
-        OFFSCREEN_PREP_CACHE_OVERSCAN_PARAGRAPHS,
-      ),
-      active: expand_paragraph_range(
-        active,
-        paragraph_count,
-        OFFSCREEN_PREP_CACHE_OVERSCAN_PARAGRAPHS,
-      ),
+      visible: expand_paragraph_range(visible, paragraph_count, OFFSCREEN_PREP_CACHE_OVERSCAN_PARAGRAPHS),
+      active: expand_paragraph_range(active, paragraph_count, OFFSCREEN_PREP_CACHE_OVERSCAN_PARAGRAPHS),
     };
 
     self
@@ -160,7 +144,7 @@ impl RichTextEditor {
     let delay = self.recovery_write_delay();
     self.recovery_write_in_progress = true;
     cx.spawn(async move |editor, cx| {
-      Timer::after(delay).await;
+      cx.background_executor().timer(delay).await;
       let snapshot_timing = Instant::now();
       let decision = editor
         .update(cx, |editor, cx| {
@@ -173,7 +157,10 @@ impl RichTextEditor {
             editor.recovery_write_in_progress = false;
             editor.schedule_recovery_write(cx);
             RecoveryWriteDecision::Rescheduled
-          } else if editor.last_text_input_at.is_some_and(|last_input| last_input.elapsed() < RECOVERY_TYPING_IDLE_WINDOW) {
+          } else if editor
+            .last_text_input_at
+            .is_some_and(|last_input| last_input.elapsed() < RECOVERY_TYPING_IDLE_WINDOW)
+          {
             editor.recovery_write_in_progress = false;
             editor.schedule_recovery_write(cx);
             RecoveryWriteDecision::Rescheduled
@@ -249,5 +236,4 @@ impl RichTextEditor {
       .filter(|delay| *delay > RECOVERY_WRITE_DEBOUNCE)
       .unwrap_or(RECOVERY_WRITE_DEBOUNCE)
   }
-
 }

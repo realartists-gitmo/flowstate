@@ -20,9 +20,9 @@
 //! the owner must reload from persisted state. `WriteGate::lock` therefore
 //! propagates poisoning as a hard error instead of hiding it.
 
+use instant::Instant;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Instant;
 
 /// Who is holding (or asking for) the gate. Used for structured hold records
 /// and the per-holder hold-time budgets.

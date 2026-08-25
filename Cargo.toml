@@ -1,7 +1,13 @@
 cargo-features = ["profile-rustflags"]
 
 [workspace]
-members = ["crates/*"]
+members = [
+  "crates/*",
+  "vendor/gpui-base",
+  "vendor/gpui-component",
+  "vendor/gpui-component-assets",
+  "vendor/gpui-component-macros",
+]
 default-members = ["crates/flowstate"]
 resolver = "3"
 
@@ -31,9 +37,26 @@ flowstate-collab = { version = "0.1.0", path = "crates/flowstate-collab" }
 flowstate-flow = { version = "0.1.0", path = "crates/flowstate-flow" }
 flowstate-tub = { version = "0.1.0", path = "crates/flowstate-tub" }
 gpui-flowtext = { version = "0.1.0", path = "crates/gpui-flowtext" }
-gpui = "0.2.2"
+gpui = { git = "https://github.com/zed-industries/zed.git", rev = "e0931d5a9dbf4f781b336fdf448739e74a2ac0b5", default-features = false }
+gpui_platform = { git = "https://github.com/zed-industries/zed.git", rev = "e0931d5a9dbf4f781b336fdf448739e74a2ac0b5" }
 gpui-component = "0.5.1"
 gpui-component-assets = "0.5.1"
+gpui-base = { path = "vendor/gpui-base" }
+gpui-component-macros = { path = "vendor/gpui-component-macros" }
+gpui_macros = { git = "https://github.com/zed-industries/zed.git", rev = "e0931d5a9dbf4f781b336fdf448739e74a2ac0b5" }
+instant = { version = "0.1", features = ["wasm-bindgen"] }
+web-time = "1.1"
+log = "0.4"
+lsp-types = { version = "0.97.0", features = ["proposed"] }
+raw-window-handle = "0.6.2"
+ropey = { version = "=2.0.0-beta.1", features = ["metric_chars", "metric_lines_lf", "metric_utf16"] }
+rust-i18n = "4.2.0"
+schemars = "1"
+serde_repr = "0.1"
+smallvec = "1"
+smol = "2"
+sum-tree = { version = "0.2.0", package = "zed-sum-tree" }
+syntect = { version = "5.3.0", default-features = false, features = ["parsing", "default-syntaxes", "regex-fancy"] }
 gpui-symbols = { version = "0.6.1", features = ["component"] }
 hotpath = "0.16.1"
 ignore = "0.4.25"
@@ -76,8 +99,10 @@ typst-svg = "0.14"
 unicode-segmentation = "1"
 url = "2.5"
 uuid = { version = "1.23.1", features = ["serde", "v4"] }
+windows = { version = "0.58.0", features = ["Wdk", "Wdk_System", "Wdk_System_SystemServices"] }
 zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
 zstd = "0.13.3"
+zed-font-kit = { git = "https://github.com/zed-industries/font-kit", rev = "94b0f28166665e8fd2f53ff6d268a14955c82269", package = "zed-font-kit", features = ["loader-freetype-default", "source-fontconfig-dlopen"] }
 
 [patch.crates-io]
 # §perf (bimodal-undo fix): vendored to add `BTree::next_leaf_matching`, a
@@ -87,7 +112,11 @@ zstd = "0.13.3"
 # rebuild retreats a large concurrent branch (the 80-195s dirty-history undo
 # regime). One added method; re-apply on generic-btree upgrades.
 generic-btree = { path = "vendor/generic-btree" }
+gpui = { git = "https://github.com/zed-industries/zed.git", rev = "e0931d5a9dbf4f781b336fdf448739e74a2ac0b5" }
 gpui-component = { path = "vendor/gpui-component" }
+gpui-base = { path = "vendor/gpui-base" }
+gpui-component-assets = { path = "vendor/gpui-component-assets" }
+gpui-component-macros = { path = "vendor/gpui-component-macros" }
 # §perf: vendored to add `LoroDoc::query_text_id_positions`, a single-pass batch
 # resolver for many text cursor ids. Upstream Loro 1.13 only offers per-id cursor
 # resolution (`get_cursor_pos`), which is O(elements) each; resolving every

@@ -1,6 +1,6 @@
 {
   "$schema": "https://github.com/longbridge/gpui-component/raw/refs/heads/main/.theme-schema.json",
-  "name": "Ayu Light",
+  "name": "Ayu",
   "author": "Zed Industries",
   "url": "https://github.com/zed-industries/zed/blob/e62dd2a0e584154886ff86cc1e9e3e060558b977/assets/themes/ayu",
   "themes": [
@@ -263,7 +263,7 @@
         "tab.active.background": "#0D1016",
         "tab_bar.background": "#16191F",
         "title_bar.background": "#16191F",
-        "title_bar.border": "#38393b",
+        "title_bar.border": "#292a2c",
         "base.yellow": "#FEB454",
         "base.red": "#ef7177",
         "base.blue": "#5ac1fe",

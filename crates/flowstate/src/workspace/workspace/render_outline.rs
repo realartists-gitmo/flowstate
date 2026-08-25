@@ -1,9 +1,35 @@
 #[hotpath::measure_all]
 impl Workspace {
+  #[cfg(target_family = "wasm")]
+  fn render_left_nav_header(&self, title: &'static str, cx: &mut Context<Self>) -> impl IntoElement {
+    h_flex()
+      .w_full()
+      .items_center()
+      .justify_between()
+      .gap_2()
+      .child(
+        div()
+          .text_sm()
+          .font_weight(gpui::FontWeight::SEMIBOLD)
+          .text_color(cx.theme().sidebar_primary)
+          .child(title),
+      )
+      .child(
+        Button::new("collapse-left-panel")
+          .icon(Icon::new(IconName::PanelLeftClose).text_color(cx.theme().sidebar_foreground))
+          .xsmall()
+          .ghost()
+          .tooltip("Collapse left panel")
+          .on_click(cx.listener(|workspace, _, _, cx| workspace.toggle_outline(cx))),
+      )
+  }
+
   fn render_left_nav(&mut self, nav_width: Pixels, cx: &mut Context<Self>) -> AnyElement {
+    #[cfg(not(target_family = "wasm"))]
     if self.left_nav_mode == LeftNavMode::Tub {
       return self.render_tub_nav(nav_width, cx);
     }
+    #[cfg(not(target_family = "wasm"))]
     if self.active_flow.is_some() {
       return self.render_flow_nav(cx);
     }
@@ -72,7 +98,9 @@ impl Workspace {
                 }
               })
             };
-            let outline_level = paragraph_ix.and_then(|ix| outline_levels.get(&ix).copied()).unwrap_or(3);
+            let outline_level = paragraph_ix
+              .and_then(|ix| outline_levels.get(&ix).copied())
+              .unwrap_or(3);
             let context_menu_action: Option<ContextMenuAction> = Some(Rc::new({
               let workspace = workspace.clone();
               move |position, window, cx| {
@@ -140,6 +168,7 @@ impl Workspace {
     outline_paragraphs
   }
 
+  #[cfg(not(target_family = "wasm"))]
   fn render_flow_nav(&mut self, cx: &mut Context<Self>) -> AnyElement {
     let workspace = cx.entity().downgrade();
     let items = self

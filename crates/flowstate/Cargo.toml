@@ -5,37 +5,51 @@ edition.workspace = true
 default-run = "flowstate"
 publish.workspace = true
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "flowstate"
+path = "src/main.rs"
+required-features = ["native"]
+
 [lints]
 workspace = true
 
 [dependencies]
+gpui = { workspace = true }
+gpui_platform = { workspace = true }
+gpui-component = { workspace = true }
+gpui-component-assets = { workspace = true }
+gpui-flowtext = { workspace = true }
+flowstate-document = { workspace = true }
+flowstate-collab = { workspace = true }
+hotpath = { workspace = true }
+memchr = "2.8.1"
+rustc-hash = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
 anyhow = { workspace = true }
 async-channel = { workspace = true }
 clap = { workspace = true }
 dirs = { workspace = true }
 fff-search = { workspace = true }
-flowstate-document = { workspace = true }
 flowstate-docx = { workspace = true }
-flowstate-collab = { workspace = true }
 flowstate-flow = { workspace = true }
 flowstate-tub = { workspace = true }
 futures-util = "0.3"
-gpui = { workspace = true }
-gpui-component = { workspace = true }
-gpui-component-assets = { workspace = true }
-hotpath = { workspace = true }
+gpui = { workspace = true, features = ["wayland", "x11"] }
+gpui_platform = { workspace = true, features = ["wayland", "x11"] }
 iroh = { workspace = true }
 loro = { workspace = true }
-memchr = "2.8.1"
 mimalloc = { workspace = true }
 notify = { workspace = true }
-rustc-hash = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
 tempfile = { workspace = true }
-toml = { workspace = true }
-uuid = { workspace = true }
-tracing = { workspace = true }
 tracing-appender = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["json"] }
 url = { workspace = true }
@@ -44,7 +58,16 @@ blake3 = "1.8.5"
 flowstate-fidelity.workspace = true
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 
+[target.'cfg(target_family = "wasm")'.dependencies]
+futures-channel = "0.3"
+js-sys = "0.3"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["Blob", "Document", "Event", "File", "FileList", "HtmlElement", "HtmlInputElement", "Window"] }
+
 [features]
+default = ["native"]
+native = []
 hotpath = [
   "hotpath/hotpath",
   "flowstate-document/hotpath",
@@ -75,6 +98,7 @@ gpui-symbols = { workspace = true }
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 cosmic-text = { workspace = true }
+zed-font-kit.workspace = true
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

@@ -53,9 +53,11 @@ impl RichTextEditor {
   }
   fn on_delete_word_backward(&mut self, _: &DeleteWordBackward, _: &mut Window, cx: &mut Context<Self>) {
     self.delete_word_backward_command(cx);
+    cx.stop_propagation();
   }
   fn on_delete_word_forward(&mut self, _: &DeleteWordForward, _: &mut Window, cx: &mut Context<Self>) {
     self.delete_word_forward_command(cx);
+    cx.stop_propagation();
   }
   fn on_page_up(&mut self, _: &PageUp, _: &mut Window, cx: &mut Context<Self>) {
     self.page_up(cx);
@@ -173,9 +175,11 @@ impl RichTextEditor {
   }
   fn on_backspace(&mut self, _: &Backspace, _: &mut Window, cx: &mut Context<Self>) {
     self.backspace_command(cx);
+    cx.stop_propagation();
   }
   fn on_delete(&mut self, _: &Delete, _: &mut Window, cx: &mut Context<Self>) {
     self.delete_forward_command(cx);
+    cx.stop_propagation();
   }
   fn on_insert_newline(&mut self, _: &InsertNewline, _: &mut Window, cx: &mut Context<Self>) {
     if self.split_selected_table_cell_paragraph(cx) {
@@ -204,9 +208,7 @@ impl RichTextEditor {
     if m.control || m.platform {
       return;
     }
-    if event.keystroke.key == "tab"
-      && self.move_selected_table_cell(!m.shift, cx)
-    {
+    if event.keystroke.key == "tab" && self.move_selected_table_cell(!m.shift, cx) {
       return;
     }
     #[cfg(target_os = "windows")]
@@ -267,5 +269,4 @@ impl RichTextEditor {
   pub(super) fn apply_document_edit(&mut self, cx: &mut Context<Self>, edit: impl FnOnce(&mut Self, &mut Context<Self>)) {
     edit(self, cx);
   }
-
 }

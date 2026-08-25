@@ -1,3 +1,4 @@
+use gpui::Corners;
 use std::{
     ops::Range,
     rc::Rc,
@@ -5,13 +6,21 @@ use std::{
 };
 
 use gpui::{
-    point, px, quad, App, BorderStyle, Bounds, CursorStyle, Edges, Element, ElementId,
-    GlobalElementId, Half, HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, IntoElement,
-    LayoutId, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, StyledText, TextLayout,
-    Window,
+    App, BorderStyle, Bounds, ClickEvent, CursorStyle, Edges, Element, ElementId, GlobalElementId,
+    Half, HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId,
+    MouseButton, MouseClickEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point,
+    SharedString, StyledText, TextLayout, Window, point, px, quad,
 };
 
-use crate::{global_state::GlobalState, input::Selection, text::node::LinkMark, ActiveTheme};
+use crate::{
+    ActiveTheme,
+    global_state::UiGlobalState,
+    input::Selection,
+    text::TextViewMultiClickKind,
+    text::node::LinkMark,
+    text::selection::word_range_at,
+    text::text_view::{LinkClickHandlerFn, handle_link_click},
+};
 
 /// A inline element used to render a inline text and support selectable.
 ///
@@ -22,6 +31,7 @@ pub(super) struct Inline {
     links: Rc<Vec<(Range<usize>, LinkMark)>>,
     highlights: Vec<(Range<usize>, HighlightStyle)>,
     styled_text: StyledText,
+    link_click_handler: Option<Arc<LinkClickHandlerFn>>,
 
     state: Arc<Mutex<InlineState>>,
 }
@@ -48,14 +58,20 @@ impl Inline {
         state: Arc<Mutex<InlineState>>,
         links: Vec<(Range<usize>, LinkMark)>,
         highlights: Vec<(Range<usize>, HighlightStyle)>,
+        link_click_handler: Option<Arc<LinkClickHandlerFn>>,
     ) -> Self {
-        let text = state.lock().unwrap().text.clone();
+        let text = state
+            .lock()
+            .map(|state| state.text.clone())
+            .unwrap_or_default();
+
         Self {
             id: id.into(),
             links: Rc::new(links),
             highlights,
             text: text.clone(),
             styled_text: StyledText::new(text),
+            link_click_handler,
             state,
         }
     }
@@ -82,7 +98,7 @@ impl Inline {
         window.paint_quad(gpui::PaintQuad {
             bounds,
             background: cx.theme().blue.alpha(0.01).into(),
-            corner_radii: gpui::Corners::default(),
+            corner_radii: Corners::default(),
             border_color: gpui::transparent_black(),
             border_style: BorderStyle::default(),
             border_widths: gpui::Edges::all(px(0.)),
@@ -92,25 +108,66 @@ impl Inline {
     fn layout_selections(
         &self,
         text_layout: &TextLayout,
+        bounds: &Bounds<Pixels>,
         window: &mut Window,
         cx: &mut App,
     ) -> (bool, bool, Option<Selection>) {
-        let Some(text_view_state) = GlobalState::global(cx).text_view_state() else {
+        let Some(text_view_state) = UiGlobalState::global(cx).text_view_state() else {
             return (false, false, None);
         };
 
         let text_view_state = text_view_state.read(cx);
         let is_selectable = text_view_state.is_selectable();
-        if !text_view_state.has_selection() {
-            return (is_selectable, false, None);
+        if !is_selectable {
+            return (false, false, None);
         }
 
+        if text_view_state.is_all_selected() {
+            return (is_selectable, true, Some((0..self.text.len()).into()));
+        }
+
+        if let Some(selection) = text_view_state.multi_click_selection() {
+            return (
+                is_selectable,
+                true,
+                selection_for_multi_click(
+                    &self.text,
+                    text_layout,
+                    *bounds,
+                    selection.pos,
+                    selection.kind,
+                )
+                .map(Selection::from),
+            );
+        }
+
+        let Some((selection_start, selection_end)) = text_view_state.selection_points(cx) else {
+            return (is_selectable, false, None);
+        };
         let line_height = window.line_height();
-        let selection_bounds = text_view_state.selection_bounds();
 
         // Use for debug selection bounds
-        // self.paint_selected_bounds(selection_bounds, window, cx);
+        // self.paint_selected_bounds(Bounds::from_corners(selection_start, selection_end), window, cx);
 
+        // NOTE: the selection is computed purely from the geometric band
+        // (`selection_start`..`selection_end`), NOT from what is currently
+        // visible. Every glyph of a *painted* element is laid out (its
+        // `position_for_index` is valid) even when it is scrolled out of, or
+        // clipped by, an ancestor's viewport — the content mask only clips the
+        // painted pixels. Because the copied text is derived from
+        // `InlineState.selection`, gating the selection on `content_mask` here
+        // used to drop scrolled-out-but-selected glyphs, so a selection taller
+        // than the viewport (e.g. a long chat message, or a drag with
+        // auto-scroll) copied only the portion that happened to be on screen.
+        //
+        // This does not resurrect the #2156 clipped-hit-testing behavior: a
+        // selection can only START on visible text (window selection resolves
+        // endpoints with hitbox hover testing against visible Inline bounds),
+        // so the band's endpoints are always anchored to on-screen text.
+        // Content that is merely `overflow_hidden`
+        // (not scrolled) lies outside that band and is still excluded, while
+        // the highlight quads painted for off-screen glyphs are clipped away by
+        // GPUI's content mask as before.
         let mut selection: Option<Selection> = None;
         let mut offset = 0;
         let mut chars = self.text.chars().peekable();
@@ -120,26 +177,80 @@ impl Inline {
                 continue;
             };
 
+            let next_offset = offset + c.len_utf8();
             let mut char_width = line_height.half();
-            if let Some(next_pos) = text_layout.position_for_index(offset + 1) {
+            if let Some(next_pos) = text_layout.position_for_index(next_offset) {
                 if next_pos.y == pos.y {
                     char_width = next_pos.x - pos.x;
                 }
             }
 
-            if point_in_text_selection(pos, char_width, &selection_bounds, line_height) {
+            if point_in_text_selection(pos, char_width, selection_start, selection_end, line_height)
+            {
                 if selection.is_none() {
                     selection = Some((offset..offset).into());
                 }
 
-                let next_offset = offset + c.len_utf8();
-                selection.as_mut().unwrap().end = next_offset;
+                if let Some(selection) = selection.as_mut() {
+                    selection.end = next_offset;
+                }
             }
 
-            offset += c.len_utf8();
+            offset = next_offset;
         }
 
         (true, true, selection)
+    }
+
+    fn text_line_bounds(
+        &self,
+        text_layout: &TextLayout,
+        line_height: Pixels,
+        mask_bounds: Bounds<Pixels>,
+    ) -> Vec<Bounds<Pixels>> {
+        let mut line_bounds = Vec::new();
+        let mut current_line_y = None;
+        let mut current_bounds: Option<Bounds<Pixels>> = None;
+        let mut offset = 0;
+
+        for c in self.text.chars() {
+            let next_offset = offset + c.len_utf8();
+            let Some(pos) = text_layout.position_for_index(offset) else {
+                offset = next_offset;
+                continue;
+            };
+
+            let mut char_width = line_height.half();
+            if let Some(next_pos) = text_layout.position_for_index(next_offset) {
+                if next_pos.y == pos.y {
+                    char_width = next_pos.x - pos.x;
+                }
+            }
+
+            let bounds = Bounds::from_corners(pos, point(pos.x + char_width, pos.y + line_height))
+                .intersect(&mask_bounds);
+            if bounds.size.width > px(0.) && bounds.size.height > px(0.) {
+                if current_line_y == Some(pos.y) {
+                    if let Some(current) = current_bounds.as_mut() {
+                        *current = current.union(&bounds);
+                    }
+                } else {
+                    if let Some(current) = current_bounds.take() {
+                        line_bounds.push(current);
+                    }
+                    current_line_y = Some(pos.y);
+                    current_bounds = Some(bounds);
+                }
+            }
+
+            offset = next_offset;
+        }
+
+        if let Some(current) = current_bounds {
+            line_bounds.push(current);
+        }
+
+        line_bounds
     }
 
     /// Paint the selection background.
@@ -295,7 +406,9 @@ impl Element for Inline {
     ) {
         let current_view = window.current_view();
         let hitbox = prepaint;
-        let mut state = self.state.lock().unwrap();
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
 
         let text_layout = self.styled_text.layout().clone();
         self.styled_text
@@ -303,7 +416,7 @@ impl Element for Inline {
 
         // layout selections
         let (is_selectable, is_selection, selection) =
-            self.layout_selections(&text_layout, window, cx);
+            self.layout_selections(&text_layout, &bounds, window, cx);
 
         state.selection = selection;
 
@@ -319,6 +432,72 @@ impl Element for Inline {
 
         if let Some(selection) = &state.selection {
             Self::paint_selection(selection, &text_layout, &bounds, window, cx);
+        }
+
+        if is_selectable {
+            if let Some(text_view_state) = UiGlobalState::global(cx).text_view_state().cloned() {
+                let text_bounds = self.text_line_bounds(
+                    &text_layout,
+                    text_layout.line_height(),
+                    window.content_mask().bounds,
+                );
+                text_view_state.update(cx, |state, _| {
+                    state.selection_adapter.register_inline(text_bounds);
+                });
+            }
+
+            window.on_mouse_event({
+                let hitbox = hitbox.clone();
+                let text_layout = text_layout.clone();
+                let inline_state = self.state.clone();
+                let text = self.text.clone();
+                let text_view_state = UiGlobalState::global(cx).text_view_state().cloned();
+                move |event: &MouseDownEvent, phase, window, cx| {
+                    if !phase.bubble()
+                        || !hitbox.is_hovered(window)
+                        || event.button != MouseButton::Left
+                    {
+                        return;
+                    }
+
+                    let kind = match event.click_count {
+                        2 => TextViewMultiClickKind::Word,
+                        3 => TextViewMultiClickKind::Paragraph,
+                        _ => return,
+                    };
+
+                    let Some(range) = selection_for_multi_click(
+                        &text,
+                        &text_layout,
+                        hitbox.bounds,
+                        event.position,
+                        kind,
+                    ) else {
+                        return;
+                    };
+
+                    let selected_text = text[range.clone()].to_string();
+
+                    // This renderer owns multi-click selection. Prevent the
+                    // window selection layer from handling the same press.
+                    gpui_base::GlobalState::suppress_text_selection(cx);
+
+                    if let Ok(mut inline_state) = inline_state.lock() {
+                        inline_state.selection = Some(range.into());
+                    }
+                    if let Some(text_view_state) = &text_view_state {
+                        text_view_state.update(cx, |state, cx| {
+                            state.set_multi_click_selection(
+                                event.position,
+                                kind,
+                                selected_text,
+                                cx,
+                            );
+                        });
+                    }
+                    cx.notify(current_view);
+                }
+            });
         }
 
         // mouse move, update hovered link
@@ -346,17 +525,37 @@ impl Element for Inline {
             window.on_mouse_event({
                 let links = self.links.clone();
                 let text_layout = text_layout.clone();
+                let hitbox = hitbox.clone();
+                let text_view_state = UiGlobalState::global(cx).text_view_state().cloned();
+                let link_click_handler = self.link_click_handler.clone();
 
-                move |event: &MouseUpEvent, phase, _, cx| {
-                    if !bounds.contains(&event.position) || !phase.bubble() {
+                move |event: &MouseUpEvent, phase, window, cx| {
+                    if !phase.bubble() || !hitbox.is_hovered(window) {
+                        return;
+                    }
+                    if text_view_state
+                        .as_ref()
+                        .is_some_and(|state| state.read(cx).has_selection(cx))
+                    {
                         return;
                     }
 
                     if let Some(link) =
                         Self::link_for_position(&text_layout, &links, event.position)
                     {
+                        gpui_base::TextSelection::end(window, cx);
                         cx.stop_propagation();
-                        cx.open_url(&link.url);
+                        let click = ClickEvent::Mouse(MouseClickEvent {
+                            down: MouseDownEvent {
+                                button: event.button,
+                                position: event.position,
+                                modifiers: event.modifiers,
+                                click_count: event.click_count,
+                                first_mouse: false,
+                            },
+                            up: event.clone(),
+                        });
+                        handle_link_click(&link_click_handler, link.url, click, window, cx);
                     }
                 }
             });
@@ -364,36 +563,66 @@ impl Element for Inline {
     }
 }
 
+fn selection_for_multi_click(
+    text: &str,
+    text_layout: &TextLayout,
+    bounds: Bounds<Pixels>,
+    pos: Point<Pixels>,
+    kind: TextViewMultiClickKind,
+) -> Option<std::ops::Range<usize>> {
+    if !bounds.contains(&pos) {
+        return None;
+    }
+
+    let offset = text_layout.index_for_position(pos).ok()?;
+
+    match kind {
+        TextViewMultiClickKind::Word => word_range_at(text, offset),
+        // Known limitation: a paragraph maps to a single Inline run here. When a
+        // paragraph embeds an inline image it is split into multiple Inline runs,
+        // so triple-click only selects the run on the clicked side of the image.
+        TextViewMultiClickKind::Paragraph => (!text.is_empty()).then_some(0..text.len()),
+    }
+}
+
 /// Check if a `pos` is within a `bounds`, considering multi-line selections.
 fn point_in_text_selection(
     pos: Point<Pixels>,
     char_width: Pixels,
-    bounds: &Bounds<Pixels>,
+    selection_start: Point<Pixels>,
+    selection_end: Point<Pixels>,
     line_height: Pixels,
 ) -> bool {
-    let top = bounds.top();
-    let bottom = bounds.bottom();
-    let left = bounds.left();
-    let right = bounds.right();
+    let point_in_line = |point: Point<Pixels>| point.y >= pos.y && point.y < pos.y + line_height;
+    let top = selection_start.y.min(selection_end.y);
+    let bottom = selection_start.y.max(selection_end.y);
+    let x = pos.x + char_width.half();
 
     // Out of the vertical bounds
-    if pos.y + line_height < top || pos.y >= bottom {
+    if pos.y + line_height <= top || pos.y > bottom {
         return false;
     }
 
-    let single_line = (bottom - top) <= line_height;
-    if single_line {
-        // If it's a single line selection, just check horizontal bounds
-        return pos.x + char_width.half() >= left && pos.x + char_width.half() <= right;
+    // Treat the selection as single-line when both drag points fall within the
+    // same rendered line, even if their y coordinates differ inside that line.
+    if point_in_line(selection_start) && point_in_line(selection_end) {
+        let left = selection_start.x.min(selection_end.x);
+        let right = selection_start.x.max(selection_end.x);
+        return x >= left && x <= right;
     }
 
-    let is_above = pos.y <= top;
-    let is_below = pos.y + line_height >= bottom;
+    let (top_point, bottom_point) = if selection_start.y < selection_end.y {
+        (selection_start, selection_end)
+    } else {
+        (selection_end, selection_start)
+    };
+    let is_top_line = point_in_line(top_point);
+    let is_bottom_line = point_in_line(bottom_point);
 
-    if is_above {
-        return pos.x + char_width.half() >= left;
-    } else if is_below {
-        return pos.x + char_width.half() <= right;
+    if is_top_line {
+        return x >= top_point.x;
+    } else if is_bottom_line {
+        return x <= bottom_point.x;
     } else {
         return true;
     }
@@ -402,16 +631,14 @@ fn point_in_text_selection(
 #[cfg(test)]
 mod tests {
     use super::point_in_text_selection;
-    use gpui::{point, px, size, Bounds};
+    use gpui::{point, px};
 
     #[test]
     fn test_point_in_text_selection() {
         let line_height = px(20.);
         let char_width = px(10.);
-        let bounds = Bounds {
-            origin: point(px(50.), px(50.)),
-            size: size(px(100.), px(100.)),
-        };
+        let start = point(px(50.), px(50.));
+        let end = point(px(150.), px(150.));
 
         // First line but haft line height, true
         // | p --------|
@@ -420,7 +647,8 @@ mod tests {
         assert!(point_in_text_selection(
             point(px(50.), px(40.)),
             char_width,
-            &bounds,
+            start,
+            end,
             line_height
         ));
 
@@ -431,7 +659,8 @@ mod tests {
         assert!(point_in_text_selection(
             point(px(50.), px(50.)),
             char_width,
-            &bounds,
+            start,
+            end,
             line_height
         ));
         // First line, but left out of selection, false
@@ -441,7 +670,8 @@ mod tests {
         assert!(!point_in_text_selection(
             point(px(40.), px(50.)),
             char_width,
-            &bounds,
+            start,
+            end,
             line_height
         ));
         // First line but right out of selection, true
@@ -451,7 +681,8 @@ mod tests {
         assert!(point_in_text_selection(
             point(px(160.), px(50.)),
             char_width,
-            &bounds,
+            start,
+            end,
             line_height
         ));
 
@@ -462,7 +693,8 @@ mod tests {
         assert!(point_in_text_selection(
             point(px(100.), px(70.)),
             char_width,
-            &bounds,
+            start,
+            end,
             line_height
         ));
         // Middle line, but left out of selection, true
@@ -472,7 +704,8 @@ mod tests {
         assert!(point_in_text_selection(
             point(px(40.), px(70.)),
             char_width,
-            &bounds,
+            start,
+            end,
             line_height
         ));
         // Middle line, but right out of selection, true
@@ -482,7 +715,8 @@ mod tests {
         assert!(point_in_text_selection(
             point(px(160.), px(70.)),
             char_width,
-            &bounds,
+            start,
+            end,
             line_height
         ));
 
@@ -493,7 +727,8 @@ mod tests {
         assert!(point_in_text_selection(
             point(px(100.), px(140.)),
             char_width,
-            &bounds,
+            start,
+            end,
             line_height
         ));
         // Last line, but left out of selection, true
@@ -504,7 +739,8 @@ mod tests {
         assert!(point_in_text_selection(
             point(px(40.), px(140.)),
             char_width,
-            &bounds,
+            start,
+            end,
             line_height
         ));
         // Last line, but right out of selection, false
@@ -514,7 +750,8 @@ mod tests {
         assert!(!point_in_text_selection(
             point(px(160.), px(140.)),
             char_width,
-            &bounds,
+            start,
+            end,
             line_height
         ));
 
@@ -526,7 +763,8 @@ mod tests {
         assert!(!point_in_text_selection(
             point(px(100.), px(20.)),
             char_width,
-            &bounds,
+            start,
+            end,
             line_height
         ));
         // Out of vertical bounds (bottom), false
@@ -537,7 +775,111 @@ mod tests {
         assert!(!point_in_text_selection(
             point(px(100.), px(160.)),
             char_width,
-            &bounds,
+            start,
+            end,
+            line_height
+        ));
+    }
+
+    #[test]
+    fn test_point_in_text_selection_reversed_drag_direction() {
+        let line_height = px(20.);
+        let char_width = px(10.);
+
+        // Mouse down on lower line then drag upward to x=150.
+        // Top line should follow current mouse x, bottom line should keep anchor x.
+        let start = point(px(80.), px(150.));
+        let end = point(px(150.), px(50.));
+
+        // On top line, selection starts from top cursor x (150), so x=140 should be excluded.
+        assert!(!point_in_text_selection(
+            point(px(140.), px(50.)),
+            char_width,
+            start,
+            end,
+            line_height
+        ));
+        assert!(point_in_text_selection(
+            point(px(150.), px(50.)),
+            char_width,
+            start,
+            end,
+            line_height
+        ));
+
+        // On bottom line, selection ends at anchor x (80), so x=90 should be excluded.
+        assert!(point_in_text_selection(
+            point(px(75.), px(140.)),
+            char_width,
+            start,
+            end,
+            line_height
+        ));
+        assert!(!point_in_text_selection(
+            point(px(80.), px(140.)),
+            char_width,
+            start,
+            end,
+            line_height
+        ));
+    }
+
+    #[test]
+    fn test_point_in_text_selection_same_visual_line_with_different_y() {
+        let line_height = px(20.);
+        let char_width = px(10.);
+        let start = point(px(100.), px(55.));
+        let end = point(px(60.), px(58.));
+
+        assert!(!point_in_text_selection(
+            point(px(40.), px(50.)),
+            char_width,
+            start,
+            end,
+            line_height
+        ));
+        assert!(point_in_text_selection(
+            point(px(70.), px(50.)),
+            char_width,
+            start,
+            end,
+            line_height
+        ));
+        assert!(!point_in_text_selection(
+            point(px(110.), px(50.)),
+            char_width,
+            start,
+            end,
+            line_height
+        ));
+    }
+
+    #[test]
+    fn test_point_in_text_selection_same_visual_line_with_reversed_y() {
+        let line_height = px(20.);
+        let char_width = px(10.);
+        let start = point(px(60.), px(58.));
+        let end = point(px(100.), px(55.));
+
+        assert!(!point_in_text_selection(
+            point(px(40.), px(50.)),
+            char_width,
+            start,
+            end,
+            line_height
+        ));
+        assert!(point_in_text_selection(
+            point(px(70.), px(50.)),
+            char_width,
+            start,
+            end,
+            line_height
+        ));
+        assert!(!point_in_text_selection(
+            point(px(110.), px(50.)),
+            char_width,
+            start,
+            end,
             line_height
         ));
     }

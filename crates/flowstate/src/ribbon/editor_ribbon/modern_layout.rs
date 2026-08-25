@@ -244,12 +244,16 @@ fn modern_command_chip(
       this.when_some(shortcut, |this, shortcut| this.child(keycap(shortcut, cx)))
     })
     .on_click(move |_, window, cx| match command_id {
-      RibbonCommandId::ToggleSpeechDocument => {
+      RibbonCommandId::ToggleSpeechDocument =>
+      {
+        #[cfg(not(target_family = "wasm"))]
         if let (Some(workspace), Some(panel_id)) = (workspace.clone(), panel_id) {
           let _ = workspace.update(cx, |workspace, cx| workspace.toggle_speech_document(panel_id, cx));
         }
       },
-      RibbonCommandId::Revisions => {
+      RibbonCommandId::Revisions =>
+      {
+        #[cfg(not(target_family = "wasm"))]
         if let Some(workspace) = workspace.clone() {
           let _ = workspace.update(cx, |workspace, cx| workspace.open_revision_dialog(window, cx));
         }

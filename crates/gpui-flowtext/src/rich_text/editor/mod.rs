@@ -9,14 +9,15 @@ use std::{
   pin::Pin,
   rc::Rc,
   sync::{Arc, Mutex, OnceLock},
-  time::{Duration, Instant},
+  time::Duration,
 };
 
 use crop::Rope;
+use instant::Instant;
 use gpui::{
   App, Bounds, ClipboardEntry, ClipboardItem, Context, CursorStyle, DragMoveEvent, Entity, EntityInputHandler, ExternalPaths, FocusHandle,
   Focusable, Image, ImageFormat, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-  PathPromptOptions, Pixels, Point, Render, SharedString, Size, Subscription, Task, Timer, UTF16Selection, Window, actions, div, img, point,
+  PathPromptOptions, Pixels, Point, Render, SharedString, Size, Subscription, Task, UTF16Selection, Window, actions, div, img, point,
   prelude::*, px, relative, rgb, size,
 };
 use gpui_component::ActiveTheme as _;

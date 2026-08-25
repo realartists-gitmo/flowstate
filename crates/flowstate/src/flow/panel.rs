@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use gpui::{App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, Render, SharedString, WeakEntity, Window, div, prelude::*};
 use gpui_component::ActiveTheme as _;
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::dock::{Panel, PanelControl, PanelEvent, PanelInfo, PanelState};
+use gpui_component::dock::{BasePanel, Panel, PanelControl, PanelEvent, PanelInfo, PanelState};
 use gpui_component::{IconName, Sizable};
 use serde_json::json;
 use uuid::Uuid;
@@ -102,35 +102,9 @@ impl Focusable for FlowPanel {
 }
 
 #[hotpath::measure_all]
-impl Panel for FlowPanel {
+impl BasePanel for FlowPanel {
   fn panel_name(&self) -> &'static str {
     "FlowPanel"
-  }
-
-  #[hotpath::measure]
-  fn tab_name(&self, cx: &App) -> Option<SharedString> {
-    Some(self.display_title(cx))
-  }
-
-  #[hotpath::measure]
-  fn title(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-    self.display_title(cx).clone()
-  }
-
-  #[hotpath::measure]
-  fn title_suffix(&mut self, _: &mut Window, _cx: &mut Context<Self>) -> Option<impl IntoElement> {
-    let workspace = self.workspace.clone();
-    let panel_id = self.id;
-    Some(
-      Button::new(("close-flow-panel", panel_id.as_u128() as u64))
-        .icon(IconName::Close)
-        .xsmall()
-        .ghost()
-        .tooltip("Close flow")
-        .on_click(move |_, window, cx| {
-          let _ = workspace.update(cx, |workspace, cx| workspace.close_document_panel(panel_id, window, cx));
-        }),
-    )
   }
 
   #[hotpath::measure]
@@ -139,8 +113,8 @@ impl Panel for FlowPanel {
   }
 
   #[hotpath::measure]
-  fn zoomable(&self, _: &App) -> Option<PanelControl> {
-    Some(PanelControl::Both)
+  fn zoomable(&self, _: &App) -> bool {
+    true
   }
 
   #[hotpath::measure]
@@ -184,7 +158,36 @@ impl Panel for FlowPanel {
     }
   }
 
-  #[hotpath::measure]
+}
+
+impl Panel for FlowPanel {
+  fn tab_name(&self, cx: &App) -> Option<SharedString> {
+    Some(self.display_title(cx))
+  }
+
+  fn title(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    self.display_title(cx).clone()
+  }
+
+  fn title_suffix(&mut self, _: &mut Window, _cx: &mut Context<Self>) -> Option<impl IntoElement> {
+    let workspace = self.workspace.clone();
+    let panel_id = self.id;
+    Some(
+      Button::new(("close-flow-panel", panel_id.as_u128() as u64))
+        .icon(IconName::Close)
+        .xsmall()
+        .ghost()
+        .tooltip("Close flow")
+        .on_click(move |_, window, cx| {
+          let _ = workspace.update(cx, |workspace, cx| workspace.close_document_panel(panel_id, window, cx));
+        }),
+    )
+  }
+
+  fn zoom_control(&self, _: &App) -> Option<PanelControl> {
+    Some(PanelControl::Both)
+  }
+
   fn inner_padding(&self, _: &App) -> bool {
     false
   }

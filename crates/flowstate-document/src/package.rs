@@ -1229,7 +1229,7 @@ impl DocumentPackage {
 
   pub fn read(path: impl AsRef<Path>) -> io::Result<Self> {
     let path = path.as_ref();
-    let probe_t0 = std::time::Instant::now();
+    let probe_t0 = instant::Instant::now();
     let bytes = fs::read(path)?;
     if open_probe() {
       eprintln!("[flowstate-read-probe] fs_read={:?} bytes={}", probe_t0.elapsed(), bytes.len());
@@ -1432,7 +1432,7 @@ impl DocumentPackage {
   }
 
   fn from_journal_bytes(bytes: &[u8]) -> io::Result<Self> {
-    let probe_t0 = std::time::Instant::now();
+    let probe_t0 = instant::Instant::now();
     let payloads = committed_journal_payloads(bytes)?;
     let probe_scan = probe_t0.elapsed();
     // Decode from the LAST full generation: everything before it is
@@ -1492,7 +1492,7 @@ impl DocumentPackage {
     // validating it for consistency. The manifest's own segment/asset indexes
     // arrive with the delta and remain checked by `validate_manifest_indexes`.
     package.integrity_index = package.build_integrity_index();
-    let probe_t1 = std::time::Instant::now();
+    let probe_t1 = instant::Instant::now();
     package.validate()?;
     if open_probe() {
       eprintln!(
@@ -1508,10 +1508,10 @@ impl DocumentPackage {
     // Decode each chunk straight from its slice into the owned structs — the
     // former shape copied every payload into an intermediate `Vec<u8>` first,
     // a full extra pass over a multi-hundred-MB package on every open.
-    let probe_t0 = std::time::Instant::now();
+    let probe_t0 = instant::Instant::now();
     let chunks = read_chunk_slices_deferring(bytes, |_| true, |kind| kind == CHUNK_LORO_SNAPSHOT)?;
     let probe_slices = probe_t0.elapsed();
-    let probe_t1 = std::time::Instant::now();
+    let probe_t1 = instant::Instant::now();
     let mut manifest = None;
     let mut deferred_snapshot_checksums = std::collections::HashMap::new();
     let mut loro_snapshots = Vec::new();
@@ -1563,7 +1563,7 @@ impl DocumentPackage {
       deferred_snapshot_checksums,
     };
     let probe_decode = probe_t1.elapsed();
-    let probe_t2 = std::time::Instant::now();
+    let probe_t2 = instant::Instant::now();
     package.validate()?;
     if open_probe() {
       eprintln!(
@@ -1880,7 +1880,7 @@ impl DocumentPackage {
     if disabled || document.frontier != frontier {
       return self.rebuild_caches_from_loro(doc);
     }
-    let probe_t = std::time::Instant::now();
+    let probe_t = instant::Instant::now();
     let projection = projection_blocks_from_document(document);
     if open_probe() {
       eprintln!("[flowstate-cache-probe] projection_convert={:?}", probe_t.elapsed());
@@ -1906,15 +1906,15 @@ impl DocumentPackage {
   }
 
   fn finish_cache_rebuild(&mut self, doc: &LoroDoc, frontier: Vec<u8>, projection: crate::loro_projection::ProjectionBlocks) -> io::Result<()> {
-    let probe_t = std::time::Instant::now();
+    let probe_t = instant::Instant::now();
     self.write_preview_header(&frontier, &projection)?;
     let probe_preview = probe_t.elapsed();
-    let probe_t = std::time::Instant::now();
+    let probe_t = instant::Instant::now();
     // §act-ten A10.5: block-boundary persistence removed (see
     // `rebuild_projection_cache_from_loro`).
     self.search_units = crate::package_search::search_units_from_input_blocks(doc, &projection.blocks, self.manifest.document_id, &frontier)?;
     let probe_search = probe_t.elapsed();
-    let probe_t = std::time::Instant::now();
+    let probe_t = instant::Instant::now();
     self.manifest.search_cache_frontier = Some(frontier.clone());
     self.projection_caches.clear();
     self.projection_caches.push(ProjectionCacheChunk {
@@ -1922,7 +1922,7 @@ impl DocumentPackage {
       bytes: encode_chunk(&projection, "projection cache payload")?,
     });
     let probe_encode = probe_t.elapsed();
-    let probe_t = std::time::Instant::now();
+    let probe_t = instant::Instant::now();
     self.manifest.projection_cache_frontier = Some(frontier);
     self.manifest.modified_at_unix_secs = unix_time_secs();
     self.validate()?;
@@ -2813,11 +2813,14 @@ fn validate_version_vector(bytes: &[u8], label: &'static str) -> io::Result<()> 
 fn blake3_hash(bytes: &[u8]) -> [u8; 32] {
   // §A13.1.2: multithread the hash for multi-MB payloads (3-6GB/s vs ~1);
   // below the threshold the rayon fan-out costs more than it saves.
-  const RAYON_HASH_MIN_BYTES: usize = 1024 * 1024;
-  if bytes.len() >= RAYON_HASH_MIN_BYTES {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update_rayon(bytes);
-    return *hasher.finalize().as_bytes();
+  #[cfg(not(target_arch = "wasm32"))]
+  {
+    const RAYON_HASH_MIN_BYTES: usize = 1024 * 1024;
+    if bytes.len() >= RAYON_HASH_MIN_BYTES {
+      let mut hasher = blake3::Hasher::new();
+      hasher.update_rayon(bytes);
+      return *hasher.finalize().as_bytes();
+    }
   }
   *blake3::hash(bytes).as_bytes()
 }
@@ -2842,8 +2845,8 @@ fn loro_io_error(error: impl std::error::Error + Send + Sync + 'static) -> io::E
 }
 
 fn unix_time_secs() -> i64 {
-  std::time::SystemTime::now()
-    .duration_since(std::time::UNIX_EPOCH)
+  web_time::SystemTime::now()
+    .duration_since(web_time::UNIX_EPOCH)
     .map_or(0, |duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
 }
 
@@ -3091,6 +3094,7 @@ fn package_map_i64(map: &loro::LoroMap, key: &str) -> Option<i64> {
   }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
   let parent = path
     .parent()
@@ -3100,6 +3104,14 @@ fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
   atomicwrites::AtomicFile::new(path, atomicwrites::AllowOverwrite)
     .write(|file| file.write_all(bytes))
     .map_err(Into::into)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn write_bytes_atomic(_: &Path, _: &[u8]) -> io::Result<()> {
+  Err(io::Error::new(
+    io::ErrorKind::Unsupported,
+    "filesystem persistence requires a native host adapter",
+  ))
 }
 
 #[cfg(test)]

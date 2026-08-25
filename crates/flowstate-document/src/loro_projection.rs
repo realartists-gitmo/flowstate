@@ -22,15 +22,28 @@ use crate::{
   table_topology,
 };
 
-// §perf-heaven T7.24: object-anchor validation resolves positions from
-// `query_text_id_positions(use_event_index = true)` and then checks them with
-// `char_at`, which treats the index as UNICODE. That identity (event index ==
-// unicode index) holds only on non-wasm Loro builds; on wasm the event index is
-// UTF-16 and the object anchors would silently misresolve. Flowstate is a native
-// desktop app — fail loudly at compile time if that ever changes, rather than
-// shipping a subtly wrong projection.
-#[cfg(target_arch = "wasm32")]
-compile_error!("loro_projection object-anchor validation assumes non-wasm event indexing (event index == unicode index)");
+// Loro reports text event positions as UTF-16 offsets on wasm, while the
+// projection model and `LoroText::char_at` use Unicode scalar indices. Keep the
+// native identity fast path and normalize browser positions at the boundary.
+#[inline]
+fn normalize_event_index(text: &LoroText, position: usize) -> usize {
+  #[cfg(not(target_arch = "wasm32"))]
+  {
+    let _ = text;
+    position
+  }
+  #[cfg(target_arch = "wasm32")]
+  {
+    let mut utf16_offset = 0;
+    for (unicode_index, ch) in text.to_string().chars().enumerate() {
+      if utf16_offset >= position {
+        return unicode_index;
+      }
+      utf16_offset += ch.len_utf16();
+    }
+    text.len_unicode()
+  }
+}
 
 pub fn document_from_loro(doc: &LoroDoc) -> io::Result<DocumentProjection> {
   // Callers that cannot repair still get the deterministic projection; the
@@ -791,7 +804,7 @@ impl<'a> Projector<'a> {
           .query_text_id_positions(&container, &anchor_ids),
       ) {
         if let Some(pos) = pos {
-          anchor_positions.insert(id, pos);
+          anchor_positions.insert(id, normalize_event_index(text, pos));
         }
       }
     }
@@ -829,7 +842,7 @@ impl<'a> Projector<'a> {
                 .doc
                 .get_cursor_pos(&cursor)
                 .ok()
-                .map(|pos| pos.current.pos)
+                .map(|pos| normalize_event_index(text, pos.current.pos))
             },
           })
           .filter(|pos| is_object_char(*pos));
@@ -867,7 +880,7 @@ impl<'a> Projector<'a> {
     let mut main_body_at_zero = false;
     let text_len = text.len_unicode();
     for (key, cursor) in paragraph_candidates {
-      let Some(pos) = resolve_decoded_cursor(self.doc, text_len, cursor.as_ref(), &anchor_positions) else {
+      let Some(pos) = resolve_decoded_cursor(self.doc, text, text_len, cursor.as_ref(), &anchor_positions) else {
         continue;
       };
       if pos == 0 && key.as_str() == MAIN_BODY_BLOCK_ID {
@@ -1433,15 +1446,15 @@ fn paragraph_ids_by_boundary(doc: &LoroDoc, text: &LoroText) -> FxHashMap<usize,
       .zip(doc.inner().query_text_id_positions(&container, &ids))
     {
       if let Some(pos) = pos {
-        pos_by_id.insert(id, pos);
+        pos_by_id.insert(id, normalize_event_index(text, pos));
       }
     }
   }
   let mut root_first_at_zero = false;
   let text_len = text.len_unicode();
   for (key, boundary, start) in cands {
-    let Some(pos) = resolve_decoded_cursor(doc, text_len, boundary.as_ref(), &pos_by_id)
-      .or_else(|| resolve_decoded_cursor(doc, text_len, start.as_ref(), &pos_by_id))
+    let Some(pos) = resolve_decoded_cursor(doc, text, text_len, boundary.as_ref(), &pos_by_id)
+      .or_else(|| resolve_decoded_cursor(doc, text, text_len, start.as_ref(), &pos_by_id))
     else {
       continue;
     };
@@ -1460,7 +1473,13 @@ fn paragraph_ids_by_boundary(doc: &LoroDoc, text: &LoroText) -> FxHashMap<usize,
 /// pre-decoded companion of [`live_cursor_pos`] (same batch-hit / id-less
 /// `get_cursor_pos` fallback / in-range validation), for the fused single-pass
 /// boundary indexers that decode each record's cursors exactly once.
-fn resolve_decoded_cursor(doc: &LoroDoc, text_len: usize, cursor: Option<&Cursor>, pos_by_id: &FxHashMap<ID, usize>) -> Option<usize> {
+fn resolve_decoded_cursor(
+  doc: &LoroDoc,
+  text: &LoroText,
+  text_len: usize,
+  cursor: Option<&Cursor>,
+  pos_by_id: &FxHashMap<ID, usize>,
+) -> Option<usize> {
   // §perf-heaven T7.8: takes the body's unicode length precomputed once by the
   // caller, rather than calling `text.len_unicode()` per boundary. Even O(1),
   // hoisting it out of the per-record loop drops N redundant calls.
@@ -1469,7 +1488,7 @@ fn resolve_decoded_cursor(doc: &LoroDoc, text_len: usize, cursor: Option<&Cursor
     Some(id) => pos_by_id.get(&id).copied()?,
     None => {
       crate::instrument::record_cursor_pos_resolve();
-      doc.get_cursor_pos(cursor).ok()?.current.pos
+      normalize_event_index(text, doc.get_cursor_pos(cursor).ok()?.current.pos)
     },
   };
   (pos < text_len).then_some(pos)
@@ -1531,14 +1550,14 @@ fn paragraph_block_ids_by_boundary(doc: &LoroDoc, text: &LoroText) -> FxHashMap<
       .zip(doc.inner().query_text_id_positions(&container, &ids))
     {
       if let Some(pos) = pos {
-        pos_by_id.insert(id, pos);
+        pos_by_id.insert(id, normalize_event_index(text, pos));
       }
     }
   }
   let mut main_body_at_zero = false;
   let text_len = text.len_unicode();
   for (key, cursor) in cands {
-    let Some(pos) = resolve_decoded_cursor(doc, text_len, cursor.as_ref(), &pos_by_id) else {
+    let Some(pos) = resolve_decoded_cursor(doc, text, text_len, cursor.as_ref(), &pos_by_id) else {
       continue;
     };
     if pos == 0 && key.as_str() == MAIN_BODY_BLOCK_ID {

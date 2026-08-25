@@ -27,7 +27,12 @@ impl RichTextEditor {
     let mut prep_queue = Vec::new();
     let active = self.active_height_range();
     let predicted = self.predicted_visible_height_range(width);
-    let mut candidates = Vec::with_capacity(predicted.len().saturating_add(active.len()).saturating_add(16));
+    let mut candidates = Vec::with_capacity(
+      predicted
+        .len()
+        .saturating_add(active.len())
+        .saturating_add(16),
+    );
     for range in [
       expand_paragraph_range(predicted.clone(), paragraph_count, 4),
       expand_paragraph_range(active, paragraph_count, 2),
@@ -138,13 +143,18 @@ impl RichTextEditor {
             // (observed on large documents with object blocks). Drop it instead so
             // the queue can drain; the paragraph renders with the chunks it has.
             flowstate_fidelity::event(flowstate_fidelity::FidelityClass::Structure, "prefetch-no-progress", || {
-              format!("paragraph {paragraph_ix} needs prefetch but chunking made no progress ({before} chunks); dropped to break the render loop")
+              format!(
+                "paragraph {paragraph_ix} needs prefetch but chunking made no progress ({before} chunks); dropped to break the render loop"
+              )
             });
           }
         }
       }
       if start.elapsed() >= budget {
-        self.layout_runtime_metrics.prefetch_budget_overruns = self.layout_runtime_metrics.prefetch_budget_overruns.saturating_add(1);
+        self.layout_runtime_metrics.prefetch_budget_overruns = self
+          .layout_runtime_metrics
+          .prefetch_budget_overruns
+          .saturating_add(1);
         break;
       }
     }
@@ -156,7 +166,10 @@ impl RichTextEditor {
       // Patch, don't nuke: the loop above recorded every refined paragraph in
       // `pending_item_sizes_patch_range` (see `note_item_sizes_patch_paragraph`);
       // a full O(blocks) rebuild only runs when the patch is inapplicable.
-      if self.try_patch_item_sizes_cache(width, scroll_anchor.clone(), window, cx).is_none() {
+      if self
+        .try_patch_item_sizes_cache(width, scroll_anchor.clone(), window, cx)
+        .is_none()
+      {
         self.item_sizes_cache = None;
         let _ = self.rebuild_item_sizes_cache_with_prefetch(width, scroll_anchor, false, window, cx);
       }
@@ -236,7 +249,7 @@ impl RichTextEditor {
     self.pending_typing_prefetch_resume = true;
     let delay = self.typing_prefetch_resume_delay();
     cx.spawn(async move |editor, cx| {
-      Timer::after(delay).await;
+      cx.background_executor().timer(delay).await;
       let _ = editor.update(cx, |editor, cx| {
         editor.pending_typing_prefetch_resume = false;
         if editor.disposed {
@@ -252,5 +265,4 @@ impl RichTextEditor {
     })
     .detach();
   }
-
 }

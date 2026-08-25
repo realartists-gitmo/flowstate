@@ -1,7 +1,32 @@
 #[hotpath::measure_all]
 impl Workspace {
+  #[cfg(target_family = "wasm")]
+  fn render_content_area(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    h_resizable("workspace-content-resizable")
+      .with_state(&self.content_resizable_state)
+      .child(
+        resizable_panel()
+          .size(px(560.0))
+          .size_range(px(120.0)..Pixels::MAX)
+          .child(
+            div()
+              .size_full()
+              .min_w_0()
+              .overflow_hidden()
+              .child(self.render_document_pane(cx)),
+          ),
+      )
+      .child(
+        resizable_panel()
+          .size(SIDE_PANEL_COLLAPSED_WIDTH)
+          .size_range(SIDE_PANEL_COLLAPSED_WIDTH..SIDE_PANEL_COLLAPSED_WIDTH)
+          .flex_none()
+          .child(self.render_collapsed_side_panel("Toolkit unavailable in browser", IconName::PanelRightOpen, |_, _| {}, cx)),
+      )
+  }
+
   fn render_resizable_workspace(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-    if self.document_panels.is_empty() && self.flow_panels.is_empty() {
+    if self.document_panels.is_empty() && !self.has_flow_panels() {
       return div()
         .flex_1()
         .overflow_hidden()
@@ -36,7 +61,7 @@ impl Workspace {
         resizable_panel()
           .size(px(112.0))
           .size_range(px(56.0)..px(158.0))
-          .grow(false)
+          .flex_none()
           .child(self.render_ribbon(ribbon_height, cx)),
       )
       .child(
@@ -50,17 +75,13 @@ impl Workspace {
 
   fn render_workspace_body(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
     let panel_sizes = self.body_resizable_state.read(cx).sizes().clone();
-    let outline_width = if self.outline_collapsed {
-      SIDE_PANEL_COLLAPSED_WIDTH
-    } else {
-      px(240.0)
-    };
-    let nav_width = panel_sizes.first().copied().unwrap_or(outline_width).max(outline_width);
-    let outline_range_end = if self.outline_collapsed {
-      SIDE_PANEL_COLLAPSED_WIDTH
-    } else {
-      px(420.0)
-    };
+    let outline_width = if self.outline_collapsed { SIDE_PANEL_COLLAPSED_WIDTH } else { px(240.0) };
+    let nav_width = panel_sizes
+      .first()
+      .copied()
+      .unwrap_or(outline_width)
+      .max(outline_width);
+    let outline_range_end = if self.outline_collapsed { SIDE_PANEL_COLLAPSED_WIDTH } else { px(420.0) };
 
     h_resizable("workspace-body-resizable")
       .with_state(&self.body_resizable_state)
@@ -68,7 +89,7 @@ impl Workspace {
         resizable_panel()
           .size(outline_width)
           .size_range(outline_width..outline_range_end)
-          .grow(false)
+          .flex_none()
           .child(if self.outline_collapsed {
             self
               .render_collapsed_side_panel("Show outline", IconName::PanelLeftOpen, |workspace, cx| workspace.toggle_outline(cx), cx)
@@ -81,7 +102,13 @@ impl Workspace {
         resizable_panel()
           .size(px(860.0))
           .size_range(px(160.0)..Pixels::MAX)
-          .child(div().size_full().min_w_0().overflow_hidden().child(self.render_content_area(cx))),
+          .child(
+            div()
+              .size_full()
+              .min_w_0()
+              .overflow_hidden()
+              .child(self.render_content_area(cx)),
+          ),
       )
   }
 
@@ -98,7 +125,11 @@ impl Workspace {
       .bg(cx.theme().background)
       .child(
         Button::new("restore-ribbon-panel")
-          .icon(Icon::default().path("icons/panel-top-open.svg").text_color(cx.theme().muted_foreground))
+          .icon(
+            Icon::default()
+              .path("icons/panel-top-open.svg")
+              .text_color(cx.theme().muted_foreground),
+          )
           .xsmall()
           .ghost()
           .tooltip("Show ribbon")
@@ -131,5 +162,4 @@ impl Workspace {
           })),
       )
   }
-
 }

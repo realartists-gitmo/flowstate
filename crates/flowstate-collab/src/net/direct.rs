@@ -630,6 +630,41 @@ fn link_is_fast(connection: &Connection) -> bool {
     .is_some_and(|rtt| rtt < FAST_LINK_RTT)
 }
 
+enum PreparedWirePayload {
+  Original(Vec<u8>),
+  Shared(Arc<[u8]>),
+}
+
+impl PreparedWirePayload {
+  fn as_slice(&self) -> &[u8] {
+    match self {
+      Self::Original(bytes) => bytes,
+      Self::Shared(bytes) => bytes,
+    }
+  }
+}
+
+async fn prepare_wire_payload(payload: Vec<u8>, compressible: bool, link_is_fast: bool) -> Result<(WireCodec, PreparedWirePayload, usize)> {
+  let uncompressed_len = payload.len();
+  if !compressible || link_is_fast || payload.len() < 1024 {
+    return Ok((WireCodec::None, PreparedWirePayload::Original(payload), uncompressed_len));
+  }
+
+  tokio::task::spawn_blocking(move || {
+    let (codec, wire) = super::wire_compression::compress_for_wire(&payload, false);
+    let wire = match wire {
+      super::wire_compression::WireBytes::Borrowed(bytes) => {
+        debug_assert_eq!(bytes.len(), payload.len());
+        PreparedWirePayload::Original(payload)
+      },
+      super::wire_compression::WireBytes::Shared(bytes) => PreparedWirePayload::Shared(bytes),
+    };
+    (codec, wire, uncompressed_len)
+  })
+  .await
+  .context("collaboration wire compression task failed")
+}
+
 async fn write_response(send: &mut SendStream, outcome: ServeOutcome, compressible: bool, link_is_fast: bool) -> Result<()> {
   tracing::trace!(
     outcome = outcome.kind(),
@@ -639,21 +674,16 @@ async fn write_response(send: &mut SendStream, outcome: ServeOutcome, compressib
   match outcome {
     ServeOutcome::Header(header) => write_frame(send, &encode_frame(&header)?).await?,
     ServeOutcome::Payload(payload) => {
-      // Snapshots/updates are compressed by size (dictionary for small, long mode
-      // for big); non-CRDT payloads (assets) and fast links stream verbatim.
-      // §perf: WireBytes hands the caller the SAME Arc as the cache (or a borrow of
-      // `payload`), avoiding the 1-2 full compressed-payload memcpys the old Cow path took.
-      let (codec, wire): (WireCodec, super::wire_compression::WireBytes<'_>) = if compressible {
-        super::wire_compression::compress_for_wire(&payload, link_is_fast)
-      } else {
-        (WireCodec::None, super::wire_compression::WireBytes::Borrowed(payload.as_slice()))
-      };
+      // zstd level 19 is deliberately CPU-heavy. Keep it off this runtime's two
+      // async workers: concurrent first-time joiners must not starve gossip,
+      // commands, or the snapshot timeout that is meant to report failures.
+      let (codec, wire, uncompressed_len) = prepare_wire_payload(payload, compressible, link_is_fast).await?;
       let header = DirectResponseHeader::Ok {
         codec,
         wire_len: wire.as_slice().len() as u64,
-        uncompressed_len: payload.len() as u64,
+        uncompressed_len: uncompressed_len as u64,
       };
-      tracing::trace!(codec = ?codec, wire_bytes = wire.as_slice().len(), payload_bytes = payload.len(), "wrote collaboration direct payload for the wire");
+      tracing::trace!(codec = ?codec, wire_bytes = wire.as_slice().len(), payload_bytes = uncompressed_len, "wrote collaboration direct payload for the wire");
       write_frame(send, &encode_frame(&header)?).await?;
       write_payload(send, wire.as_slice()).await?;
     },
@@ -773,6 +803,25 @@ impl DirectRequest {
 mod tests {
   use super::*;
   use iroh::{SecretKey, endpoint::presets};
+
+  #[tokio::test(flavor = "current_thread")]
+  async fn snapshot_compression_does_not_block_network_executor() -> Result<()> {
+    let mut payload = vec![0_u8; 4 * 1024 * 1024];
+    for (index, byte) in payload.iter_mut().enumerate() {
+      *byte = ((index.wrapping_mul(31) ^ index.rotate_left(7)) & 0xff) as u8;
+    }
+
+    let compression = tokio::spawn(prepare_wire_payload(payload, true, false));
+    timeout(Duration::from_millis(100), tokio::time::sleep(Duration::from_millis(1)))
+      .await
+      .context("snapshot compression blocked the async network executor")?;
+    let (codec, wire, uncompressed_len) = compression.await??;
+
+    assert_ne!(codec, WireCodec::None);
+    assert_eq!(uncompressed_len, 4 * 1024 * 1024);
+    assert!(wire.as_slice().len() < uncompressed_len);
+    Ok(())
+  }
 
   fn asset_request() -> DirectRequest {
     DirectRequest::Asset {

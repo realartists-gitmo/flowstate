@@ -1,10 +1,10 @@
 use gpui::{
-    div, prelude::FluentBuilder, relative, AnyElement, App, ElementId, InteractiveElement as _,
-    IntoElement, ParentElement, RenderOnce, StyleRefinement, Styled, Window,
+    AnyElement, App, Background, ElementId, InteractiveElement as _, IntoElement, ParentElement,
+    RenderOnce, StyleRefinement, Styled, Window, div, prelude::FluentBuilder, relative,
 };
 use smallvec::SmallVec;
 
-use crate::{v_flex, ActiveTheme, StyledExt as _};
+use crate::{ActiveTheme, StyledExt as _, v_flex};
 
 /// The variant of the GroupBox.
 #[derive(Debug, Clone, Default, Copy, PartialEq, Eq, Hash)]
@@ -129,9 +129,9 @@ impl GroupBoxVariants for GroupBox {
 
 impl RenderOnce for GroupBox {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
-        let (bg, border, has_paddings) = match self.variant {
+        let (bg, border, has_paddings): (Option<Background>, _, _) = match self.variant {
             GroupBoxVariant::Normal => (None, None, false),
-            GroupBoxVariant::Fill => (Some(cx.theme().group_box), None, true),
+            GroupBoxVariant::Fill => (Some(cx.theme().tokens.group_box.into()), None, true),
             GroupBoxVariant::Outline => (None, Some(cx.theme().border), true),
         };
 

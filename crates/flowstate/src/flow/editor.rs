@@ -910,12 +910,12 @@ impl FlowEditor {
           editor.delete_empty_focus(window, cx);
         }
       },
-      InputEvent::PressEnter { secondary: false } => {
+      InputEvent::PressEnter { secondary: false, .. } => {
         if editor.focus_id.as_deref() == Some(id.as_str()) {
           editor.add_sibling_to_focus(1, window, cx);
         }
       },
-      InputEvent::PressEnter { secondary: true } => {
+      InputEvent::PressEnter { secondary: true, .. } => {
         if editor.focus_id.as_deref() == Some(id.as_str()) {
           editor.add_child_to_focus(window, cx);
         }

@@ -249,7 +249,7 @@ impl Render for RichTextEditor {
           .bottom_0()
           .child(
             Scrollbar::vertical(&self.scroll_handle)
-              .scrollbar_show(ScrollbarShow::Always)
+              .mode(ScrollbarShow::Always)
           ),
       )
   }

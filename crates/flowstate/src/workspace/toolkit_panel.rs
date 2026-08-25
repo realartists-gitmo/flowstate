@@ -6,7 +6,7 @@ use std::{
   time::Duration,
 };
 
-use gpui::{App, Context, IntoElement, PathPromptOptions, Pixels, Timer, Window, div, point, prelude::*, px, size};
+use gpui::{App, Context, IntoElement, PathPromptOptions, Pixels, Window, div, point, prelude::*, px, size};
 use gpui_component::{
   ActiveTheme as _, Icon, IconName, Selectable as _, Sizable,
   button::{Button, ButtonVariants},
@@ -81,7 +81,7 @@ impl Workspace {
         resizable_panel()
           .size(toolkit_width)
           .size_range(toolkit_width..toolkit_range_end)
-          .grow(false)
+          .flex_none()
           .child(if self.toolkit_collapsed {
             self
               .render_collapsed_side_panel("Show toolkit", IconName::PanelRightOpen, |workspace, cx| workspace.toggle_toolkit(cx), cx)
@@ -328,7 +328,9 @@ impl Workspace {
     self.tub_watch_polling = true;
     cx.spawn(async move |workspace, cx| {
       loop {
-        Timer::after(Duration::from_millis(900)).await;
+        cx.background_executor()
+          .timer(Duration::from_millis(900))
+          .await;
         let keep_polling = workspace
           .update(cx, |workspace, cx| {
             let Some(watcher) = &workspace.tub_watcher else {

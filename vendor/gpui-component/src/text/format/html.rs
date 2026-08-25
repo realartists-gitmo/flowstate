@@ -1,17 +1,17 @@
-extern crate markup5ever_rcdom as rcdom;
-
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
 
-use gpui::{DefiniteLength, SharedString, px, relative};
+use gpui::{DefiniteLength, Hsla, SharedString, px, relative};
 use html5ever::tendril::TendrilSink;
 use html5ever::{LocalName, ParseOpts, local_name, parse_document};
 use markup5ever_rcdom::{Node, NodeData, RcDom};
 
+use crate::text::document::ParsedDocument;
 use crate::text::node::{
-    self, ImageNode, InlineNode, LinkMark, NodeContext, Paragraph, Table, TableRow, TextMark,
+    self, BlockNode, ImageNode, InlineNode, LinkMark, NodeContext, Paragraph, Table, TableRow,
+    TextMark,
 };
 
 const BLOCK_ELEMENTS: [&str; 35] = [
@@ -53,7 +53,7 @@ const BLOCK_ELEMENTS: [&str; 35] = [
 ];
 
 /// Parse HTML into AST Node.
-pub(crate) fn parse(source: &str, cx: &mut NodeContext) -> Result<node::Node, SharedString> {
+pub(crate) fn parse(source: &str, cx: &mut NodeContext) -> Result<ParsedDocument, SharedString> {
     let opts = ParseOpts {
         ..Default::default()
     };
@@ -69,11 +69,14 @@ pub(crate) fn parse(source: &str, cx: &mut NodeContext) -> Result<node::Node, Sh
 
     let mut paragraph = Paragraph::default();
     // NOTE: The outer paragraph is not used.
-    let node: node::Node =
-        parse_node(&dom.document, &mut paragraph, cx).unwrap_or(node::Node::Unknown);
+    let node: BlockNode =
+        parse_node(&dom.document, &mut paragraph, cx).unwrap_or(BlockNode::Unknown);
     let node = node.compact();
 
-    Ok(node)
+    Ok(ParsedDocument {
+        source: source.to_string().into(),
+        blocks: vec![node],
+    })
 }
 
 fn cleanup_html(source: &str) -> Vec<u8> {
@@ -96,6 +99,31 @@ fn attr_value(attrs: &RefCell<Vec<html5ever::Attribute>>, name: LocalName) -> Op
             None
         }
     })
+}
+
+/// Get the highlight background color for a `<mark>` element.
+///
+/// Reads the `color` attribute first, then the `background-color` declaration
+/// from the `style` attribute. Color values are parsed by [`crate::try_parse_color`],
+/// supporting hex (`#3366ff`) and Tailwind expressions (`blue`, `blue-200`, `blue/30`).
+fn mark_color(attrs: &RefCell<Vec<html5ever::Attribute>>) -> Option<Hsla> {
+    let color_attr = attrs.borrow().iter().find_map(|attr| {
+        if &*attr.name.local == "color" {
+            Some(attr.value.to_string())
+        } else {
+            None
+        }
+    });
+
+    if let Some(value) = color_attr
+        && let Ok(color) = crate::try_parse_color(value.trim())
+    {
+        return Some(color);
+    }
+
+    style_attrs(attrs)
+        .get("background-color")
+        .and_then(|v| crate::try_parse_color(v.trim()).ok())
 }
 
 /// Get style properties to HashMap
@@ -230,95 +258,124 @@ fn trim_text(text: &str) -> String {
     out
 }
 
-fn parse_paragraph(
-    paragraph: &mut Paragraph,
-    node: &Rc<Node>,
-) -> (String, Vec<(Range<usize>, TextMark)>) {
-    let mut text = String::new();
-    let mut marks = vec![];
-
-    /// Append new_text and new_marks to text and marks.
-    fn merge_child_text(
-        text: &mut String,
-        marks: &mut Vec<(Range<usize>, TextMark)>,
-        new_text: &str,
-        new_marks: &[(Range<usize>, TextMark)],
+fn parse_paragraph(paragraph: &mut Paragraph, node: &Rc<Node>) {
+    fn push_merged(
+        paragraph: &mut Paragraph,
+        text: String,
+        marks: Vec<(Range<usize>, TextMark)>,
+        new_mark: Option<TextMark>,
     ) {
-        let offset = text.len();
-        text.push_str(new_text);
-        for (range, style) in new_marks {
-            marks.push((range.start + offset..new_text.len() + offset, style.clone()));
+        if text.is_empty() {
+            return;
         }
+        let mut node = InlineNode::new(text).marks(marks);
+        if let Some(new_mark) = new_mark {
+            let len = node.text.len();
+            if let Some(last) = node.marks.last_mut()
+                && last.0.start == 0
+                && last.0.end == len
+            {
+                last.1.merge(new_mark);
+            } else {
+                node.marks.push((0..node.text.len(), new_mark));
+            }
+        }
+        paragraph.push(node);
+    }
+
+    fn merge_children_with_mark(
+        node: &Node,
+        paragraph: &mut Paragraph,
+        new_mark: Option<TextMark>,
+    ) {
+        let mut merged_text = String::new();
+        let mut merged_marks = Vec::new();
+
+        for child in node.children.borrow().iter() {
+            let mut child_paragraph = Paragraph::default();
+            parse_paragraph(&mut child_paragraph, &child);
+
+            for node in child_paragraph.children {
+                let offset = merged_text.len();
+                merged_text.push_str(&node.text);
+                for (range, child_mark) in node.marks {
+                    merged_marks.push((range.start + offset..range.end + offset, child_mark));
+                }
+
+                if let Some(mut image) = node.image {
+                    if let Some(link_mark) = new_mark.as_ref().and_then(|mark| mark.link.clone()) {
+                        image.link = Some(link_mark);
+                    }
+
+                    push_merged(
+                        paragraph,
+                        std::mem::take(&mut merged_text),
+                        std::mem::take(&mut merged_marks),
+                        new_mark.clone(),
+                    );
+
+                    paragraph.push(InlineNode::image(image));
+                }
+            }
+        }
+
+        push_merged(paragraph, merged_text, merged_marks, new_mark.clone());
     }
 
     match &node.data {
         NodeData::Text { contents } => {
             let part = &contents.borrow();
-            text.push_str(&part);
-            paragraph.push_str(&text);
+            paragraph.push_str(&part);
         }
         NodeData::Element { name, attrs, .. } => match name.local {
             local_name!("em") | local_name!("i") => {
-                let mut child_paragraph = Paragraph::default();
-                for child in node.children.borrow().iter() {
-                    let (child_text, child_marks) = parse_paragraph(&mut child_paragraph, &child);
-                    merge_child_text(&mut text, &mut marks, &child_text, &child_marks);
-                }
-                marks.push((0..text.len(), TextMark::default().italic()));
-                paragraph.push(InlineNode::new(&text).marks(marks.clone()));
+                merge_children_with_mark(node, paragraph, Some(TextMark::default().italic()));
             }
             local_name!("strong") | local_name!("b") => {
-                let mut child_paragraph = Paragraph::default();
-                for child in node.children.borrow().iter() {
-                    let (child_text, child_marks) = parse_paragraph(&mut child_paragraph, &child);
-                    merge_child_text(&mut text, &mut marks, &child_text, &child_marks);
-                }
-                marks.push((0..text.len(), TextMark::default().bold()));
-                paragraph.push(InlineNode::new(&text).marks(marks.clone()));
+                merge_children_with_mark(node, paragraph, Some(TextMark::default().bold()));
             }
             local_name!("del") | local_name!("s") => {
-                let mut child_paragraph = Paragraph::default();
-                for child in node.children.borrow().iter() {
-                    let (child_text, child_marks) = parse_paragraph(&mut child_paragraph, &child);
-                    merge_child_text(&mut text, &mut marks, &child_text, &child_marks);
-                }
-                marks.push((0..text.len(), TextMark::default().strikethrough()));
-                paragraph.push(InlineNode::new(&text).marks(marks.clone()));
+                merge_children_with_mark(
+                    node,
+                    paragraph,
+                    Some(TextMark::default().strikethrough()),
+                );
+            }
+            local_name!("u") => {
+                merge_children_with_mark(node, paragraph, Some(TextMark::default().underline()));
             }
             local_name!("code") => {
-                let mut child_paragraph = Paragraph::default();
-                for child in node.children.borrow().iter() {
-                    let (child_text, child_marks) = parse_paragraph(&mut child_paragraph, &child);
-                    merge_child_text(&mut text, &mut marks, &child_text, &child_marks);
-                }
-                marks.push((0..text.len(), TextMark::default().code()));
-                paragraph.push(InlineNode::new(&text).marks(marks.clone()));
+                merge_children_with_mark(node, paragraph, Some(TextMark::default().code()));
+            }
+            local_name!("mark") => {
+                let color = mark_color(&attrs).unwrap_or_else(|| crate::yellow(200));
+                merge_children_with_mark(
+                    node,
+                    paragraph,
+                    Some(TextMark::default().highlight(color)),
+                );
             }
             local_name!("a") => {
-                let mut child_paragraph = Paragraph::default();
-                for child in node.children.borrow().iter() {
-                    let (child_text, child_marks) = parse_paragraph(&mut child_paragraph, &child);
-                    merge_child_text(&mut text, &mut marks, &child_text, &child_marks);
-                }
+                let link_mark = LinkMark {
+                    url: attr_value(&attrs, local_name!("href"))
+                        .unwrap_or_default()
+                        .into(),
+                    title: attr_value(&attrs, local_name!("title")).map(Into::into),
+                    ..Default::default()
+                };
 
-                marks.push((
-                    0..text.len(),
-                    TextMark::default().link(LinkMark {
-                        url: attr_value(&attrs, local_name!("href"))
-                            .unwrap_or_default()
-                            .into(),
-                        title: attr_value(&attrs, local_name!("title")).map(Into::into),
-                        ..Default::default()
-                    }),
-                ));
-                paragraph.push(InlineNode::new(&text).marks(marks.clone()));
+                merge_children_with_mark(
+                    node,
+                    paragraph,
+                    Some(TextMark::default().link(link_mark)),
+                );
             }
             local_name!("img") => {
                 let Some(src) = attr_value(attrs, local_name!("src")) else {
                     if cfg!(debug_assertions) {
                         tracing::warn!("Image node missing src attribute");
                     }
-                    return (text, marks);
+                    return;
                 };
 
                 let alt = attr_value(attrs, local_name!("alt"));
@@ -335,33 +392,20 @@ fn parse_paragraph(
                 });
             }
             _ => {
-                // All unknown tags to as text
-                let mut child_paragraph = Paragraph::default();
-                for child in node.children.borrow().iter() {
-                    let (child_text, child_marks) = parse_paragraph(&mut child_paragraph, &child);
-                    merge_child_text(&mut text, &mut marks, &child_text, &child_marks);
-                }
-                paragraph.push(InlineNode::new(&text).marks(marks.clone()));
+                merge_children_with_mark(node, paragraph, None);
             }
         },
         _ => {
-            let mut child_paragraph = Paragraph::default();
-            for child in node.children.borrow().iter() {
-                let (child_text, child_marks) = parse_paragraph(&mut child_paragraph, &child);
-                merge_child_text(&mut text, &mut marks, &child_text, &child_marks);
-            }
-            paragraph.push(InlineNode::new(&text).marks(marks.clone()));
+            merge_children_with_mark(node, paragraph, None);
         }
     }
-
-    (text, marks)
 }
 
 fn parse_node(
     node: &Rc<Node>,
     paragraph: &mut Paragraph,
     cx: &mut NodeContext,
-) -> Option<node::Node> {
+) -> Option<BlockNode> {
     match node.data {
         NodeData::Text { ref contents } => {
             let text = contents.borrow().to_string();
@@ -376,7 +420,10 @@ fn parse_node(
             ref attrs,
             ..
         } => match name.local {
-            local_name!("br") => Some(node::Node::Break { html: true }),
+            local_name!("br") => Some(BlockNode::Break {
+                html: true,
+                span: None,
+            }),
             local_name!("h1")
             | local_name!("h2")
             | local_name!("h3")
@@ -399,14 +446,18 @@ fn parse_node(
                     parse_paragraph(&mut paragraph, child);
                 }
 
-                let heading = node::Node::Heading {
+                let heading = BlockNode::Heading {
                     level,
                     children: paragraph,
+                    span: None,
                 };
                 if children.len() > 0 {
                     children.push(heading);
 
-                    Some(node::Node::Root { children })
+                    Some(BlockNode::Root {
+                        children,
+                        span: None,
+                    })
                 } else {
                     Some(heading)
                 }
@@ -437,16 +488,23 @@ fn parse_node(
                 });
 
                 if children.len() > 0 {
-                    children.push(node::Node::Paragraph(paragraph));
-                    Some(node::Node::Root { children })
+                    children.push(BlockNode::Paragraph(paragraph));
+                    Some(BlockNode::Root {
+                        children,
+                        span: None,
+                    })
                 } else {
-                    Some(node::Node::Paragraph(paragraph))
+                    Some(BlockNode::Paragraph(paragraph))
                 }
             }
             local_name!("ul") | local_name!("ol") => {
                 let ordered = name.local == local_name!("ol");
                 let children = consume_children_nodes(node, paragraph, cx);
-                Some(node::Node::List { children, ordered })
+                Some(BlockNode::List {
+                    children,
+                    ordered,
+                    span: None,
+                })
             }
             local_name!("li") => {
                 let mut children = vec![];
@@ -460,22 +518,23 @@ fn parse_node(
                     if child_paragraph.text_len() > 0 {
                         // If last child is paragraph, merge child
                         if let Some(last_child) = children.last_mut() {
-                            if let node::Node::Paragraph(last_paragraph) = last_child {
+                            if let BlockNode::Paragraph(last_paragraph) = last_child {
                                 last_paragraph.merge(child_paragraph);
                                 continue;
                             }
                         }
 
-                        children.push(node::Node::Paragraph(child_paragraph));
+                        children.push(BlockNode::Paragraph(child_paragraph));
                     }
                 }
 
                 consume_paragraph(&mut children, paragraph);
 
-                Some(node::Node::ListItem {
+                Some(BlockNode::ListItem {
                     children,
                     spread: false,
                     checked: None,
+                    span: None,
                 })
             }
             local_name!("table") => {
@@ -500,22 +559,28 @@ fn parse_node(
                 }
                 consume_paragraph(&mut children, paragraph);
 
-                let table = node::Node::Table(table);
+                let table = BlockNode::Table(table);
                 if children.len() > 0 {
                     children.push(table);
-                    Some(node::Node::Root { children })
+                    Some(BlockNode::Root {
+                        children,
+                        span: None,
+                    })
                 } else {
                     Some(table)
                 }
             }
             local_name!("blockquote") => {
                 let children = consume_children_nodes(node, paragraph, cx);
-                Some(node::Node::Blockquote { children })
+                Some(BlockNode::Blockquote {
+                    children,
+                    span: None,
+                })
             }
             local_name!("style") | local_name!("script") => None,
             _ => {
                 if BLOCK_ELEMENTS.contains(&name.local.trim()) {
-                    let mut children: Vec<node::Node> = vec![];
+                    let mut children: Vec<BlockNode> = vec![];
 
                     // Case:
                     //
@@ -535,14 +600,17 @@ fn parse_node(
                     if children.is_empty() {
                         None
                     } else {
-                        Some(node::Node::Root { children })
+                        Some(BlockNode::Root {
+                            children,
+                            span: None,
+                        })
                     }
                 } else {
                     // Others to as Inline
                     parse_paragraph(paragraph, node);
 
                     if paragraph.is_image() {
-                        Some(node::Node::Paragraph(paragraph.take()))
+                        Some(BlockNode::Paragraph(paragraph.take()))
                     } else {
                         None
                     }
@@ -551,7 +619,10 @@ fn parse_node(
         },
         NodeData::Document => {
             let children = consume_children_nodes(node, paragraph, cx);
-            Some(node::Node::Root { children })
+            Some(BlockNode::Root {
+                children,
+                span: None,
+            })
         }
         NodeData::Doctype { .. }
         | NodeData::Comment { .. }
@@ -563,7 +634,7 @@ fn consume_children_nodes(
     node: &Node,
     paragraph: &mut Paragraph,
     cx: &mut NodeContext,
-) -> Vec<node::Node> {
+) -> Vec<BlockNode> {
     let mut children = vec![];
     consume_paragraph(&mut children, paragraph);
     for child in node.children.borrow().iter() {
@@ -576,19 +647,22 @@ fn consume_children_nodes(
     children
 }
 
-fn consume_paragraph(children: &mut Vec<node::Node>, paragraph: &mut Paragraph) {
+fn consume_paragraph(children: &mut Vec<BlockNode>, paragraph: &mut Paragraph) {
     if paragraph.is_empty() {
         return;
     }
 
-    children.push(node::Node::Paragraph(paragraph.take()));
+    children.push(BlockNode::Paragraph(paragraph.take()));
 }
 
 #[cfg(test)]
 mod tests {
     use gpui::{px, relative};
 
-    use crate::text::node::{ImageNode, InlineNode, Node, NodeContext, Paragraph};
+    use crate::text::{
+        document::ParsedDocument,
+        node::{BlockNode, ImageNode, InlineNode, NodeContext, Paragraph},
+    };
 
     use super::trim_text;
 
@@ -620,6 +694,20 @@ mod tests {
     #[test]
     fn test_trim_text() {
         assert_eq!(trim_text("  \n\tHello world \t\r "), " Hello world ",);
+    }
+
+    #[test]
+    fn test_mark() {
+        let mut cx = NodeContext::default();
+
+        // `<mark>` is rendered as a highlight, kept as `==...==` in markdown.
+        let html = r#"<p>Hello <mark>world</mark></p>"#;
+        let node = super::parse(html, &mut cx).unwrap();
+        assert_eq!(node.to_markdown(), "Hello ==world==");
+
+        let html = r#"<p><mark color="blue">blue</mark> and <mark style="background-color: #336699">hex</mark></p>"#;
+        let node = super::parse(html, &mut cx).unwrap();
+        assert_eq!(node.to_markdown(), "==blue== and ==hex==");
     }
 
     #[test]
@@ -676,36 +764,42 @@ mod tests {
         let node = super::parse(html, &mut cx).unwrap();
         assert_eq!(
             node,
-            Node::Paragraph(Paragraph {
-                span: None,
-                children: vec![InlineNode::image(ImageNode {
-                    url: "https://example.com/image.png".to_string().into(),
-                    alt: Some("Example".to_string().into()),
-                    width: Some(px(100.).into()),
-                    height: Some(px(200.).into()),
-                    title: Some("Example Image".to_string().into()),
+            ParsedDocument {
+                source: html.to_string().into(),
+                blocks: vec![BlockNode::Paragraph(Paragraph {
+                    span: None,
+                    children: vec![InlineNode::image(ImageNode {
+                        url: "https://example.com/image.png".to_string().into(),
+                        alt: Some("Example".to_string().into()),
+                        width: Some(px(100.).into()),
+                        height: Some(px(200.).into()),
+                        title: Some("Example Image".to_string().into()),
+                        ..Default::default()
+                    })],
                     ..Default::default()
-                })],
-                ..Default::default()
-            })
+                })]
+            }
         );
 
         let html = r#"<img src="https://example.com/image.png" alt="Example" style="width: 80%" title="Example Image" />"#;
         let node = super::parse(html, &mut cx).unwrap();
         assert_eq!(
             node,
-            Node::Paragraph(Paragraph {
-                span: None,
-                children: vec![InlineNode::image(ImageNode {
-                    url: "https://example.com/image.png".to_string().into(),
-                    alt: Some("Example".to_string().into()),
-                    width: Some(relative(0.8)),
-                    height: None,
-                    title: Some("Example Image".to_string().into()),
+            ParsedDocument {
+                source: html.to_string().into(),
+                blocks: vec![BlockNode::Paragraph(Paragraph {
+                    span: None,
+                    children: vec![InlineNode::image(ImageNode {
+                        url: "https://example.com/image.png".to_string().into(),
+                        alt: Some("Example".to_string().into()),
+                        width: Some(relative(0.8)),
+                        height: None,
+                        title: Some("Example Image".to_string().into()),
+                        ..Default::default()
+                    })],
                     ..Default::default()
-                })],
-                ..Default::default()
-            })
+                })]
+            }
         );
     }
 }

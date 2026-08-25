@@ -2,10 +2,13 @@
 impl Workspace {
   fn render_top_bar(&mut self, _window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
     let workspace = cx.entity().downgrade();
+    #[cfg(not(target_family = "wasm"))]
     let active_collaborating = self
       .active_document_id
       .and_then(|panel_id| crate::collab::phase_for_panel(panel_id, cx))
       .is_some_and(|phase| !matches!(phase, crate::collab::SessionPhase::Detached(_)));
+    #[cfg(target_family = "wasm")]
+    let active_collaborating = false;
     TitleBar::new()
       .on_close_window(move |_, window, cx| {
         let _ = workspace.update(cx, |workspace, cx| workspace.request_close_window(window, cx));
@@ -41,11 +44,18 @@ impl Workspace {
         .find(|panel| panel.read(cx).id() == active_id)
         .map(|panel| panel.read(cx).ribbon().into_any_element())
         .or_else(|| {
-          self
-            .flow_panels
-            .iter()
-            .find(|panel| panel.read(cx).id() == active_id)
-            .map(|panel| panel.read(cx).ribbon().into_any_element())
+          #[cfg(not(target_family = "wasm"))]
+          {
+            self
+              .flow_panels
+              .iter()
+              .find(|panel| panel.read(cx).id() == active_id)
+              .map(|panel| panel.read(cx).ribbon().into_any_element())
+          }
+          #[cfg(target_family = "wasm")]
+          {
+            None
+          }
         })
     });
     let show_placeholder = active_ribbon.is_none();
@@ -72,7 +82,9 @@ impl Workspace {
               ribbon.set_height(ribbon_height, cx);
               ribbon.set_workspace_context(workspace, panel_id, speech_active, speech_send_enabled, cx);
             });
-          } else if let Some(panel) = self
+          }
+          #[cfg(not(target_family = "wasm"))]
+          if let Some(panel) = self
             .flow_panels
             .iter()
             .find(|panel| panel.read(cx).id() == active_id)

@@ -1,5 +1,6 @@
 #[hotpath::measure_all]
 impl Workspace {
+  #[cfg(not(target_family = "wasm"))]
   fn next_untitled_title(&self, cx: &App) -> String {
     let used = self
       .document_panels
@@ -13,6 +14,7 @@ impl Workspace {
     format!("Untitled{index}.db8")
   }
 
+  #[cfg(not(target_family = "wasm"))]
   fn next_untitled_flow_title(&self, cx: &App) -> String {
     let used = self
       .flow_panels
@@ -232,6 +234,7 @@ impl Workspace {
   }
 
   fn render_status_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    #[cfg(not(target_family = "wasm"))]
     self.sync_collab_notice_subscriptions(window, cx);
 
     let speech_word_count = if let (Some(document_id), Some(editor)) = (self.active_document_id, self.active_editor.as_ref()) {
@@ -268,9 +271,14 @@ impl Workspace {
             })
             .await;
           let _ = this.update(cx, |this, cx| {
-            let is_open = this.document_panels.iter().any(|panel| panel.read(cx).id() == document_id);
+            let is_open = this
+              .document_panels
+              .iter()
+              .any(|panel| panel.read(cx).id() == document_id);
             if is_open {
-              this.speech_word_count_cache.insert(document_id, (generation, count));
+              this
+                .speech_word_count_cache
+                .insert(document_id, (generation, count));
             }
             this.speech_word_count_pending.remove(&document_id);
             // Return the memo for the next recount, and prune memos of
@@ -299,13 +307,11 @@ impl Workspace {
     } else {
       None
     };
-    let zoom = self.active_editor.as_ref().map(|editor| editor.read(cx).zoom_percent());
-    let collab_phase = self
-      .active_document_id
-      .and_then(|panel_id| crate::collab::phase_for_panel(panel_id, cx));
-    let collab_roster = self
-      .active_document_id
-      .map_or_else(Vec::new, |panel_id| crate::collab::roster_for_panel(panel_id, cx));
+    let zoom = self
+      .active_editor
+      .as_ref()
+      .map(|editor| editor.read(cx).zoom_percent());
+    let collab_status = collaboration_status_element(self.active_document_id, cx);
     if let Some(percent) = zoom {
       self.sync_zoom_slider(percent, window, cx);
     }
@@ -319,19 +325,7 @@ impl Workspace {
       .border_color(cx.theme().border)
       .bg(cx.theme().background)
       .child(div().flex_1())
-      .when_some(collab_phase, |this, phase| {
-        if matches!(phase, crate::collab::SessionPhase::Detached(_)) {
-          this
-        } else {
-          this.child(
-            Button::new("collaboration-status-pill")
-              .text()
-              .compact()
-              .child(crate::collab::status::participant_group(&phase, collab_roster, cx))
-              .on_click(cx.listener(|workspace, _, window, cx| workspace.open_collaboration_dialog(window, cx))),
-          )
-        }
-      })
+      .when_some(collab_status, |this, status| this.child(status))
       .when_some(zoom, |this, percent| this.child(self.render_zoom_slider(percent, cx)))
       .when_some(speech_word_count, |this, count| {
         this.child(
@@ -345,6 +339,7 @@ impl Workspace {
       })
   }
 
+  #[cfg(not(target_family = "wasm"))]
   fn sync_collab_notice_subscriptions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
     // §perf: with no existing subscriptions and no panel in a collab session, the
     // full scan/retain is a no-op — skip building the set entirely (the common case).
@@ -377,7 +372,9 @@ impl Workspace {
       let subscription = cx.subscribe(&session, move |workspace, _, notice: &crate::collab::SessionNotice, cx| {
         let notice = notice.clone();
         if let crate::collab::SessionNotice::IncompatibleVersion(peer) = &notice
-          && !workspace.collab_incompatible_version_notices.insert(peer.clone())
+          && !workspace
+            .collab_incompatible_version_notices
+            .insert(peer.clone())
         {
           return;
         }
@@ -387,13 +384,37 @@ impl Workspace {
           tracing::warn!("showing collaboration notification failed: {error}");
         }
       });
-      self.collab_notice_subscriptions.insert(session_id, subscription);
+      self
+        .collab_notice_subscriptions
+        .insert(session_id, subscription);
     }
 
     self
       .collab_notice_subscriptions
       .retain(|session_id, _| active_sessions.contains(session_id));
   }
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn collaboration_status_element(active_document_id: Option<Uuid>, cx: &mut Context<Workspace>) -> Option<AnyElement> {
+  let phase = active_document_id.and_then(|panel_id| crate::collab::phase_for_panel(panel_id, cx))?;
+  if matches!(phase, crate::collab::SessionPhase::Detached(_)) {
+    return None;
+  }
+  let roster = active_document_id.map_or_else(Vec::new, |panel_id| crate::collab::roster_for_panel(panel_id, cx));
+  Some(
+    Button::new("collaboration-status-pill")
+      .text()
+      .compact()
+      .child(crate::collab::status::participant_group(&phase, roster, cx))
+      .on_click(cx.listener(|workspace, _, window, cx| workspace.open_collaboration_dialog(window, cx)))
+      .into_any_element(),
+  )
+}
+
+#[cfg(target_family = "wasm")]
+fn collaboration_status_element(_active_document_id: Option<Uuid>, _cx: &mut Context<Workspace>) -> Option<AnyElement> {
+  None
 }
 
 // §A10.6 — status-bar speech word count.
@@ -436,8 +457,7 @@ fn paragraph_shape_stamp(paragraph: &flowstate_document::Paragraph) -> u64 {
 /// `(total, recounted_paragraphs)`; the second element backs the
 /// incrementality tripwire in tests.
 fn speech_word_count_incremental(document: &DocumentProjection, cache: &mut SpeechWordCountParagraphCache) -> (usize, usize) {
-  let mut fresh: SpeechWordCountParagraphCache =
-    FxHashMap::with_capacity_and_hasher(document.paragraphs.len(), rustc_hash::FxBuildHasher);
+  let mut fresh: SpeechWordCountParagraphCache = FxHashMap::with_capacity_and_hasher(document.paragraphs.len(), rustc_hash::FxBuildHasher);
   let mut total = 0usize;
   let mut recounted = 0usize;
   for (paragraph_ix, paragraph) in document.paragraphs.iter().enumerate() {
@@ -594,7 +614,13 @@ mod speech_word_count_tests {
   fn build_document(inputs: Vec<InputParagraph>, ids: &[u128]) -> DocumentProjection {
     assert_eq!(inputs.len(), ids.len());
     let mut document = document_from_input(flowstate_document_theme(), inputs);
-    document.ids.paragraph_ids = Arc::new(ids.iter().copied().map(flowstate_document::ParagraphId).collect());
+    document.ids.paragraph_ids = Arc::new(
+      ids
+        .iter()
+        .copied()
+        .map(flowstate_document::ParagraphId)
+        .collect(),
+    );
     document
   }
 
@@ -637,7 +663,10 @@ mod speech_word_count_tests {
     // Cold count == the oracle, every paragraph recounted.
     let (initial, recounted) = speech_word_count_incremental(&base, &mut cache);
     assert_eq!(initial, speech_word_count_reference(&base));
-    assert_eq!(initial, 14, "fixture semantics moved: tag=6, cite-straddle=3, two-run straddle=3, filtered=2, uncounted=0");
+    assert_eq!(
+      initial, 14,
+      "fixture semantics moved: tag=6, cite-straddle=3, two-run straddle=3, filtered=2, uncounted=0"
+    );
     assert_eq!(recounted, base.paragraphs.len());
 
     // Unchanged document: everything served from the memo.
@@ -680,7 +709,10 @@ mod speech_word_count_tests {
     assert_eq!(count, speech_word_count_reference(&deleted));
     assert_eq!(count, 11);
     assert_eq!(recounted, 0, "surviving paragraphs are all memo hits");
-    assert!(!cache.contains_key(&flowstate_document::ParagraphId(2)), "deleted paragraph's memo must be evicted");
+    assert!(
+      !cache.contains_key(&flowstate_document::ParagraphId(2)),
+      "deleted paragraph's memo must be evicted"
+    );
     assert_eq!(cache.len(), deleted.paragraphs.len());
 
     // (c) Insert a paragraph: only the new one recounts.

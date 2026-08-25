@@ -4,6 +4,7 @@ use std::{
   sync::{Arc, Mutex, OnceLock},
 };
 
+#[cfg(not(target_family = "wasm"))]
 use notify::{Config as NotifyConfig, RecommendedWatcher, RecursiveMode, Watcher};
 
 type CommandKeyCache = HashMap<crate::commands::CommandId, Vec<String>>;
@@ -21,18 +22,21 @@ struct CachedAppSettings {
 // theme — ~13KB) per lookup; ribbon tooltips alone made 21k such lookups per
 // session (274MB). An Arc bump replaces all of that.
 static APP_SETTINGS_CACHE: OnceLock<Mutex<Option<Arc<CachedAppSettings>>>> = OnceLock::new();
+#[cfg(not(target_family = "wasm"))]
 static APP_SETTINGS_WATCHER: OnceLock<Mutex<Option<RecommendedWatcher>>> = OnceLock::new();
 
 fn app_settings_cache() -> &'static Mutex<Option<Arc<CachedAppSettings>>> {
   APP_SETTINGS_CACHE.get_or_init(|| Mutex::new(None))
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn invalidate_app_settings_cache() {
   if let Ok(mut cache) = app_settings_cache().lock() {
     *cache = None;
   }
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn start_app_settings_watcher(path: &std::path::Path) {
   let Some(parent) = path.parent().map(PathBuf::from) else {
     return;
@@ -106,23 +110,35 @@ pub fn load_app_settings() -> AppSettings {
 }
 
 fn load_cached_app_settings() -> Arc<CachedAppSettings> {
-  let path = settings_path();
-  start_app_settings_watcher(&path);
-
-  if let Ok(cache) = app_settings_cache().lock()
-    && let Some(cached) = cache.as_ref().filter(|cached| cached.path == path)
+  #[cfg(target_family = "wasm")]
   {
-    return Arc::clone(cached);
+    if let Ok(mut cache) = app_settings_cache().lock() {
+      return Arc::clone(cache.get_or_insert_with(|| Arc::new(cached_settings_from(AppSettings::default(), PathBuf::new()))));
+    }
+    return Arc::new(cached_settings_from(AppSettings::default(), PathBuf::new()));
   }
 
-  let settings = load_app_settings_from_path(path.clone()).unwrap_or_default();
-  let cached = Arc::new(cached_settings_from(settings, path));
-  if let Ok(mut cache) = app_settings_cache().lock() {
-    *cache = Some(Arc::clone(&cached));
+  #[cfg(not(target_family = "wasm"))]
+  {
+    let path = settings_path();
+    start_app_settings_watcher(&path);
+
+    if let Ok(cache) = app_settings_cache().lock()
+      && let Some(cached) = cache.as_ref().filter(|cached| cached.path == path)
+    {
+      return Arc::clone(cached);
+    }
+
+    let settings = load_app_settings_from_path(path.clone()).unwrap_or_default();
+    let cached = Arc::new(cached_settings_from(settings, path));
+    if let Ok(mut cache) = app_settings_cache().lock() {
+      *cache = Some(Arc::clone(&cached));
+    }
+    cached
   }
-  cached
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn load_app_settings_from_path(path: PathBuf) -> io::Result<AppSettings> {
   match fs::read_to_string(&path) {
     Ok(text) => Ok(parse_app_settings(&text).unwrap_or_default()),
@@ -131,6 +147,7 @@ fn load_app_settings_from_path(path: PathBuf) -> io::Result<AppSettings> {
   }
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn parse_app_settings(text: &str) -> Option<AppSettings> {
   toml::from_str(text).ok()
 }
@@ -181,6 +198,7 @@ pub fn load_keymap() -> crate::commands::Keymap {
   load_cached_app_settings().effective_keymap.clone()
 }
 
+#[cfg(not(target_family = "wasm"))]
 pub fn load_dropbox_collaboration() -> Option<(flowstate_collab::dropbox::DropboxCredentials, String)> {
   let settings = load_app_settings().dropbox_collaboration;
   if !settings.enabled || settings.access_token.is_empty() {
@@ -198,17 +216,21 @@ pub fn load_dropbox_collaboration() -> Option<(flowstate_collab::dropbox::Dropbo
 }
 
 pub fn load_dropbox_document_binding(path: &Path) -> Option<DropboxDocumentBinding> {
-  let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+  let canonical = comparable_path(path);
   load_app_settings()
     .dropbox_documents
     .into_iter()
-    .find(|binding| {
-      binding
-        .local_path
-        .canonicalize()
-        .unwrap_or_else(|_| binding.local_path.clone())
-        == canonical
-    })
+    .find(|binding| comparable_path(&binding.local_path) == canonical)
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn comparable_path(path: &Path) -> PathBuf {
+  path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+#[cfg(target_family = "wasm")]
+fn comparable_path(path: &Path) -> PathBuf {
+  path.to_path_buf()
 }
 
 #[hotpath::measure]
@@ -235,11 +257,13 @@ pub fn load_first_key_for_command(command: crate::commands::CommandId) -> Option
 /// via `DocIoHandle::set_author_identity` so revisions record their
 /// author and `users_by_id` is populated. Persisting is best-effort: a write
 /// failure is logged but never fatal (the id regenerates on the next launch).
+#[cfg(not(target_family = "wasm"))]
 pub fn load_local_user_identity() -> (u128, Option<String>) {
   let profile = load_local_user_profile();
   (profile.user_id, Some(profile.display_name))
 }
 
+#[cfg(not(target_family = "wasm"))]
 pub fn load_local_identity_secret() -> Option<flowstate_collab::identity::PortableIdentitySecret> {
   // Ensure first-run identity generation has happened before reading the seed.
   let _ = load_local_user_profile();
@@ -249,6 +273,7 @@ pub fn load_local_identity_secret() -> Option<flowstate_collab::identity::Portab
     .and_then(|secret| flowstate_collab::identity::PortableIdentitySecret::from_hex(secret).ok())
 }
 
+#[cfg(not(target_family = "wasm"))]
 pub fn load_local_signed_profile() -> Option<flowstate_collab::identity::SignedProfile> {
   let profile = load_local_user_profile();
   let settings = load_app_settings();
@@ -256,11 +281,7 @@ pub fn load_local_signed_profile() -> Option<flowstate_collab::identity::SignedP
     .local_identity_signing_secret
     .as_deref()
     .and_then(|secret| flowstate_collab::identity::PortableIdentitySecret::from_hex(secret).ok())?;
-  let avatar_digest = profile
-    .avatar_path
-    .as_deref()
-    .and_then(|path| fs::read(path).ok())
-    .map(|bytes| *blake3::hash(&bytes).as_bytes());
+  let avatar_digest = avatar_digest(profile.avatar_path.as_deref());
   Some(secret.sign_profile(
     settings.local_profile_sequence.max(1),
     profile.display_name,
@@ -269,9 +290,22 @@ pub fn load_local_signed_profile() -> Option<flowstate_collab::identity::SignedP
   ))
 }
 
+#[cfg(not(target_family = "wasm"))]
+fn avatar_digest(path: Option<&Path>) -> Option<[u8; 32]> {
+  path
+    .and_then(|path| fs::read(path).ok())
+    .map(|bytes| *blake3::hash(&bytes).as_bytes())
+}
+
+#[cfg(target_family = "wasm")]
+fn avatar_digest(_path: Option<&Path>) -> Option<[u8; 32]> {
+  None
+}
+
 /// Load the one active portable person profile and ensure its per-device and
 /// signing identities exist. These writes are silent metadata persistence and
 /// never mark an open document dirty.
+#[cfg(not(target_family = "wasm"))]
 pub fn load_local_user_profile() -> LocalUserProfile {
   let mut settings = load_app_settings();
   let mut changed = false;
@@ -345,10 +379,12 @@ fn os_username() -> Option<String> {
 /// enough: the contact must be safety-code verified, discovery must be active,
 /// and the document must fall inside an explicit person override or squad
 /// default without matching an exclusion.
+#[cfg(not(target_family = "wasm"))]
 pub fn standing_access_for_path(identity_key: &str, document_path: &Path) -> StandingAccess {
   standing_access_in_settings(&load_app_settings(), identity_key, document_path)
 }
 
+#[cfg(not(target_family = "wasm"))]
 pub fn trusted_identity_keys_for_path(document_path: &Path) -> Vec<iroh::PublicKey> {
   let settings = load_app_settings();
   settings
@@ -491,6 +527,7 @@ pub fn save_keymap_entries(keymap: Vec<crate::commands::KeymapEntry>) -> io::Res
   save_app_settings(settings)
 }
 
+#[cfg(not(target_family = "wasm"))]
 pub fn save_dropbox_collaboration(credentials: flowstate_collab::dropbox::DropboxCredentials, root: String, enabled: bool) -> io::Result<()> {
   let mut settings = load_app_settings();
   settings.dropbox_collaboration = DropboxCollaborationSettings {
@@ -622,16 +659,29 @@ pub fn remove_dropbox_document_binding(path: &Path) -> io::Result<bool> {
 
 #[hotpath::measure]
 pub fn save_app_settings(settings: AppSettings) -> io::Result<()> {
-  let path = settings_path();
-  start_app_settings_watcher(&path);
-  save_app_settings_to_path(&settings, path.clone())?;
-  let cached = Arc::new(cached_settings_from(settings, path));
-  if let Ok(mut cache) = app_settings_cache().lock() {
-    *cache = Some(cached);
+  #[cfg(target_family = "wasm")]
+  {
+    let cached = Arc::new(cached_settings_from(settings, PathBuf::new()));
+    if let Ok(mut cache) = app_settings_cache().lock() {
+      *cache = Some(cached);
+    }
+    return Ok(());
   }
-  Ok(())
+
+  #[cfg(not(target_family = "wasm"))]
+  {
+    let path = settings_path();
+    start_app_settings_watcher(&path);
+    save_app_settings_to_path(&settings, path.clone())?;
+    let cached = Arc::new(cached_settings_from(settings, path));
+    if let Ok(mut cache) = app_settings_cache().lock() {
+      *cache = Some(cached);
+    }
+    Ok(())
+  }
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn save_app_settings_to_path(settings: &AppSettings, path: PathBuf) -> io::Result<()> {
   if let Some(parent) = path.parent() {
     fs::create_dir_all(parent)?;
